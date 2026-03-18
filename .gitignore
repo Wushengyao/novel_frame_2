@@ -1,0 +1,4 @@
+novel_writer/output/
+novel_writer/api_keys.sh
+novel_writer/__pycache__/
+*.pyc
