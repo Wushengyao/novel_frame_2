@@ -22,10 +22,41 @@ BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "output"
 API_KEYS_PATH = BASE_DIR / "api_keys.sh"
 PROJECT_DIR_PATTERN = re.compile(r"^novel_project_")
+MOJIBAKE_HINT_CHARS = set("闆皝绌归《鍙鍦鏄鐨勪簡鍚庡墠闂閿璇浠绗锛銆鈥€")
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _looks_like_mojibake(text: str) -> bool:
+  if not text:
+    return False
+  hint_count = sum(1 for ch in text if ch in MOJIBAKE_HINT_CHARS)
+  return hint_count >= max(1, len(text) // 4)
+
+
+def _mojibake_score(text: str) -> int:
+  return sum(1 for ch in text if ch in MOJIBAKE_HINT_CHARS) + text.count("�") * 2
+
+
+def _repair_display_text(text: str) -> str:
+  if not isinstance(text, str) or not _looks_like_mojibake(text):
+    return text
+  best = text
+  best_score = _mojibake_score(text)
+  for encoding in ("gb18030", "gbk", "cp1252", "latin1"):
+    try:
+      repaired = text.encode(encoding).decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+      continue
+    if not repaired:
+      continue
+    repaired_score = _mojibake_score(repaired)
+    if repaired_score < best_score:
+      best = repaired
+      best_score = repaired_score
+  return best
 
 
 def _load_api_keys() -> dict[str, str]:
@@ -87,7 +118,7 @@ def _list_projects() -> list[dict]:
                 "dir_name": path.name,
                 "path": path,
                 "project_id": project.get("project_id", path.name),
-                "name": project.get("name", path.name),
+            "name": _repair_display_text(project.get("name", path.name)),
                 "description": project.get("description", ""),
                 "chapter_count": project.get("chapter_count", 0),
                 "updated_at": project.get("updated_at", ""),
@@ -529,6 +560,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
 
         data = load_project(str(project_path))
         project = data["project"]
+        project_name = _repair_display_text(project.get("name", project_id))
         plot_state = data["plot_state"]
         chapters = _read_chapters(project_path)
         stats = (project.get("stats") or {}).get("total", {})
@@ -542,7 +574,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         <div class="grid">
           <aside class="stack">
             <section class="panel">
-              <h2>{escape(project.get("name", project_id))}</h2>
+              <h2>{escape(project_name)}</h2>
               <p class="meta">{escape(project.get("description", ""))}</p>
               <p class="meta"><span class="pill">{escape((project.get("llm_config") or {}).get("model_provider", ""))}</span><span class="pill">{project.get("chapter_count", 0)} 章</span></p>
               <p><strong>下章目标：</strong>{escape(plot_state.get("next_chapter_goal", "") or "暂无")}</p>
@@ -614,7 +646,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
           </main>
         </div>
         """
-        self._write_html(_render_page(project.get("name", project_id), body, notice=notice, error=error))
+        self._write_html(_render_page(project_name, body, notice=notice, error=error))
 
     def _handle_chapter(self, project_id: str, chapter_slug: str, notice: str = "", error: str = "") -> None:
         project_path = _find_project(project_id)
@@ -628,6 +660,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             return
 
         project = load_json(str(project_path / "project.json"))
+        project_name = _repair_display_text(project.get("name", project_id))
         body = f"""
         <div class="stack">
           <section class="panel">
@@ -637,7 +670,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
           </section>
         </div>
         """
-        self._write_html(_render_page(f"{project.get('name', project_id)} - {chapter_file.name}", body, notice=notice, error=error))
+        self._write_html(_render_page(f"{project_name} - {chapter_file.name}", body, notice=notice, error=error))
 
     def _handle_create_project(self, form: dict[str, str]) -> None:
         api_keys = _load_api_keys()

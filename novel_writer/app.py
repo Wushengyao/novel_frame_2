@@ -22,7 +22,7 @@ from state_updater import update_plot_state
 def run_next_chapter(project_path: str, config: dict, user_request: str = ""):
     project_data = load_project(project_path)
     last_chapter = get_last_chapter_text(project_path)
-    recent_text = last_chapter[-1000:] if last_chapter else "这是小说的开篇章节，请自然展开故事。"
+    recent_text = last_chapter[-3000:] if last_chapter else "这是小说的开篇章节，请自然展开故事。"
 
     prompt = build_writer_prompt(project_data, recent_text, user_request=user_request)
     try:
