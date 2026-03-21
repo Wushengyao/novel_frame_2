@@ -6,7 +6,8 @@
 1、小说需要具备长篇潜力。
 2、现在你只需要给出小说设定，而不要写正文。""",
 	[string]$ProjectName = "极寒校园生存记",
-	[string]$ProjectDescription = "小说"
+	[string]$ProjectDescription = "小说",
+	[bool]$AutoCreateCoverAndPortraits = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -99,6 +100,21 @@ function Get-LatestProjectPath {
 	return ""
 }
 
+function Test-IllustrationConnectionFailure {
+	param([string]$Text)
+	if (-not $Text) {
+		return $false
+	}
+	return (
+		$Text -match "Failed to connect to ComfyUI" -or
+		$Text -match "actively refused" -or
+		$Text -match "Connection refused" -or
+		$Text -match "WinError 10061" -or
+		$Text -match "No connection could be made" -or
+		$Text -match "timed out"
+	)
+}
+
 if (-not $PSBoundParameters.ContainsKey("Provider")) {
 	$Provider = Prompt-OptionalValue -PromptText "Provider (gemini/grok/deepseek)" -DefaultValue $Provider
 }
@@ -166,9 +182,35 @@ try {
 	$initOutput = & $pythonExe (Join-Path $ScriptDir "app.py") init --config $tempConfig
 	$initOutput | ForEach-Object { Write-Output $_ }
 
-	$projectPath = Get-LatestProjectPath -OutputRoot $outputRoot
+	$projectPath = ""
+	foreach ($line in $initOutput) {
+		$lineText = "$line"
+		if ($lineText -match '^项目已初始化:\s+(.+)$') {
+			$projectPath = $matches[1].Trim()
+		}
+	}
+	if (-not $projectPath) {
+		$projectPath = Get-LatestProjectPath -OutputRoot $outputRoot
+	}
 	if (-not $projectPath) {
 		throw "Unable to detect initialized project path under output directory."
+	}
+
+	if ($AutoCreateCoverAndPortraits) {
+		Write-Output "正在尝试自动创建小说封面和人物立绘..."
+		$assetOutput = & $pythonExe (Join-Path $ScriptDir "app.py") illustrate-assets --project $projectPath 2>&1
+		$assetExitCode = $LASTEXITCODE
+		$assetOutput | ForEach-Object { Write-Output $_ }
+
+		if ($assetExitCode -ne 0) {
+			$assetText = ($assetOutput | ForEach-Object { "$_" }) -join "`n"
+			if (Test-IllustrationConnectionFailure -Text $assetText) {
+				Write-Warning "ComfyUI 不可连接，已跳过自动创建封面和人物立绘。"
+			}
+			else {
+				throw "Cover/portrait generation failed with exit code $assetExitCode."
+			}
+		}
 	}
 
 	& $pythonExe (Join-Path $ScriptDir "app.py") status --project $projectPath

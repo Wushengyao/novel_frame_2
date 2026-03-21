@@ -10,7 +10,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from illustration_manager import illustrate_chapters
+from illustration_manager import illustrate_chapters, illustrate_project_assets
 from llm_client import generate_text_with_metadata
 from prompt_builder import build_writer_prompt
 from project_manager import (
@@ -232,6 +232,20 @@ def main() -> None:
     )
     _add_illustration_arguments(illustrate_parser)
 
+    assets_parser = subparsers.add_parser("illustrate-assets", help="Generate ComfyUI cover and character portraits")
+    assets_parser.add_argument("--project", required=True, help="Path to novel_project")
+    assets_parser.add_argument(
+        "--user-request",
+        default="",
+        help="Optional extra art direction for the cover and character portraits",
+    )
+    assets_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate cover and character portraits even if metadata already exists",
+    )
+    _add_illustration_arguments(assets_parser)
+
     status_parser = subparsers.add_parser("status", help="Show project status")
     status_parser.add_argument("--project", required=True, help="Path to novel_project")
 
@@ -290,6 +304,26 @@ def main() -> None:
             state = "复用现有插图" if result.get("reused") else "已生成插图"
             print(f"{state}: {result.get('chapter_slug', '')}")
             for image in result.get("images", []):
+                print(f"- {image.get('relative_path', '')}")
+    elif args.command == "illustrate-assets":
+        result = illustrate_project_assets(
+            args.project,
+            user_request=args.user_request,
+            force=args.force,
+            overrides=_extract_illustration_overrides(args),
+        )
+        cover = result.get("cover") or {}
+        cover_state = "复用现有封面" if cover.get("reused") else "已生成封面"
+        print(f"{cover_state}: {cover.get('asset_slug', 'cover')}")
+        for image in cover.get("images", []):
+            print(f"- {image.get('relative_path', '')}")
+
+        portraits = result.get("portraits") or []
+        print(f"本次处理人物立绘数: {len(portraits)}")
+        for portrait in portraits:
+            portrait_state = "复用现有人物立绘" if portrait.get("reused") else "已生成人物立绘"
+            print(f"{portrait_state}: {portrait.get('character_name', portrait.get('asset_slug', ''))}")
+            for image in portrait.get("images", []):
                 print(f"- {image.get('relative_path', '')}")
     elif args.command == "status":
         _print_status(args.project)

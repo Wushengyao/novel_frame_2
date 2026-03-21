@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -376,6 +377,17 @@ def _default_prompt_payload(project_data: dict, chapter_text: str, runtime_confi
     ]
     if protagonists:
         focus.append(f"{len(protagonists)} main characters")
+        focus.extend(
+            ", ".join(
+                item
+                for item in (
+                    str(character.get("name", "")).strip(),
+                    _trim_text(str(character.get("appearance", "")).replace("\n", " "), limit=150),
+                )
+                if item
+            )
+            for character in protagonists[:3]
+        )
 
     excerpt = _trim_text(chapter_text, limit=900).replace("\n", " ")
     focus.append(excerpt)
@@ -568,6 +580,201 @@ def _chapter_record_dir(project_path: str, chapter_slug: str) -> Path:
     return Path(project_path) / "illustrations" / chapter_slug
 
 
+def _asset_record_dir(project_path: str, *parts: str) -> Path:
+    return Path(project_path) / "illustrations" / Path(*parts)
+
+
+def _load_existing_record(project_path: str, metadata_path: Path) -> dict | None:
+    if not metadata_path.exists():
+        return None
+    try:
+        existing = load_json(str(metadata_path))
+    except Exception:
+        return None
+
+    images = existing.get("images") or []
+    if images and all((Path(project_path) / image.get("relative_path", "")).exists() for image in images):
+        existing["reused"] = True
+        return existing
+    return None
+
+
+def _render_illustration_images(
+    project_path: str,
+    *,
+    asset_slug: str,
+    record_dir: Path,
+    prompt_payload: dict,
+    runtime_config: dict,
+) -> tuple[str, int, list[dict]]:
+    seed = int(runtime_config.get("seed") or 0) or random.randint(1, 2**31 - 1)
+    project_id = load_json(str(Path(project_path) / "project.json")).get("project_id", Path(project_path).name)
+    filename_prefix = f"novel_writer/{project_id}/{asset_slug}"
+    workflow = _build_workflow(
+        checkpoint=runtime_config["checkpoint"],
+        positive_prompt=prompt_payload["positive_prompt"],
+        negative_prompt=prompt_payload["negative_prompt"],
+        width=int(runtime_config["width"]),
+        height=int(runtime_config["height"]),
+        steps=int(runtime_config["steps"]),
+        cfg=float(runtime_config["cfg"]),
+        sampler_name=str(runtime_config["sampler_name"]),
+        scheduler=str(runtime_config["scheduler"]),
+        seed=seed,
+        filename_prefix=filename_prefix,
+    )
+
+    prompt_id = _queue_prompt(runtime_config["comfyui_api_base"], workflow)
+    history_item = _wait_for_prompt(
+        runtime_config["comfyui_api_base"],
+        prompt_id,
+        timeout=int(runtime_config["timeout"]),
+        poll_interval=float(runtime_config["poll_interval"]),
+    )
+    output_images = _collect_output_images(history_item)
+    if not output_images:
+        raise RuntimeError("ComfyUI 已完成执行，但没有返回图片输出。")
+
+    record_dir.mkdir(parents=True, exist_ok=True)
+    for old_file in record_dir.glob("image_*"):
+        old_file.unlink(missing_ok=True)
+
+    saved_images = []
+    for index, image_info in enumerate(output_images, start=1):
+        suffix = Path(str(image_info.get("filename", "image.png"))).suffix or ".png"
+        local_name = f"image_{index:02d}{suffix}"
+        local_path = record_dir / local_name
+        local_path.write_bytes(
+            _download_image(
+                runtime_config["comfyui_api_base"],
+                image_info,
+                timeout=max(30, int(runtime_config["timeout"])),
+            )
+        )
+        saved_images.append(
+            {
+                "file_name": local_name,
+                "relative_path": str(local_path.relative_to(Path(project_path))).replace("\\", "/"),
+                "source": {
+                    "filename": image_info.get("filename", ""),
+                    "subfolder": image_info.get("subfolder", ""),
+                    "type": image_info.get("type", "output"),
+                },
+            }
+        )
+
+    return prompt_id, seed, saved_images
+
+
+def _slugify_name(text: str, default: str) -> str:
+    slug = re.sub(r"[^\w\-]+", "_", str(text or "").strip(), flags=re.UNICODE).strip("_")
+    return slug or default
+
+
+def _default_cover_prompt_payload(project_data: dict, runtime_config: dict, user_request: str) -> dict:
+    project = project_data.get("project", {})
+    world = project_data.get("world", {})
+    plot_state = project_data.get("plot_state", {})
+    style = project_data.get("style", {})
+    protagonists = (project_data.get("characters", {}) or {}).get("protagonists") or []
+
+    protagonist_focus = []
+    for item in protagonists[:4]:
+        protagonist_focus.append(
+            ", ".join(
+                part
+                for part in (
+                    str(item.get("name", "")).strip(),
+                    str(item.get("role", "")).strip(),
+                    _trim_text(str(item.get("description", "")).replace("\n", " "), limit=160),
+                    _trim_text(str(item.get("appearance", "")).replace("\n", " "), limit=180),
+                )
+                if part
+            )
+        )
+
+    positive_prompt = ", ".join(
+        item
+        for item in (
+            runtime_config.get("style_preset", DEFAULT_STYLE_PRESET),
+            "light novel front cover illustration",
+            "hero key visual",
+            "single image, no text",
+            "winter survival atmosphere",
+            str(project.get("name", "")).strip(),
+            str(world.get("genre", "")).strip(),
+            str(world.get("setting", "")).strip(),
+            str(plot_state.get("current_location", "")).strip(),
+            str(style.get("tone", "")).strip(),
+            f"{len(protagonists)} main protagonists together" if protagonists else "",
+            "; ".join(item for item in protagonist_focus if item),
+            str(user_request or "").strip(),
+        )
+        if item
+    )
+    return {
+        "scene_summary": f"《{project.get('name', '小说')}》封面主视觉",
+        "positive_prompt": positive_prompt,
+        "negative_prompt": runtime_config.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT),
+        "prompt_source": "fallback",
+    }
+
+
+def _default_character_portrait_prompt_payload(
+    project_data: dict,
+    character: dict,
+    runtime_config: dict,
+    user_request: str,
+) -> dict:
+    project = project_data.get("project", {})
+    world = project_data.get("world", {})
+    style = project_data.get("style", {})
+    name = str(character.get("name", "角色")).strip() or "角色"
+    role = str(character.get("role", "")).strip()
+    description = _trim_text(str(character.get("description", "")).replace("\n", " "), limit=220)
+    appearance = _trim_text(str(character.get("appearance", "")).replace("\n", " "), limit=220)
+
+    positive_prompt = ", ".join(
+        item
+        for item in (
+            runtime_config.get("style_preset", DEFAULT_STYLE_PRESET),
+            "full body character portrait",
+            "solo",
+            "standing pose",
+            "single character",
+            "clean background with subtle environment hint",
+            "character design reference",
+            str(project.get("name", "")).strip(),
+            str(world.get("genre", "")).strip(),
+            str(world.get("setting", "")).strip(),
+            name,
+            role,
+            description,
+            appearance,
+            str(style.get("tone", "")).strip(),
+            str(user_request or "").strip(),
+        )
+        if item
+    )
+    negative_prompt = ", ".join(
+        item
+        for item in (
+            runtime_config.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT),
+            "multiple people",
+            "group shot",
+            "multiple views",
+            "split panels",
+        )
+        if item
+    )
+    return {
+        "scene_summary": f"{name} 人物立绘",
+        "positive_prompt": positive_prompt,
+        "negative_prompt": negative_prompt,
+        "prompt_source": "fallback",
+    }
+
+
 def get_illustration_record(project_path: str, chapter_slug: str) -> dict | None:
     metadata_path = _chapter_record_dir(project_path, chapter_slug) / "metadata.json"
     if not metadata_path.exists():
@@ -605,13 +812,10 @@ def illustrate_chapter(
     record_dir = _chapter_record_dir(project_path, chapter_slug)
     metadata_path = record_dir / "metadata.json"
 
-    if not force and metadata_path.exists():
-        existing = get_illustration_record(project_path, chapter_slug)
+    if not force:
+        existing = _load_existing_record(project_path, metadata_path)
         if existing:
-            images = existing.get("images") or []
-            if images and all((Path(project_path) / image.get("relative_path", "")).exists() for image in images):
-                existing["reused"] = True
-                return existing
+            return existing
 
     resolved_runtime = dict(runtime_config or _build_runtime_config(project_path))
     _persist_runtime_config(project_path, resolved_runtime)
@@ -625,61 +829,13 @@ def illustrate_chapter(
         user_request=user_request,
     )
 
-    seed = int(resolved_runtime.get("seed") or 0) or random.randint(1, 2**31 - 1)
-    project_id = load_json(str(Path(project_path) / "project.json")).get("project_id", Path(project_path).name)
-    filename_prefix = f"novel_writer/{project_id}/{chapter_slug}"
-    workflow = _build_workflow(
-        checkpoint=resolved_runtime["checkpoint"],
-        positive_prompt=prompt_payload["positive_prompt"],
-        negative_prompt=prompt_payload["negative_prompt"],
-        width=int(resolved_runtime["width"]),
-        height=int(resolved_runtime["height"]),
-        steps=int(resolved_runtime["steps"]),
-        cfg=float(resolved_runtime["cfg"]),
-        sampler_name=str(resolved_runtime["sampler_name"]),
-        scheduler=str(resolved_runtime["scheduler"]),
-        seed=seed,
-        filename_prefix=filename_prefix,
+    prompt_id, seed, saved_images = _render_illustration_images(
+        project_path,
+        asset_slug=chapter_slug,
+        record_dir=record_dir,
+        prompt_payload=prompt_payload,
+        runtime_config=resolved_runtime,
     )
-
-    prompt_id = _queue_prompt(resolved_runtime["comfyui_api_base"], workflow)
-    history_item = _wait_for_prompt(
-        resolved_runtime["comfyui_api_base"],
-        prompt_id,
-        timeout=int(resolved_runtime["timeout"]),
-        poll_interval=float(resolved_runtime["poll_interval"]),
-    )
-    output_images = _collect_output_images(history_item)
-    if not output_images:
-        raise RuntimeError("ComfyUI 已完成执行，但没有返回图片输出。")
-
-    record_dir.mkdir(parents=True, exist_ok=True)
-    for old_file in record_dir.glob("image_*"):
-        old_file.unlink(missing_ok=True)
-
-    saved_images = []
-    for index, image_info in enumerate(output_images, start=1):
-        suffix = Path(str(image_info.get("filename", "image.png"))).suffix or ".png"
-        local_name = f"image_{index:02d}{suffix}"
-        local_path = record_dir / local_name
-        local_path.write_bytes(
-            _download_image(
-                resolved_runtime["comfyui_api_base"],
-                image_info,
-                timeout=max(30, int(resolved_runtime["timeout"])),
-            )
-        )
-        saved_images.append(
-            {
-                "file_name": local_name,
-                "relative_path": str(local_path.relative_to(Path(project_path))).replace("\\", "/"),
-                "source": {
-                    "filename": image_info.get("filename", ""),
-                    "subfolder": image_info.get("subfolder", ""),
-                    "type": image_info.get("type", "output"),
-                },
-            }
-        )
 
     record = {
         "chapter_slug": chapter_slug,
@@ -733,3 +889,148 @@ def illustrate_chapters(
             )
         )
     return results
+
+
+def illustrate_cover(
+    project_path: str,
+    *,
+    user_request: str = "",
+    force: bool = False,
+    runtime_config: dict | None = None,
+) -> dict:
+    record_dir = _asset_record_dir(project_path, "cover")
+    metadata_path = record_dir / "metadata.json"
+    if not force:
+        existing = _load_existing_record(project_path, metadata_path)
+        if existing:
+            return existing
+
+    resolved_runtime = dict(runtime_config or _build_runtime_config(project_path))
+    _persist_runtime_config(project_path, resolved_runtime)
+    project_data = load_project(project_path)
+    prompt_payload = _default_cover_prompt_payload(project_data, resolved_runtime, user_request)
+    prompt_id, seed, saved_images = _render_illustration_images(
+        project_path,
+        asset_slug="cover",
+        record_dir=record_dir,
+        prompt_payload=prompt_payload,
+        runtime_config=resolved_runtime,
+    )
+
+    record = {
+        "asset_kind": "cover",
+        "asset_slug": "cover",
+        "generated_at": _utc_now(),
+        "prompt_id": prompt_id,
+        "seed": seed,
+        "scene_summary": prompt_payload.get("scene_summary", ""),
+        "positive_prompt": prompt_payload.get("positive_prompt", ""),
+        "negative_prompt": prompt_payload.get("negative_prompt", ""),
+        "prompt_source": prompt_payload.get("prompt_source", "fallback"),
+        "user_request": user_request,
+        "comfyui": {
+            "api_base": resolved_runtime.get("comfyui_api_base", ""),
+            "checkpoint": resolved_runtime.get("checkpoint", ""),
+            "width": int(resolved_runtime.get("width", 832)),
+            "height": int(resolved_runtime.get("height", 1216)),
+            "steps": int(resolved_runtime.get("steps", 28)),
+            "cfg": float(resolved_runtime.get("cfg", 6.5)),
+            "sampler_name": resolved_runtime.get("sampler_name", "euler"),
+            "scheduler": resolved_runtime.get("scheduler", "normal"),
+        },
+        "images": saved_images,
+        "reused": False,
+    }
+    save_json(str(metadata_path), record)
+    return record
+
+
+def illustrate_character_portraits(
+    project_path: str,
+    *,
+    user_request: str = "",
+    force: bool = False,
+    runtime_config: dict | None = None,
+) -> list[dict]:
+    resolved_runtime = dict(runtime_config or _build_runtime_config(project_path))
+    _persist_runtime_config(project_path, resolved_runtime)
+    project_data = load_project(project_path)
+    characters = project_data.get("characters", {}) or {}
+    portrait_targets = (characters.get("protagonists") or []) or (characters.get("supporting") or [])
+
+    results = []
+    for index, character in enumerate(portrait_targets, start=1):
+        name = str(character.get("name", "角色")).strip() or f"character_{index:02d}"
+        character_slug = f"character_{index:02d}_{_slugify_name(name, f'character_{index:02d}') }"
+        record_dir = _asset_record_dir(project_path, "characters", character_slug)
+        metadata_path = record_dir / "metadata.json"
+
+        if not force:
+            existing = _load_existing_record(project_path, metadata_path)
+            if existing:
+                results.append(existing)
+                continue
+
+        prompt_payload = _default_character_portrait_prompt_payload(project_data, character, resolved_runtime, user_request)
+        prompt_id, seed, saved_images = _render_illustration_images(
+            project_path,
+            asset_slug=f"characters/{character_slug}",
+            record_dir=record_dir,
+            prompt_payload=prompt_payload,
+            runtime_config=resolved_runtime,
+        )
+        record = {
+            "asset_kind": "character_portrait",
+            "asset_slug": character_slug,
+            "character_index": index,
+            "character_name": name,
+            "character_role": str(character.get("role", "")).strip(),
+            "generated_at": _utc_now(),
+            "prompt_id": prompt_id,
+            "seed": seed,
+            "scene_summary": prompt_payload.get("scene_summary", ""),
+            "positive_prompt": prompt_payload.get("positive_prompt", ""),
+            "negative_prompt": prompt_payload.get("negative_prompt", ""),
+            "prompt_source": prompt_payload.get("prompt_source", "fallback"),
+            "user_request": user_request,
+            "comfyui": {
+                "api_base": resolved_runtime.get("comfyui_api_base", ""),
+                "checkpoint": resolved_runtime.get("checkpoint", ""),
+                "width": int(resolved_runtime.get("width", 832)),
+                "height": int(resolved_runtime.get("height", 1216)),
+                "steps": int(resolved_runtime.get("steps", 28)),
+                "cfg": float(resolved_runtime.get("cfg", 6.5)),
+                "sampler_name": resolved_runtime.get("sampler_name", "euler"),
+                "scheduler": resolved_runtime.get("scheduler", "normal"),
+            },
+            "images": saved_images,
+            "reused": False,
+        }
+        save_json(str(metadata_path), record)
+        results.append(record)
+
+    return results
+
+
+def illustrate_project_assets(
+    project_path: str,
+    *,
+    user_request: str = "",
+    force: bool = False,
+    overrides: dict | None = None,
+) -> dict:
+    runtime_config = _build_runtime_config(project_path, overrides=overrides)
+    return {
+        "cover": illustrate_cover(
+            project_path,
+            user_request=user_request,
+            force=force,
+            runtime_config=runtime_config,
+        ),
+        "portraits": illustrate_character_portraits(
+            project_path,
+            user_request=user_request,
+            force=force,
+            runtime_config=runtime_config,
+        ),
+    }

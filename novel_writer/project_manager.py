@@ -26,6 +26,13 @@ EMPTY_CHARACTERS = {
     "supporting": [],
 }
 
+EMPTY_CHARACTER_PROFILE = {
+    "name": "",
+    "role": "",
+    "description": "",
+    "appearance": "",
+}
+
 EMPTY_PLOT_STATE = {
     "main_plot": "",
     "recent_events": [],
@@ -218,7 +225,32 @@ def _normalize_init_result(data: dict) -> dict:
     for key in INIT_SECTION_KEYS:
         value = data.get(key, {})
         normalized[key] = value if isinstance(value, dict) else {}
+    normalized["characters"] = _normalize_characters(normalized.get("characters", {}))
     return normalized
+
+
+def _normalize_character_entry(entry: dict) -> dict:
+    normalized = deepcopy(EMPTY_CHARACTER_PROFILE)
+    if isinstance(entry, dict):
+        normalized = _deep_merge(normalized, entry)
+    return {
+        key: str(normalized.get(key, "") or "").strip()
+        for key in EMPTY_CHARACTER_PROFILE
+    }
+
+
+def _normalize_characters(characters: dict) -> dict:
+    normalized = deepcopy(EMPTY_CHARACTERS)
+    if isinstance(characters, dict):
+        normalized = _deep_merge(normalized, characters)
+
+    result = deepcopy(EMPTY_CHARACTERS)
+    for group in ("protagonists", "supporting"):
+        items = normalized.get(group)
+        if not isinstance(items, list):
+            items = []
+        result[group] = [_normalize_character_entry(item) for item in items if isinstance(item, dict)]
+    return result
 
 
 def _build_seed_story_data(config: dict) -> dict:
@@ -229,7 +261,7 @@ def _build_seed_story_data(config: dict) -> dict:
     style_default = EMPTY_STYLE if use_empty_defaults else DEFAULT_STYLE
     return {
         "world": deepcopy(config.get("world", world_default)),
-        "characters": deepcopy(config.get("characters", characters_default)),
+        "characters": _normalize_characters(deepcopy(config.get("characters", characters_default))),
         "plot_state": deepcopy(config.get("plot_state", plot_state_default)),
         "style": deepcopy(config.get("style", style_default)),
     }
@@ -252,6 +284,7 @@ def _build_fallback_story_data(config: dict, seed_data: dict) -> dict:
 
     if not fallback["characters"].get("protagonists") and not fallback["characters"].get("supporting"):
         fallback["characters"] = deepcopy(EMPTY_CHARACTERS)
+    fallback["characters"] = _normalize_characters(fallback["characters"])
 
     if not any(fallback["plot_state"].values()):
         fallback["plot_state"] = {
@@ -415,7 +448,7 @@ def load_project(project_path: str) -> dict:
     return {
         "project": load_json(str(base / "project.json")),
         "world": load_json(str(base / "world.json")),
-        "characters": load_json(str(base / "characters.json")),
+        "characters": _normalize_characters(load_json(str(base / "characters.json"))),
         "plot_state": load_json(str(base / "plot_state.json")),
         "style": load_json(str(base / "style.json")),
         "chapters_path": str(base / "chapters"),
