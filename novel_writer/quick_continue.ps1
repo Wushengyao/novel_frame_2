@@ -8,6 +8,9 @@
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+	$PSNativeCommandUseErrorActionPreference = $false
+}
 
 function Prompt-OptionalValue {
 	param(

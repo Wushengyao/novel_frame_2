@@ -216,13 +216,32 @@ def build_illustration_prompt(data: dict, chapter_text: str, user_request: str =
 1. 只选择本章中最有画面感、最适合单张插图的一个瞬间
 2. 保持人物外观、气质、场景与既有设定一致
 3. 输出必须是合法 JSON
-4. `positive_prompt` 请尽量写成适合文生图模型的英文逗号分隔短语，可混合少量必要中文专名
-5. `negative_prompt` 需要简洁有效，避免文字、水印、多视角分镜、畸形肢体、低质量
-6. 不要输出解释，不要输出 Markdown
+4. `positive_prompt` 必须直接写成适合文生图模型理解的中文提示词，不能写成几个抽象关键词
+5. `positive_prompt` 需要明确包含：人物外貌、发型发色、衣着、动作、姿势、表情、视线或互动关系、场景环境、构图、景别、镜头角度、光线、材质/细节质感
+6. 人物外貌必须优先参考 characters 中的 `appearance`，不得随意改脸、改体型、改服装风格
+7. `characters` 字段中只保留“所选这个瞬间里实际出场、能被镜头看到”的角色，不要把本章其他未出现在该瞬间的人物塞进来
+8. 每个角色都要包含 `name`、`appearance`、`outfit`、`action`、`expression`
+9. `environment` 要写清前景/中景/远景或至少空间层次，以及关键道具、家具、自然或建筑环境
+10. `composition` 要写清景别、机位、构图重点
+11. `lighting` 要写清光源类型、冷暖关系、氛围
+12. `negative_prompt` 需要简洁有效，避免文字、水印、多视角分镜、畸形肢体、低质量
+13. 不要输出解释，不要输出 Markdown
 
 输出 JSON：
 {{
   "scene_summary": "",
+  "characters": [
+    {{
+      "name": "",
+      "appearance": "",
+      "outfit": "",
+      "action": "",
+      "expression": ""
+    }}
+  ],
+  "environment": "",
+  "composition": "",
+  "lighting": "",
   "positive_prompt": "",
   "negative_prompt": ""
 }}

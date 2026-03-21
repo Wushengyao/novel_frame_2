@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import os
 import random
@@ -17,15 +18,20 @@ from project_manager import load_json, load_project, save_json, update_project_s
 from prompt_builder import build_illustration_prompt
 
 
-DEFAULT_NEGATIVE_PROMPT = (
+LEGACY_DEFAULT_NEGATIVE_PROMPT = (
     "worst quality, low quality, blurry, bad anatomy, extra fingers, malformed hands, malformed face, "
     "deformed body, duplicate, multiple views, split panels, comic page, text, watermark, logo, caption, "
     "jpeg artifacts, cropped, out of frame"
 )
-DEFAULT_STYLE_PRESET = (
+DEFAULT_NEGATIVE_PROMPT = ""
+LEGACY_DEFAULT_STYLE_PRESET = (
     "masterpiece, best quality, detailed light novel illustration, cinematic composition, expressive characters, "
     "rich environmental storytelling, dramatic winter atmosphere, soft volumetric lighting"
 )
+DEFAULT_STYLE_PRESET = (
+    "clean subject separation, layered depth, expressive body language, atmospheric perspective"
+)
+DEFAULT_WORKFLOW_TEMPLATE_NAME = "image_z_image_turbo (2).json"
 PREFERRED_CHECKPOINTS = (
     "illusious/illustrij_v21.safetensors",
     "illusious/illustrij_v20.safetensors",
@@ -98,6 +104,228 @@ def _trim_text(text: str, limit: int = 2600) -> str:
         return clean
     half = max(400, limit // 2)
     return f"{clean[:half].rstrip()}\n...\n{clean[-half:].lstrip()}"
+
+
+def _compact_scene_summary(text: str, *, limit: int = 56) -> str:
+    raw = str(text or "").replace("\r", " ").replace("\n", " ").strip()
+    if not raw:
+        return ""
+    pieces = re.split(r"[。！？!?；;，,]+", raw)
+    selected = []
+    for piece in pieces:
+        clean = re.sub(r"\s+", " ", piece).strip(" ,，。；：、")
+        if clean:
+            selected.append(clean)
+        if len(selected) >= 1:
+            break
+    summary = "；".join(selected) if selected else raw
+    if len(summary) > limit:
+        summary = summary[:limit].rstrip(" ,，。；：、")
+    return summary
+
+
+def _split_paragraphs(text: str) -> list[str]:
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", raw) if part.strip()]
+    return paragraphs
+
+
+def _character_name_variants(character: dict) -> list[str]:
+    name = str(character.get("name", "")).strip()
+    if not name:
+        return []
+    variants = [name]
+    if len(name) >= 2:
+        variants.append(name[-2:])
+    return list(dict.fromkeys(item for item in variants if item))
+
+
+def _count_character_mentions(text: str, character: dict) -> int:
+    haystack = str(text or "")
+    total = 0
+    for variant in _character_name_variants(character):
+        total += haystack.count(variant)
+    return total
+
+
+def _select_scene_window(chapter_text: str, characters: list[dict], *, window_size: int = 1) -> str:
+    paragraphs = _split_paragraphs(chapter_text)
+    if not paragraphs:
+        return str(chapter_text or "").strip()
+    if len(paragraphs) <= window_size:
+        return "\n\n".join(paragraphs)
+
+    best_text = "\n\n".join(paragraphs[-window_size:])
+    best_score = -1.0
+    for start in range(len(paragraphs)):
+        window = paragraphs[start : start + window_size]
+        if not window:
+            continue
+        window_text = "\n\n".join(window)
+        mention_counts = [_count_character_mentions(window_text, character) for character in characters]
+        total_mentions = sum(mention_counts)
+        unique_mentions = sum(1 for count in mention_counts if count > 0)
+        narrative_weight = min(len(window_text), 500) / 500.0
+        recency_weight = start / max(1, len(paragraphs) - 1)
+        score = total_mentions * 10 + unique_mentions * 4 + narrative_weight + recency_weight
+        if score > best_score:
+            best_score = score
+            best_text = window_text
+    return best_text
+
+
+def _select_scene_characters(scene_text: str, chapter_text: str, characters: list[dict], *, limit: int = 3) -> list[dict]:
+    if not characters:
+        return []
+
+    scored = []
+    for index, character in enumerate(characters):
+        scene_mentions = _count_character_mentions(scene_text, character)
+        chapter_mentions = _count_character_mentions(chapter_text, character)
+        score = scene_mentions * 100 + chapter_mentions * 5 - index
+        scored.append((score, scene_mentions, chapter_mentions, character))
+
+    present = [item for item in scored if item[1] > 0]
+    if not present:
+        present = [item for item in scored if item[2] > 0]
+    if not present:
+        present = scored[:1]
+
+    present.sort(key=lambda item: (item[1], item[2], item[0]), reverse=True)
+    return [item[3] for item in present[:limit]]
+
+
+def _prompt_fragments(text: str, *, max_parts: int = 6, part_limit: int = 36) -> list[str]:
+    raw = str(text or "").replace("\r", " ").replace("\n", " ").strip()
+    if not raw:
+        return []
+
+    pieces = re.split(r"[，,。；;：:\|/]+", raw)
+    results: list[str] = []
+    seen: set[str] = set()
+    for piece in pieces:
+        clean = re.sub(r"\s+", " ", piece).strip(" .,!?:;，。；：、")
+        if not clean:
+            continue
+        if len(clean) > part_limit:
+            clean = clean[:part_limit].rstrip()
+        lowered = clean.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        results.append(clean)
+        if len(results) >= max_parts:
+            break
+    return results
+
+
+def _merge_prompt_parts(*groups: list[str] | tuple[str, ...]) -> str:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            clean = str(item or "").strip().strip(",")
+            if not clean:
+                continue
+            lowered = clean.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            merged.append(clean)
+    return ", ".join(merged)
+
+
+def _normalize_prompt_text(text: str, *, limit: int = 220) -> str:
+    clean = re.sub(r"\s+", " ", str(text or "").replace("\r", " ").replace("\n", " ")).strip(" ，。；;,.!")
+    if len(clean) > limit:
+        truncated = clean[:limit]
+        cut_candidates = [truncated.rfind(sep) for sep in ("。", "；", "，", ",", " ")]
+        cut_at = max(cut_candidates)
+        if cut_at >= max(24, limit // 3):
+            truncated = truncated[:cut_at]
+        clean = truncated.rstrip(" ，。；;,.!")
+    return clean
+
+
+def _character_prompt_sentence(character: dict, *, action: str = "", expression: str = "", outfit: str = "") -> str:
+    name = _normalize_prompt_text(character.get("name", ""), limit=24)
+    appearance = _normalize_prompt_text(character.get("appearance", ""), limit=220)
+    outfit_text = _normalize_prompt_text(outfit, limit=140)
+    action_text = _normalize_prompt_text(action, limit=140)
+    expression_text = _normalize_prompt_text(expression, limit=100)
+
+    clauses = []
+    if name:
+        clauses.append(name)
+    if appearance:
+        clauses.append(appearance)
+    if expression_text:
+        clauses.append(f"表情为{expression_text}")
+    if action_text:
+        clauses.append(f"动作/姿态为{action_text}")
+    if outfit_text:
+        clauses.append(f"穿着{outfit_text}")
+    return "，".join(item for item in clauses if item)
+
+
+def _compose_structured_positive_prompt(
+    *,
+    runtime_config: dict,
+    scene_summary: str,
+    characters: list[dict] | None = None,
+    environment: str = "",
+    composition: str = "",
+    lighting: str = "",
+    extra_parts: list[str] | None = None,
+) -> str:
+    style_text = _normalize_prompt_text(runtime_config.get("style_preset", DEFAULT_STYLE_PRESET), limit=180)
+    composition_text = _normalize_prompt_text(composition, limit=180)
+    lighting_text = _normalize_prompt_text(lighting, limit=180)
+    environment_text = _normalize_prompt_text(environment, limit=280)
+    scene_text = _normalize_prompt_text(_compact_scene_summary(scene_summary, limit=72), limit=72)
+
+    character_parts: list[str] = []
+    for character in characters or []:
+        if isinstance(character, dict):
+            sentence = _character_prompt_sentence(
+                character,
+                action=str(character.get("action", "") or ""),
+                expression=str(character.get("expression", "") or ""),
+                outfit=str(character.get("outfit", "") or ""),
+            )
+            if sentence:
+                character_parts.append(sentence)
+
+    long_detail_parts: list[str] = []
+    short_detail_parts: list[str] = []
+    for item in extra_parts or []:
+        raw_text = _normalize_prompt_text(item, limit=600)
+        if not raw_text:
+            continue
+        if len(raw_text) > 80:
+            long_detail_parts.append(raw_text)
+        else:
+            short_detail_parts.append(raw_text)
+
+    sections = []
+    if style_text:
+        sections.append(style_text)
+    if scene_text:
+        sections.append(f"场景主题：{scene_text}")
+    if character_parts:
+        sections.append("人物描写：" + "；".join(character_parts))
+    if composition_text:
+        sections.append(f"构图与镜头：{composition_text}")
+    if lighting_text:
+        sections.append(f"光线氛围：{lighting_text}")
+    if environment_text:
+        sections.append(f"环境描写：{environment_text}")
+    if long_detail_parts:
+        sections.append("核心画面描述：" + "；".join(long_detail_parts))
+    if short_detail_parts:
+        sections.append("补充细节：" + "，".join(short_detail_parts))
+    sections.append("画面需要清晰呈现人物皮肤质感、衣物褶皱、材质纹理、空间层次与环境细节，整体适合作为高质量文生图提示词")
+    return "。".join(section for section in sections if section)
 
 
 def _normalize_api_base(value: str) -> str:
@@ -190,6 +418,28 @@ def _resolve_comfyui_root(saved_config: dict, overrides: dict) -> Path | None:
     return None
 
 
+def _resolve_workflow_template_path(saved_config: dict, overrides: dict, comfyui_root: Path | None) -> str:
+    candidates = [
+        str(overrides.get("workflow_template", "") or "").strip(),
+        str(os.environ.get("NOVEL_COMFYUI_WORKFLOW_TEMPLATE", "") or "").strip(),
+    ]
+
+    if comfyui_root is not None:
+        candidates.append(str(comfyui_root.parent / "workflow" / DEFAULT_WORKFLOW_TEMPLATE_NAME))
+
+    workspace_root = Path(__file__).resolve().parent.parent.parent
+    candidates.append(str(workspace_root / "ComfyUI_cu128_50XX" / "workflow" / DEFAULT_WORKFLOW_TEMPLATE_NAME))
+    candidates.append(str(saved_config.get("workflow_template", "") or "").strip())
+
+    for raw in candidates:
+        if not raw:
+            continue
+        candidate = Path(raw).expanduser()
+        if candidate.exists() and candidate.is_file():
+            return str(candidate.resolve())
+    return ""
+
+
 def _relative_checkpoint_name(checkpoint_path: Path, checkpoints_dir: Path) -> str:
     relative = checkpoint_path.resolve().relative_to(checkpoints_dir.resolve())
     return _normalize_checkpoint_name(str(relative))
@@ -233,12 +483,49 @@ def _resolve_checkpoint(saved_config: dict, overrides: dict, comfyui_root: Path 
     return _find_default_checkpoint(comfyui_root)
 
 
+def _extract_workflow_template_defaults(template_path: str) -> dict[str, Any]:
+    if not template_path:
+        return {}
+    try:
+        workflow = load_json(template_path)
+    except Exception:
+        return {}
+
+    defaults: dict[str, Any] = {}
+    latent_node = _find_first_node_by_class(workflow, "EmptySD3LatentImage") or _find_first_node_by_class(workflow, "EmptyLatentImage")
+    if latent_node is not None:
+        _, node = latent_node
+        inputs = node.get("inputs") or {}
+        defaults["width"] = inputs.get("width")
+        defaults["height"] = inputs.get("height")
+
+    sampler_node = _find_first_node_by_class(workflow, "KSampler")
+    if sampler_node is not None:
+        _, node = sampler_node
+        inputs = node.get("inputs") or {}
+        defaults["steps"] = inputs.get("steps")
+        defaults["cfg"] = inputs.get("cfg")
+        defaults["sampler_name"] = inputs.get("sampler_name")
+        defaults["scheduler"] = inputs.get("scheduler")
+    return defaults
+
+
 def _build_runtime_config(project_path: str, overrides: dict | None = None) -> dict:
     project = load_json(str(Path(project_path) / "project.json"))
     saved = project.get("illustration_config") or {}
     merged_overrides = overrides or {}
     comfyui_root = _resolve_comfyui_root(saved, merged_overrides)
+    workflow_template = _resolve_workflow_template_path(saved, merged_overrides, comfyui_root)
+    workflow_defaults = _extract_workflow_template_defaults(workflow_template)
+    saved_workflow_template = str(saved.get("workflow_template", "") or "").strip()
+    saved_matches_template = bool(workflow_template and saved_workflow_template == workflow_template)
     checkpoint = _resolve_checkpoint(saved, merged_overrides, comfyui_root)
+    saved_negative_prompt = str(saved.get("negative_prompt", "") or "").strip()
+    if saved_negative_prompt == LEGACY_DEFAULT_NEGATIVE_PROMPT:
+        saved_negative_prompt = ""
+    saved_style_preset = str(saved.get("style_preset", "") or "").strip()
+    if saved_style_preset == LEGACY_DEFAULT_STYLE_PRESET:
+        saved_style_preset = ""
 
     config = {
         "comfyui_api_base": _normalize_api_base(
@@ -250,34 +537,43 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
             )
         ),
         "comfyui_root": str(comfyui_root) if comfyui_root else "",
+        "workflow_template": workflow_template,
         "checkpoint": checkpoint,
         "width": _safe_int(
-            merged_overrides.get("width") or os.environ.get("NOVEL_COMFYUI_WIDTH") or saved.get("width"),
-            832,
+            merged_overrides.get("width")
+            or os.environ.get("NOVEL_COMFYUI_WIDTH")
+            or (saved.get("width") if saved_matches_template else workflow_defaults.get("width")),
+            1280,
         ),
         "height": _safe_int(
-            merged_overrides.get("height") or os.environ.get("NOVEL_COMFYUI_HEIGHT") or saved.get("height"),
-            1216,
+            merged_overrides.get("height")
+            or os.environ.get("NOVEL_COMFYUI_HEIGHT")
+            or (saved.get("height") if saved_matches_template else workflow_defaults.get("height")),
+            1280,
         ),
         "steps": _safe_int(
-            merged_overrides.get("steps") or os.environ.get("NOVEL_COMFYUI_STEPS") or saved.get("steps"),
-            28,
+            merged_overrides.get("steps")
+            or os.environ.get("NOVEL_COMFYUI_STEPS")
+            or (saved.get("steps") if saved_matches_template else workflow_defaults.get("steps")),
+            8,
         ),
         "cfg": _safe_float(
-            merged_overrides.get("cfg") or os.environ.get("NOVEL_COMFYUI_CFG") or saved.get("cfg"),
-            6.5,
+            merged_overrides.get("cfg")
+            or os.environ.get("NOVEL_COMFYUI_CFG")
+            or (saved.get("cfg") if saved_matches_template else workflow_defaults.get("cfg")),
+            1.0,
         ),
         "sampler_name": str(
             merged_overrides.get("sampler_name")
             or os.environ.get("NOVEL_COMFYUI_SAMPLER")
-            or saved.get("sampler_name")
-            or "euler"
+            or (saved.get("sampler_name") if saved_matches_template else workflow_defaults.get("sampler_name"))
+            or "res_multistep"
         ).strip(),
         "scheduler": str(
             merged_overrides.get("scheduler")
             or os.environ.get("NOVEL_COMFYUI_SCHEDULER")
-            or saved.get("scheduler")
-            or "normal"
+            or (saved.get("scheduler") if saved_matches_template else workflow_defaults.get("scheduler"))
+            or "simple"
         ).strip(),
         "timeout": _safe_int(
             merged_overrides.get("timeout") or os.environ.get("NOVEL_COMFYUI_TIMEOUT") or saved.get("timeout"),
@@ -292,13 +588,13 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
         "negative_prompt": str(
             merged_overrides.get("negative_prompt")
             or os.environ.get("NOVEL_COMFYUI_NEGATIVE_PROMPT")
-            or saved.get("negative_prompt")
+            or saved_negative_prompt
             or DEFAULT_NEGATIVE_PROMPT
         ).strip(),
         "style_preset": str(
             merged_overrides.get("style_preset")
             or os.environ.get("NOVEL_COMFYUI_STYLE_PRESET")
-            or saved.get("style_preset")
+            or saved_style_preset
             or DEFAULT_STYLE_PRESET
         ).strip(),
         "seed": _safe_int(
@@ -307,9 +603,9 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
         ),
     }
 
-    if not config["checkpoint"]:
+    if not config["workflow_template"] and not config["checkpoint"]:
         raise RuntimeError(
-            "未找到可用的 ComfyUI checkpoint。请设置 NOVEL_COMFYUI_CHECKPOINT，或在 ComfyUI/models/checkpoints 中放入模型。"
+            "未找到可用的 ComfyUI 工作流模板或 checkpoint。请确认 workflow/image_z_image_turbo (2).json 存在，或设置 NOVEL_COMFYUI_WORKFLOW_TEMPLATE。"
         )
     return config
 
@@ -320,6 +616,7 @@ def _persist_runtime_config(project_path: str, runtime_config: dict) -> None:
     project_data["illustration_config"] = {
         "comfyui_api_base": runtime_config.get("comfyui_api_base", ""),
         "comfyui_root": runtime_config.get("comfyui_root", ""),
+        "workflow_template": runtime_config.get("workflow_template", ""),
         "checkpoint": runtime_config.get("checkpoint", ""),
         "width": int(runtime_config.get("width", 832)),
         "height": int(runtime_config.get("height", 1216)),
@@ -366,44 +663,50 @@ def _default_prompt_payload(project_data: dict, chapter_text: str, runtime_confi
     plot_state = project_data.get("plot_state", {})
     style = project_data.get("style", {})
     protagonists = (project_data.get("characters", {}) or {}).get("protagonists") or []
-
-    focus = [
-        str(project.get("name", "novel illustration")).strip(),
-        str(world.get("genre", "")).strip(),
-        str(world.get("setting", "")).strip(),
-        str(plot_state.get("current_location", "")).strip(),
-        str(style.get("tone", "")).strip(),
-        str(user_request or "").strip(),
-    ]
-    if protagonists:
-        focus.append(f"{len(protagonists)} main characters")
-        focus.extend(
-            ", ".join(
-                item
-                for item in (
-                    str(character.get("name", "")).strip(),
-                    _trim_text(str(character.get("appearance", "")).replace("\n", " "), limit=150),
-                )
-                if item
-            )
-            for character in protagonists[:3]
+    scene_text = _select_scene_window(chapter_text, protagonists)
+    present_characters = _select_scene_characters(scene_text, chapter_text, protagonists, limit=3)
+    location_text = str(plot_state.get("current_location", "")).strip() or str(world.get("setting", "")).strip()
+    characters_payload = []
+    for character in present_characters:
+        characters_payload.append(
+            {
+                "name": str(character.get("name", "")).strip(),
+                "appearance": str(character.get("appearance", "")).strip(),
+                "outfit": "符合角色设定的冬季生存穿搭，保暖且保留角色个人风格",
+                "action": "围绕当前章节关键事件展开自然互动与动作表现",
+                "expression": "符合当前剧情氛围的自然表情，情绪清晰可读",
+            }
         )
 
-    excerpt = _trim_text(chapter_text, limit=900).replace("\n", " ")
-    focus.append(excerpt)
-    focus_text = ", ".join(item for item in focus if item)
-    positive_prompt = ", ".join(
+    environment_text = ", ".join(
         item
         for item in (
-            runtime_config.get("style_preset", DEFAULT_STYLE_PRESET),
-            "light novel cover illustration",
-            "winter campus survival",
-            focus_text,
+            location_text,
+            _compact_scene_summary(scene_text, limit=96),
+            "前景、中景、远景都要有明确可视化环境信息，带出生活痕迹、道具与空间层次",
         )
         if item
     )
+    scene_summary = _compact_scene_summary(scene_text, limit=48)
+    composition_text = "中景或中近景构图，明确主体与陪体关系，镜头高度自然，画面重心清晰，人物动作完整可读"
+    lighting_text = "根据场景使用自然光或室内暖光，强调冷暖对比、体积光、皮肤与衣物的真实质感"
+
+    positive_prompt = _compose_structured_positive_prompt(
+        runtime_config=runtime_config,
+        scene_summary=scene_summary,
+        characters=characters_payload,
+        environment=environment_text,
+        composition=composition_text,
+        lighting=lighting_text,
+        extra_parts=[
+            str(project.get("name", "novel illustration")).strip(),
+            str(world.get("genre", "")).strip(),
+            _compact_scene_summary(str(style.get("tone", "")).strip(), limit=36),
+            _compact_scene_summary(str(user_request or "").strip(), limit=40),
+        ],
+    )
     return {
-        "scene_summary": _trim_text(chapter_text, limit=180),
+        "scene_summary": scene_summary,
         "positive_prompt": positive_prompt,
         "negative_prompt": runtime_config.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT),
         "prompt_source": "fallback",
@@ -429,10 +732,19 @@ def _generate_prompt_payload(
                 usage=metadata.get("usage"),
             )
             payload = _extract_json_object(response_text)
-            positive_prompt = str(payload.get("positive_prompt", "")).strip()
+            llm_positive_prompt = _normalize_prompt_text(str(payload.get("positive_prompt", "") or ""), limit=1200)
+            positive_prompt = _compose_structured_positive_prompt(
+                runtime_config=runtime_config,
+                scene_summary=str(payload.get("scene_summary", "") or "").strip() or _compact_scene_summary(chapter_text, limit=48),
+                characters=payload.get("characters") if isinstance(payload.get("characters"), list) else None,
+                environment=str(payload.get("environment", "") or "").strip(),
+                composition=str(payload.get("composition", "") or "").strip(),
+                lighting=str(payload.get("lighting", "") or "").strip(),
+                extra_parts=[llm_positive_prompt] if llm_positive_prompt else None,
+            ).strip()
             if positive_prompt:
                 return {
-                    "scene_summary": str(payload.get("scene_summary", "")).strip(),
+                    "scene_summary": _compact_scene_summary(str(payload.get("scene_summary", "")).strip() or chapter_text, limit=48),
                     "positive_prompt": positive_prompt,
                     "negative_prompt": str(payload.get("negative_prompt", "")).strip()
                     or runtime_config.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT),
@@ -517,6 +829,69 @@ def _build_workflow(
             },
         },
     }
+
+
+def _find_first_node_by_class(workflow: dict[str, Any], class_type: str) -> tuple[str, dict[str, Any]] | None:
+    for node_id, node in workflow.items():
+        if isinstance(node, dict) and node.get("class_type") == class_type:
+            return str(node_id), node
+    return None
+
+
+def _set_first_node_input(
+    workflow: dict[str, Any],
+    class_type: str,
+    input_name: str,
+    value: Any,
+    *,
+    required: bool = True,
+) -> None:
+    match = _find_first_node_by_class(workflow, class_type)
+    if match is None:
+        if required:
+            raise RuntimeError(f"ComfyUI workflow missing required node: {class_type}")
+        return
+    _, node = match
+    inputs = node.setdefault("inputs", {})
+    inputs[input_name] = value
+
+
+def _build_workflow_from_template(
+    *,
+    template_path: str,
+    positive_prompt: str,
+    negative_prompt: str,
+    width: int,
+    height: int,
+    steps: int,
+    cfg: float,
+    sampler_name: str,
+    scheduler: str,
+    seed: int,
+    filename_prefix: str,
+    checkpoint: str = "",
+) -> dict[str, Any]:
+    workflow = deepcopy(load_json(template_path))
+    _set_first_node_input(workflow, "CLIPTextEncode", "text", positive_prompt)
+    _set_first_node_input(workflow, "KSampler", "seed", int(seed))
+    _set_first_node_input(workflow, "KSampler", "steps", int(steps))
+    _set_first_node_input(workflow, "KSampler", "cfg", float(cfg))
+    _set_first_node_input(workflow, "KSampler", "sampler_name", sampler_name)
+    _set_first_node_input(workflow, "KSampler", "scheduler", scheduler)
+    _set_first_node_input(workflow, "SaveImage", "filename_prefix", filename_prefix)
+
+    if _find_first_node_by_class(workflow, "EmptySD3LatentImage") is not None:
+        _set_first_node_input(workflow, "EmptySD3LatentImage", "width", int(width))
+        _set_first_node_input(workflow, "EmptySD3LatentImage", "height", int(height))
+        _set_first_node_input(workflow, "EmptySD3LatentImage", "batch_size", 1, required=False)
+    else:
+        _set_first_node_input(workflow, "EmptyLatentImage", "width", int(width), required=False)
+        _set_first_node_input(workflow, "EmptyLatentImage", "height", int(height), required=False)
+        _set_first_node_input(workflow, "EmptyLatentImage", "batch_size", 1, required=False)
+
+    if _find_first_node_by_class(workflow, "CheckpointLoaderSimple") is not None:
+        _set_first_node_input(workflow, "CheckpointLoaderSimple", "ckpt_name", checkpoint, required=False)
+    return workflow
 
 
 def _queue_prompt(api_base: str, workflow: dict[str, Any]) -> str:
@@ -610,19 +985,36 @@ def _render_illustration_images(
     seed = int(runtime_config.get("seed") or 0) or random.randint(1, 2**31 - 1)
     project_id = load_json(str(Path(project_path) / "project.json")).get("project_id", Path(project_path).name)
     filename_prefix = f"novel_writer/{project_id}/{asset_slug}"
-    workflow = _build_workflow(
-        checkpoint=runtime_config["checkpoint"],
-        positive_prompt=prompt_payload["positive_prompt"],
-        negative_prompt=prompt_payload["negative_prompt"],
-        width=int(runtime_config["width"]),
-        height=int(runtime_config["height"]),
-        steps=int(runtime_config["steps"]),
-        cfg=float(runtime_config["cfg"]),
-        sampler_name=str(runtime_config["sampler_name"]),
-        scheduler=str(runtime_config["scheduler"]),
-        seed=seed,
-        filename_prefix=filename_prefix,
-    )
+    workflow_template = str(runtime_config.get("workflow_template", "") or "").strip()
+    if workflow_template:
+        workflow = _build_workflow_from_template(
+            template_path=workflow_template,
+            positive_prompt=prompt_payload["positive_prompt"],
+            negative_prompt=prompt_payload["negative_prompt"],
+            width=int(runtime_config["width"]),
+            height=int(runtime_config["height"]),
+            steps=int(runtime_config["steps"]),
+            cfg=float(runtime_config["cfg"]),
+            sampler_name=str(runtime_config["sampler_name"]),
+            scheduler=str(runtime_config["scheduler"]),
+            seed=seed,
+            filename_prefix=filename_prefix,
+            checkpoint=str(runtime_config.get("checkpoint", "") or ""),
+        )
+    else:
+        workflow = _build_workflow(
+            checkpoint=runtime_config["checkpoint"],
+            positive_prompt=prompt_payload["positive_prompt"],
+            negative_prompt=prompt_payload["negative_prompt"],
+            width=int(runtime_config["width"]),
+            height=int(runtime_config["height"]),
+            steps=int(runtime_config["steps"]),
+            cfg=float(runtime_config["cfg"]),
+            sampler_name=str(runtime_config["sampler_name"]),
+            scheduler=str(runtime_config["scheduler"]),
+            seed=seed,
+            filename_prefix=filename_prefix,
+        )
 
     prompt_id = _queue_prompt(runtime_config["comfyui_api_base"], workflow)
     history_item = _wait_for_prompt(
@@ -681,36 +1073,36 @@ def _default_cover_prompt_payload(project_data: dict, runtime_config: dict, user
     protagonist_focus = []
     for item in protagonists[:4]:
         protagonist_focus.append(
-            ", ".join(
-                part
-                for part in (
-                    str(item.get("name", "")).strip(),
-                    str(item.get("role", "")).strip(),
-                    _trim_text(str(item.get("description", "")).replace("\n", " "), limit=160),
-                    _trim_text(str(item.get("appearance", "")).replace("\n", " "), limit=180),
-                )
-                if part
-            )
+            {
+                "name": str(item.get("name", "")).strip(),
+                "appearance": str(item.get("appearance", "")).strip(),
+                "outfit": "story-consistent signature outfit",
+                "action": "posed for key visual",
+                "expression": "emotionally readable expression",
+            }
         )
 
-    positive_prompt = ", ".join(
-        item
-        for item in (
-            runtime_config.get("style_preset", DEFAULT_STYLE_PRESET),
-            "light novel front cover illustration",
-            "hero key visual",
-            "single image, no text",
-            "winter survival atmosphere",
+    positive_prompt = _compose_structured_positive_prompt(
+        runtime_config=runtime_config,
+        scene_summary=f"《{project.get('name', '小说')}》封面主视觉",
+        characters=protagonist_focus,
+        environment=", ".join(
+            item for item in (
+                str(plot_state.get("current_location", "")).strip(),
+                "winter survival campus backdrop",
+            ) if item
+        ),
+        composition="wide cover shot, centered hero composition, clear focal hierarchy",
+        lighting="dramatic natural key light, readable silhouettes, atmospheric background glow",
+        extra_parts=[
+            "light novel cover",
+            "key visual",
+            "single image no text",
             str(project.get("name", "")).strip(),
             str(world.get("genre", "")).strip(),
-            str(world.get("setting", "")).strip(),
-            str(plot_state.get("current_location", "")).strip(),
-            str(style.get("tone", "")).strip(),
-            f"{len(protagonists)} main protagonists together" if protagonists else "",
-            "; ".join(item for item in protagonist_focus if item),
-            str(user_request or "").strip(),
-        )
-        if item
+            _compact_scene_summary(str(style.get("tone", "")).strip(), limit=28),
+            _compact_scene_summary(str(user_request or "").strip(), limit=28),
+        ],
     )
     return {
         "scene_summary": f"《{project.get('name', '小说')}》封面主视觉",
@@ -731,46 +1123,41 @@ def _default_character_portrait_prompt_payload(
     style = project_data.get("style", {})
     name = str(character.get("name", "角色")).strip() or "角色"
     role = str(character.get("role", "")).strip()
-    description = _trim_text(str(character.get("description", "")).replace("\n", " "), limit=220)
-    appearance = _trim_text(str(character.get("appearance", "")).replace("\n", " "), limit=220)
-
-    positive_prompt = ", ".join(
-        item
-        for item in (
-            runtime_config.get("style_preset", DEFAULT_STYLE_PRESET),
+    positive_prompt = _compose_structured_positive_prompt(
+        runtime_config=runtime_config,
+        scene_summary=f"{name} 人物立绘",
+        characters=[
+            {
+                "name": name,
+                "appearance": str(character.get("appearance", "")).strip(),
+                "outfit": "signature outfit",
+                "action": "standing pose",
+                "expression": "clear readable expression",
+            }
+        ],
+        environment=", ".join(
+            item for item in (
+                str(world.get("setting", "")).strip(),
+                "subtle background hint",
+            ) if item
+        ),
+        composition="full body portrait, three-quarter view, clean framing, clear silhouette separation",
+        lighting="soft readable portrait lighting, gentle rim light, balanced background contrast",
+        extra_parts=[
             "full body character portrait",
-            "solo",
-            "standing pose",
+            "character sheet style",
             "single character",
-            "clean background with subtle environment hint",
-            "character design reference",
+            role,
             str(project.get("name", "")).strip(),
             str(world.get("genre", "")).strip(),
-            str(world.get("setting", "")).strip(),
-            name,
-            role,
-            description,
-            appearance,
-            str(style.get("tone", "")).strip(),
-            str(user_request or "").strip(),
-        )
-        if item
-    )
-    negative_prompt = ", ".join(
-        item
-        for item in (
-            runtime_config.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT),
-            "multiple people",
-            "group shot",
-            "multiple views",
-            "split panels",
-        )
-        if item
+            _compact_scene_summary(str(style.get("tone", "")).strip(), limit=28),
+            _compact_scene_summary(str(user_request or "").strip(), limit=28),
+        ],
     )
     return {
         "scene_summary": f"{name} 人物立绘",
         "positive_prompt": positive_prompt,
-        "negative_prompt": negative_prompt,
+        "negative_prompt": runtime_config.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT),
         "prompt_source": "fallback",
     }
 
@@ -850,6 +1237,7 @@ def illustrate_chapter(
         "user_request": user_request,
         "comfyui": {
             "api_base": resolved_runtime.get("comfyui_api_base", ""),
+            "workflow_template": resolved_runtime.get("workflow_template", ""),
             "checkpoint": resolved_runtime.get("checkpoint", ""),
             "width": int(resolved_runtime.get("width", 832)),
             "height": int(resolved_runtime.get("height", 1216)),
@@ -930,6 +1318,7 @@ def illustrate_cover(
         "user_request": user_request,
         "comfyui": {
             "api_base": resolved_runtime.get("comfyui_api_base", ""),
+            "workflow_template": resolved_runtime.get("workflow_template", ""),
             "checkpoint": resolved_runtime.get("checkpoint", ""),
             "width": int(resolved_runtime.get("width", 832)),
             "height": int(resolved_runtime.get("height", 1216)),
@@ -995,6 +1384,7 @@ def illustrate_character_portraits(
             "user_request": user_request,
             "comfyui": {
                 "api_base": resolved_runtime.get("comfyui_api_base", ""),
+                "workflow_template": resolved_runtime.get("workflow_template", ""),
                 "checkpoint": resolved_runtime.get("checkpoint", ""),
                 "width": int(resolved_runtime.get("width", 832)),
                 "height": int(resolved_runtime.get("height", 1216)),

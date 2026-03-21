@@ -38,6 +38,10 @@ def _add_illustration_arguments(parser: argparse.ArgumentParser) -> None:
         "--checkpoint",
         help="Checkpoint name for CheckpointLoaderSimple, e.g. illusious/illustrij_v21.safetensors",
     )
+    parser.add_argument(
+        "--workflow-template",
+        help="Optional ComfyUI workflow template JSON path",
+    )
     parser.add_argument("--width", type=int, help="Illustration width")
     parser.add_argument("--height", type=int, help="Illustration height")
     parser.add_argument("--steps", type=int, help="Sampling steps")
@@ -52,6 +56,7 @@ def _extract_illustration_overrides(args: argparse.Namespace) -> dict:
         "comfyui_api_base": getattr(args, "comfyui_api_base", None),
         "comfyui_root": getattr(args, "comfyui_root", None),
         "checkpoint": getattr(args, "checkpoint", None),
+        "workflow_template": getattr(args, "workflow_template", None),
         "width": getattr(args, "width", None),
         "height": getattr(args, "height", None),
         "steps": getattr(args, "steps", None),
