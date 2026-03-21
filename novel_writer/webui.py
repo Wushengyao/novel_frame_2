@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import os
 import re
 import tempfile
@@ -15,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from app import run_next_chapters
+from illustration_manager import get_illustration_record, illustrate_chapters, list_illustration_records
 from project_manager import init_project, load_json, load_project
 
 
@@ -220,6 +222,18 @@ def _read_chapters(project_path: Path) -> list[dict]:
     return chapters
 
 
+def _illustration_overrides_from_form(form: dict[str, str]) -> dict:
+    mapping = {
+        "checkpoint": (form.get("checkpoint") or "").strip(),
+        "width": (form.get("width") or "").strip(),
+        "height": (form.get("height") or "").strip(),
+        "steps": (form.get("steps") or "").strip(),
+        "cfg": (form.get("cfg") or "").strip(),
+        "comfyui_api_base": (form.get("comfyui_api_base") or "").strip(),
+    }
+    return {key: value for key, value in mapping.items() if value}
+
+
 def _render_page(title: str, body: str, notice: str = "", error: str = "") -> str:
     flash = ""
     if notice:
@@ -393,6 +407,29 @@ def _render_page(title: str, body: str, notice: str = "", error: str = "") -> st
       font-size: clamp(24px, 3vw, 34px);
     }}
     .stack > * + * {{ margin-top: 18px; }}
+    .gallery {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+    }}
+    .thumb {{
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border-radius: 16px;
+      border: 1px solid rgba(124, 91, 62, 0.15);
+      background: rgba(255,255,255,0.56);
+    }}
+    .thumb img {{
+      display: block;
+      width: 100%;
+      aspect-ratio: 3 / 4;
+      object-fit: cover;
+      border-radius: 12px;
+      border: 1px solid rgba(124, 91, 62, 0.12);
+      background: rgba(255,255,255,0.8);
+    }}
+    .muted {{ color: var(--muted); font-size: 14px; }}
     @media (max-width: 920px) {{
       .grid {{ grid-template-columns: 1fr; }}
       .two-col {{ grid-template-columns: 1fr; }}
@@ -437,6 +474,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[0] == "project" and parts[2] == "chapter":
             self._handle_chapter(parts[1], parts[3], notice=notice, error=error)
             return
+        if len(parts) == 5 and parts[0] == "project" and parts[2] == "illustration-file":
+            self._handle_illustration_file(parts[1], parts[3], parts[4])
+            return
 
         self.send_error(HTTPStatus.NOT_FOUND, "页面不存在")
 
@@ -451,6 +491,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         parts = [part for part in parsed.path.split("/") if part]
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "continue":
             self._handle_continue(parts[1], form)
+            return
+        if len(parts) == 3 and parts[0] == "project" and parts[2] == "illustrate":
+            self._handle_illustrate(parts[1], form)
             return
 
         self.send_error(HTTPStatus.NOT_FOUND, "页面不存在")
@@ -470,6 +513,15 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         data = html.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _write_file(self, file_path: Path) -> None:
+        data = file_path.read_bytes()
+        content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -564,11 +616,39 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         plot_state = data["plot_state"]
         chapters = _read_chapters(project_path)
         stats = (project.get("stats") or {}).get("total", {})
+        illustration_records = list_illustration_records(str(project_path))
 
         chapter_links = "".join(
-            f'<a href="/project/{escape(project_id)}/chapter/{escape(chapter["slug"])}">{escape(chapter["name"])}</a>'
+            f"<a href=\"/project/{escape(project_id)}/chapter/{escape(chapter['slug'])}\">{escape(chapter['name'])}</a>"
             for chapter in chapters
         ) or "<p>还没有章节。</p>"
+
+        chapter_options = ['<option value="latest">最新章节</option>'] + [
+            f"<option value=\"{escape(chapter['slug'])}\">{escape(chapter['name'])}</option>"
+            for chapter in chapters
+        ]
+
+        illustration_cards = []
+        for record in illustration_records[:6]:
+            chapter_slug = str(record.get("chapter_slug", ""))
+            images = record.get("images") or []
+            if not chapter_slug or not images:
+                continue
+            image = images[0]
+            image_url = (
+                f"/project/{urllib.parse.quote(project_id)}/illustration-file/"
+                f"{urllib.parse.quote(chapter_slug)}/{urllib.parse.quote(image.get('file_name', ''))}"
+            )
+            illustration_cards.append(
+                f"""
+                <div class="thumb">
+                  <a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}"><img src="{image_url}" alt="{escape(chapter_slug)}"></a>
+                  <div><strong>{escape(chapter_slug)}</strong></div>
+                  <div class="muted">{escape(record.get('scene_summary', '') or '已生成插图')}</div>
+                </div>
+                """
+            )
+        illustration_gallery = "".join(illustration_cards) or "<p>当前还没有章节插图。</p>"
 
         body = f"""
         <div class="grid">
@@ -626,7 +706,50 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                     <input type="text" name="api_base" placeholder="留空则沿用项目设置">
                   </label>
                 </div>
+                <label><input type="checkbox" name="illustrate_generated" value="1"> 续写完成后立即调用 ComfyUI 生成插图</label>
+                <label>插图额外要求（可选）
+                  <input type="text" name="illustration_request" placeholder="例如：突出雪夜窗景与室内暖光反差。">
+                </label>
                 <button type="submit">开始续写</button>
+              </form>
+            </section>
+            <section class="panel">
+              <h3>生成插图</h3>
+              <form method="post" action="/project/{escape(project_id)}/illustrate">
+                <label>目标章节
+                  <select name="chapter_slug">
+                    {''.join(chapter_options)}
+                  </select>
+                </label>
+                <label>插图要求（可选）
+                  <textarea name="user_request" placeholder="例如：更强调角色站位、情绪与镜头感。"></textarea>
+                </label>
+                <div class="two-col">
+                  <label>Checkpoint（可选）
+                    <input type="text" name="checkpoint" placeholder="illusious/illustrij_v21.safetensors">
+                  </label>
+                  <label>ComfyUI API（可选）
+                    <input type="text" name="comfyui_api_base" placeholder="http://127.0.0.1:8188">
+                  </label>
+                </div>
+                <div class="two-col">
+                  <label>宽度
+                    <input type="number" name="width" placeholder="832">
+                  </label>
+                  <label>高度
+                    <input type="number" name="height" placeholder="1216">
+                  </label>
+                </div>
+                <div class="two-col">
+                  <label>Steps
+                    <input type="number" name="steps" placeholder="28">
+                  </label>
+                  <label>CFG
+                    <input type="number" step="0.1" name="cfg" placeholder="6.5">
+                  </label>
+                </div>
+                <label><input type="checkbox" name="force" value="1"> 强制重绘</label>
+                <button type="submit">为章节生成插图</button>
               </form>
             </section>
             <section class="panel">
@@ -642,6 +765,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <section class="panel">
               <h2>最近一章</h2>
               <div class="chapter-view">{escape(chapters[-1]["text"]) if chapters else "还没有正文。"}</div>
+            </section>
+            <section class="panel">
+              <h2>最近插图</h2>
+              <div class="gallery">{illustration_gallery}</div>
             </section>
           </main>
         </div>
@@ -661,6 +788,25 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
 
         project = load_json(str(project_path / "project.json"))
         project_name = _repair_display_text(project.get("name", project_id))
+        illustration_record = get_illustration_record(str(project_path), chapter_slug)
+        illustration_gallery = "<p>当前还没有本章插图。</p>"
+        if illustration_record and illustration_record.get("images"):
+            cards = []
+            for image in illustration_record.get("images", []):
+                image_url = (
+                    f"/project/{urllib.parse.quote(project_id)}/illustration-file/"
+                    f"{urllib.parse.quote(chapter_slug)}/{urllib.parse.quote(image.get('file_name', ''))}"
+                )
+                cards.append(
+                    f"""
+                    <div class="thumb">
+                      <a href="{image_url}"><img src="{image_url}" alt="{escape(chapter_slug)}"></a>
+                      <div class="muted">{escape(illustration_record.get('scene_summary', '') or '章节插图')}</div>
+                    </div>
+                    """
+                )
+            illustration_gallery = "".join(cards)
+
         body = f"""
         <div class="stack">
           <section class="panel">
@@ -668,9 +814,83 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <h2>{escape(chapter_file.name)}</h2>
             <div class="chapter-view">{escape(chapter_file.read_text(encoding="utf-8"))}</div>
           </section>
+          <section class="panel">
+            <h2>本章插图</h2>
+            <div class="gallery">{illustration_gallery}</div>
+            <form method="post" action="/project/{escape(project_id)}/illustrate">
+              <input type="hidden" name="chapter_slug" value="{escape(chapter_slug)}">
+              <label>插图要求（可选）
+                <input type="text" name="user_request" placeholder="例如：强调人物表情与空间纵深。">
+              </label>
+              <div class="two-col">
+                <label>Checkpoint（可选）
+                  <input type="text" name="checkpoint" placeholder="illusious/illustrij_v21.safetensors">
+                </label>
+                <label>ComfyUI API（可选）
+                  <input type="text" name="comfyui_api_base" placeholder="http://127.0.0.1:8188">
+                </label>
+              </div>
+              <label><input type="checkbox" name="force" value="1"> 强制重绘</label>
+              <button type="submit">为本章生成插图</button>
+            </form>
+          </section>
         </div>
         """
         self._write_html(_render_page(f"{project_name} - {chapter_file.name}", body, notice=notice, error=error))
+
+    def _handle_illustration_file(self, project_id: str, chapter_slug: str, file_name: str) -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+
+        illustrations_root = (project_path / "illustrations").resolve()
+        file_path = (illustrations_root / chapter_slug / file_name).resolve()
+        if not file_path.exists() or illustrations_root not in file_path.parents:
+            self.send_error(HTTPStatus.NOT_FOUND, "插图不存在")
+            return
+        self._write_file(file_path)
+
+    def _handle_illustrate(self, project_id: str, form: dict[str, str]) -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+
+        api_keys = _load_api_keys()
+        try:
+            llm_runtime_config = None
+            try:
+                llm_runtime_config = _build_runtime_config(project_path, {}, api_keys)
+            except Exception:
+                llm_runtime_config = None
+            chapter_slug = (form.get("chapter_slug") or "latest").strip() or "latest"
+            results = illustrate_chapters(
+                str(project_path),
+                chapter_refs=[chapter_slug],
+                llm_config=llm_runtime_config,
+                user_request=(form.get("user_request") or "").strip(),
+                force=bool(form.get("force")),
+                overrides=_illustration_overrides_from_form(form),
+            )
+            result = results[0]
+            chapter_target = result.get("chapter_slug", chapter_slug)
+            state = "已复用现有插图。" if result.get("reused") else "插图生成完成。"
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "/chapter/"
+                + urllib.parse.quote(chapter_target)
+                + "?notice="
+                + urllib.parse.quote(state)
+            )
+        except Exception as exc:
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote(str(exc))
+            )
 
     def _handle_create_project(self, form: dict[str, str]) -> None:
         api_keys = _load_api_keys()
@@ -700,17 +920,28 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             if count < 1:
                 raise RuntimeError("续写章节数必须至少为 1。")
             runtime_config = _build_runtime_config(project_path, form, api_keys)
-            run_next_chapters(
+            chapter_paths = run_next_chapters(
                 str(project_path),
                 runtime_config,
                 count,
                 user_request=(form.get("user_request") or "").strip(),
             )
+            notice = f"续写完成，共生成 {count} 章。"
+            if form.get("illustrate_generated"):
+                illustration_results = illustrate_chapters(
+                    str(project_path),
+                    chapter_refs=chapter_paths,
+                    llm_config=runtime_config,
+                    user_request=(form.get("illustration_request") or "").strip(),
+                    overrides=None,
+                )
+                new_count = sum(0 if item.get("reused") else 1 for item in illustration_results)
+                notice += f" 插图处理完成（新生成 {new_count} 章插图）。"
             self._redirect(
                 "/project/"
                 + urllib.parse.quote(project_id)
                 + "?notice="
-                + urllib.parse.quote(f"续写完成，共生成 {count} 章。")
+                + urllib.parse.quote(notice)
             )
         except Exception as exc:
             self._redirect(

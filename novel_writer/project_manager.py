@@ -380,6 +380,7 @@ def init_project(config_path: str) -> str:
     project_path.mkdir(parents=True, exist_ok=True)
     (project_path / "chapters").mkdir(exist_ok=True)
     (project_path / "summaries").mkdir(exist_ok=True)
+    (project_path / "illustrations").mkdir(exist_ok=True)
 
     generated_data, init_meta = _generate_initial_story_data(config)
     world = generated_data["world"]
@@ -419,6 +420,7 @@ def load_project(project_path: str) -> dict:
         "style": load_json(str(base / "style.json")),
         "chapters_path": str(base / "chapters"),
         "summaries_path": str(base / "summaries"),
+        "illustrations_path": str(base / "illustrations"),
     }
 
 

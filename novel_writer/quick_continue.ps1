@@ -2,7 +2,8 @@
 	[string]$ProjectPath = "",
 	[int]$ChapterCount = 3,
 	[string]$UserRequest = "",
-	[string]$ProviderOverride = ""
+	[string]$ProviderOverride = "",
+	[bool]$AutoIllustrate = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -67,6 +68,21 @@ function Normalize-Provider {
 		"deepseek" { return "deepseek" }
 		default { throw "Unsupported provider: $Name (allowed: gemini / grok / deepseek)" }
 	}
+}
+
+function Test-IllustrationConnectionFailure {
+	param([string]$Text)
+	if (-not $Text) {
+		return $false
+	}
+	return (
+		$Text -match "Failed to connect to ComfyUI" -or
+		$Text -match "actively refused" -or
+		$Text -match "Connection refused" -or
+		$Text -match "WinError 10061" -or
+		$Text -match "No connection could be made" -or
+		$Text -match "timed out"
+	)
 }
 
 if (-not $PSBoundParameters.ContainsKey("ProjectPath")) {
@@ -156,8 +172,56 @@ try {
 		$nextArgs += @("--user-request", $UserRequest)
 	}
 
-	& $pythonExe @nextArgs
-	& $pythonExe (Join-Path $ScriptDir "app.py") status --project $ProjectPath
+	$nextOutput = & $pythonExe @nextArgs 2>&1
+	$nextExitCode = $LASTEXITCODE
+	$nextOutput | ForEach-Object { Write-Output $_ }
+	if ($nextExitCode -ne 0) {
+		throw "Chapter generation failed with exit code $nextExitCode."
+	}
+
+	$generatedChapterPaths = @()
+	foreach ($line in $nextOutput) {
+		$lineText = "$line"
+		if ($lineText -match '^新章节已保存:\s+(.+)$') {
+			$generatedChapterPaths += $matches[1].Trim()
+		}
+	}
+
+	if ($AutoIllustrate -and $generatedChapterPaths.Count -gt 0) {
+		Write-Output "正在尝试自动创建插图..."
+		foreach ($chapterPath in $generatedChapterPaths) {
+			$illustrateArgs = @(
+				(Join-Path $ScriptDir "app.py"),
+				"illustrate",
+				"--project", $ProjectPath,
+				"--chapter", $chapterPath,
+				"--config", $tempConfig
+			)
+
+			$illustrateOutput = & $pythonExe @illustrateArgs 2>&1
+			$illustrateExitCode = $LASTEXITCODE
+			$illustrateOutput | ForEach-Object { Write-Output $_ }
+
+			if ($illustrateExitCode -ne 0) {
+				$illustrateText = ($illustrateOutput | ForEach-Object { "$_" }) -join "`n"
+				if (Test-IllustrationConnectionFailure -Text $illustrateText) {
+					Write-Warning "ComfyUI 不可连接，已跳过自动插图创建。"
+					break
+				}
+				throw "Illustration generation failed with exit code $illustrateExitCode."
+			}
+		}
+	}
+	elseif ($AutoIllustrate) {
+		Write-Warning "未检测到新章节路径，已跳过自动插图创建。"
+	}
+
+	$statusOutput = & $pythonExe (Join-Path $ScriptDir "app.py") status --project $ProjectPath 2>&1
+	$statusExitCode = $LASTEXITCODE
+	$statusOutput | ForEach-Object { Write-Output $_ }
+	if ($statusExitCode -ne 0) {
+		throw "Status command failed with exit code $statusExitCode."
+	}
 }
 finally {
 	Remove-Item -Path $tempConfig -ErrorAction SilentlyContinue

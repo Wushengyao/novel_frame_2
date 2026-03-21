@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from illustration_manager import illustrate_chapters
 from llm_client import generate_text_with_metadata
 from prompt_builder import build_writer_prompt
 from project_manager import (
@@ -17,6 +23,44 @@ from project_manager import (
     update_project_stats,
 )
 from state_updater import update_plot_state
+
+
+def _add_illustration_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--comfyui-api-base",
+        help="ComfyUI API base URL, default http://127.0.0.1:8188",
+    )
+    parser.add_argument(
+        "--comfyui-root",
+        help="Optional ComfyUI root directory used for auto-detecting checkpoints",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        help="Checkpoint name for CheckpointLoaderSimple, e.g. illusious/illustrij_v21.safetensors",
+    )
+    parser.add_argument("--width", type=int, help="Illustration width")
+    parser.add_argument("--height", type=int, help="Illustration height")
+    parser.add_argument("--steps", type=int, help="Sampling steps")
+    parser.add_argument("--cfg", type=float, help="CFG scale")
+    parser.add_argument("--sampler-name", help="Sampler name, e.g. euler")
+    parser.add_argument("--scheduler", help="Scheduler name, e.g. normal")
+    parser.add_argument("--seed", type=int, help="Optional fixed illustration seed")
+
+
+def _extract_illustration_overrides(args: argparse.Namespace) -> dict:
+    mapping = {
+        "comfyui_api_base": getattr(args, "comfyui_api_base", None),
+        "comfyui_root": getattr(args, "comfyui_root", None),
+        "checkpoint": getattr(args, "checkpoint", None),
+        "width": getattr(args, "width", None),
+        "height": getattr(args, "height", None),
+        "steps": getattr(args, "steps", None),
+        "cfg": getattr(args, "cfg", None),
+        "sampler_name": getattr(args, "sampler_name", None),
+        "scheduler": getattr(args, "scheduler", None),
+        "seed": getattr(args, "seed", None),
+    }
+    return {key: value for key, value in mapping.items() if value not in (None, "")}
 
 
 def run_next_chapter(project_path: str, config: dict, user_request: str = ""):
@@ -143,6 +187,50 @@ def main() -> None:
         default="",
         help="Optional user preference for this batch of chapters, such as desired scenes or plot direction",
     )
+    next_parser.add_argument(
+        "--illustrate",
+        action="store_true",
+        help="Generate ComfyUI illustrations for the newly written chapters",
+    )
+    next_parser.add_argument(
+        "--illustration-request",
+        default="",
+        help="Optional extra art direction for ComfyUI illustrations",
+    )
+    next_parser.add_argument(
+        "--force-illustration",
+        action="store_true",
+        help="Regenerate illustrations even if the chapter already has images",
+    )
+    _add_illustration_arguments(next_parser)
+
+    illustrate_parser = subparsers.add_parser("illustrate", help="Generate ComfyUI illustrations for chapters")
+    illustrate_parser.add_argument("--project", required=True, help="Path to novel_project")
+    illustrate_parser.add_argument(
+        "--chapter",
+        default="latest",
+        help="Chapter slug/path to illustrate, default latest. Ignored when --all is set",
+    )
+    illustrate_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate illustrations for all chapters in the project",
+    )
+    illustrate_parser.add_argument(
+        "--config",
+        help="Optional config.json used to provide LLM credentials for prompt refinement",
+    )
+    illustrate_parser.add_argument(
+        "--user-request",
+        default="",
+        help="Optional extra art direction for the illustration prompt",
+    )
+    illustrate_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate illustrations even if metadata already exists",
+    )
+    _add_illustration_arguments(illustrate_parser)
 
     status_parser = subparsers.add_parser("status", help="Show project status")
     status_parser.add_argument("--project", required=True, help="Path to novel_project")
@@ -169,6 +257,40 @@ def main() -> None:
         print(f"本次共生成章节数: {len(chapter_paths)}")
         for chapter_path in chapter_paths:
             print(f"新章节已保存: {chapter_path}")
+        if args.illustrate:
+            illustration_results = illustrate_chapters(
+                args.project,
+                chapter_refs=chapter_paths,
+                llm_config=config,
+                user_request=args.illustration_request,
+                force=args.force_illustration,
+                overrides=_extract_illustration_overrides(args),
+            )
+            for result in illustration_results:
+                state = "复用现有插图" if result.get("reused") else "已生成插图"
+                print(f"{state}: {result.get('chapter_slug', '')}")
+                for image in result.get("images", []):
+                    print(f"- {image.get('relative_path', '')}")
+    elif args.command == "illustrate":
+        config = _extract_llm_config(args.config) if args.config else None
+        chapter_refs = [args.chapter]
+        if args.all:
+            chapters_dir = Path(args.project) / "chapters"
+            chapter_refs = [str(path) for path in sorted(chapters_dir.glob("chapter_*.md"))]
+        results = illustrate_chapters(
+            args.project,
+            chapter_refs=chapter_refs,
+            llm_config=config,
+            user_request=args.user_request,
+            force=args.force,
+            overrides=_extract_illustration_overrides(args),
+        )
+        print(f"本次处理插图章节数: {len(results)}")
+        for result in results:
+            state = "复用现有插图" if result.get("reused") else "已生成插图"
+            print(f"{state}: {result.get('chapter_slug', '')}")
+            for image in result.get("images", []):
+                print(f"- {image.get('relative_path', '')}")
     elif args.command == "status":
         _print_status(args.project)
 

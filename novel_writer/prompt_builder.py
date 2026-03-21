@@ -159,3 +159,54 @@ def build_summary_prompt(data: dict, new_text: str) -> str:
   "next_chapter_goal": ""
 }}
 """
+
+
+def build_illustration_prompt(data: dict, chapter_text: str, user_request: str = "") -> str:
+    world = _to_block(data.get("world", {}))
+    characters = _to_block(data.get("characters", {}))
+    plot_state = _to_block(data.get("plot_state", {}))
+    style = _to_block(data.get("style", {}))
+    project = _to_block(data.get("project", {}))
+    excerpt = (chapter_text or "").strip()
+    if len(excerpt) > 2600:
+        excerpt = excerpt[:1300].rstrip() + "\n...\n" + excerpt[-1300:].lstrip()
+    user_request_block = user_request.strip() or "无额外要求。"
+
+    return f"""你是一名小说插画提示词助手。请基于已有设定和本章正文，为这一章设计一张单幅插图。
+
+【项目】
+{project}
+
+【世界观】
+{world}
+
+【人物】
+{characters}
+
+【剧情状态】
+{plot_state}
+
+【文风】
+{style}
+
+【本章正文节选】
+{excerpt}
+
+【用户额外要求】
+{user_request_block}
+
+要求：
+1. 只选择本章中最有画面感、最适合单张插图的一个瞬间
+2. 保持人物外观、气质、场景与既有设定一致
+3. 输出必须是合法 JSON
+4. `positive_prompt` 请尽量写成适合文生图模型的英文逗号分隔短语，可混合少量必要中文专名
+5. `negative_prompt` 需要简洁有效，避免文字、水印、多视角分镜、畸形肢体、低质量
+6. 不要输出解释，不要输出 Markdown
+
+输出 JSON：
+{{
+  "scene_summary": "",
+  "positive_prompt": "",
+  "negative_prompt": ""
+}}
+"""

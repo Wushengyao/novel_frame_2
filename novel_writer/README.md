@@ -29,10 +29,12 @@ novel_writer/
   llm_client.py
   prompt_builder.py
   project_manager.py
+  illustration_manager.py
   state_updater.py
   webui.py
   quick_start.sh
   quick_continue.sh
+  quick_illustrate.sh
   quick_webui.sh
   api_keys.sh
   script_common.sh
@@ -51,6 +53,7 @@ output/
     style.json
     chapters/
     summaries/
+    illustrations/
 ```
 
 ## 环境要求
@@ -198,6 +201,7 @@ DEFAULT_PROVIDER_OVERRIDE=""
 - 查看当前 `plot_state`
 - 直接在网页里续写
 - 在网页里新建项目
+- 用 ComfyUI 为章节生成插图并在网页中浏览
 
 启动方式：
 
@@ -226,7 +230,47 @@ python3 webui.py --host 0.0.0.0 --port 8008
 
 然后确保服务器防火墙或安全组放行对应端口。
 
-## 5. 默认模型与可覆盖项
+## 5. ComfyUI 插图能力
+
+现在项目支持把章节正文送入 ComfyUI 生成插图：
+
+- `app.py illustrate`：为指定章节或全部章节生成插图
+- `app.py next --illustrate`：续写完后立即为本批新章节配图
+- `quick_illustrate.ps1` / `quick_illustrate.bat`：Windows 下快速给章节配图
+- Web UI 项目页与章节页都可以直接触发插图生成
+
+默认会优先自动寻找同级目录中的 ComfyUI 安装，例如：
+
+```text
+../ComfyUI_cu128_50XX/ComfyUI
+```
+
+默认会尝试从 `ComfyUI/models/checkpoints/` 中挑选合适的 checkpoint；如果自动识别失败，可通过环境变量覆盖：
+
+- `NOVEL_COMFYUI_ROOT`
+- `NOVEL_COMFYUI_API_BASE`
+- `NOVEL_COMFYUI_CHECKPOINT`
+- `NOVEL_COMFYUI_WIDTH`
+- `NOVEL_COMFYUI_HEIGHT`
+- `NOVEL_COMFYUI_STEPS`
+- `NOVEL_COMFYUI_CFG`
+- `NOVEL_COMFYUI_TIMEOUT`
+
+示例：
+
+```bash
+python3 app.py illustrate --project ./output/novel_project_xxx --chapter chapter_0001 --checkpoint illusious/illustrij_v21.safetensors
+```
+
+或在续写后自动配图：
+
+```bash
+python3 app.py next --project ./output/novel_project_xxx --config ./runtime_config.json --count 1 --illustrate
+```
+
+插图会保存到项目目录下的 `illustrations/chapter_xxxx/` 中，并生成对应的 `metadata.json` 记录提示词和生成参数。
+
+## 6. 默认模型与可覆盖项
 
 脚本会为不同 provider 自动选择默认模型：
 
