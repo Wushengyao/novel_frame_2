@@ -1,5 +1,5 @@
 ﻿Param(
-	[string]$Provider = "gemini",
+	[string]$Provider = "doubao",
 	[string]$StoryRequest = """请你以如下内容为灵感，进行小说设定：故事发生在一座高级奢华的校园中，3位主角都是学生。男主是团队力量担当，乐观；女主1号是倾国倾城的美丽少女，身材娇小纤细，团队智力担当，傲娇；女主二号同样美丽动人，善于照顾他人，温柔。小说故事聚焦于他们合作生存的过程上，从初期的保暖，到逐步确保水源和食物来源，然后再逐步提升生活水平。总体风格温馨，并加入情感升温。
 故事的开始是放假期间只有主角们在校，突然极寒天气与暴风雪来临，他们被困在学校中。一开始他们认为只是短暂的极端天气很快会有救援，所以在只是团聚在女生宿舍避寒并且做了短期规划。但是显然他们低估了极寒风暴的力量，温度持续下降，救援也不会来。他们必须转战更加保暖的地方御寒（比如桑拿房）、搜集并储备大量物资，并尝试资源再生与可持续利用，不断改善生活条件，由生存转向生活。小说应当详细描写他们协力生存的方方面面，并且包括过程中的感情升温与适量的香艳情节。
 请注意：
@@ -52,6 +52,7 @@ function Get-ApiKeys {
 		GEMINI_API_KEY = ""
 		GROK_API_KEY = ""
 		DEEPSEEK_API_KEY = ""
+		DOUBAO_API_KEY = ""
 	}
 	foreach ($name in @($keys.Keys)) {
 		$pattern = 'export\s+' + [regex]::Escape($name) + '="([^"]*)"'
@@ -69,7 +70,8 @@ function Normalize-Provider {
 		"gemini" { return "gemini" }
 		"grok" { return "grok" }
 		"deepseek" { return "deepseek" }
-		default { throw "Unsupported provider: $Name (allowed: gemini / grok / deepseek)" }
+		"doubao" { return "doubao" }
+		default { throw "Unsupported provider: $Name (allowed: gemini / grok / deepseek / doubao)" }
 	}
 }
 
@@ -77,9 +79,16 @@ function Default-ModelForProvider {
 	param([string]$Name)
 	switch ($Name) {
 		"gemini" { return "gemini-3.1-pro-preview" }
-		"grok" { return "grok-4.20-beta-latest-non-reasoning" }
-		"deepseek" { return "deepseek-chat" }
+		"grok" { return "grok-4.20-beta-latest-reasoning" }
+		"deepseek" { return "deepseek-reasoner" }
+		"doubao" { return "doubao-seed-2-0-pro-260215" }
 	}
+}
+
+function Default-ApiBaseForProvider {
+	param([string]$Name)
+	if ($Name -eq "doubao") { return "https://ark.cn-beijing.volces.com/api/v3" }
+	return ""
 }
 
 function Default-ThinkingLevel {
@@ -116,7 +125,7 @@ function Test-IllustrationConnectionFailure {
 }
 
 if (-not $PSBoundParameters.ContainsKey("Provider")) {
-	$Provider = Prompt-OptionalValue -PromptText "Provider (gemini/grok/deepseek)" -DefaultValue $Provider
+	$Provider = Prompt-OptionalValue -PromptText "Provider (gemini/grok/deepseek/doubao)" -DefaultValue $Provider
 }
 $Provider = Normalize-Provider $Provider
 
@@ -139,6 +148,7 @@ if (-not $apiKey) {
 		"gemini" { $apiKey = $apiKeys["GEMINI_API_KEY"] }
 		"grok" { $apiKey = $apiKeys["GROK_API_KEY"] }
 		"deepseek" { $apiKey = $apiKeys["DEEPSEEK_API_KEY"] }
+		"doubao" { $apiKey = $apiKeys["DOUBAO_API_KEY"] }
 	}
 }
 if (-not $apiKey) {
@@ -146,7 +156,7 @@ if (-not $apiKey) {
 }
 
 $modelName = if ($env:NOVEL_MODEL_NAME) { $env:NOVEL_MODEL_NAME } else { Default-ModelForProvider $Provider }
-$apiBase = if ($env:NOVEL_API_BASE) { $env:NOVEL_API_BASE } else { "" }
+$apiBase = if ($env:NOVEL_API_BASE) { $env:NOVEL_API_BASE } else { Default-ApiBaseForProvider $Provider }
 $temperature = if ($env:NOVEL_TEMPERATURE) { [double]$env:NOVEL_TEMPERATURE } else { 1.0 }
 $maxTokens = if ($env:NOVEL_MAX_TOKENS) { [int]$env:NOVEL_MAX_TOKENS } else { 10240 }
 $timeout = if ($env:NOVEL_TIMEOUT) { [int]$env:NOVEL_TIMEOUT } else { 120 }

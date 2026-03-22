@@ -66,6 +66,7 @@ output/
 - `gemini`
 - `grok`
 - `deepseek`
+- `doubao`
 - `openai_compatible`
 
 当前脚本默认主要面向：
@@ -73,6 +74,7 @@ output/
 - `gemini`
 - `grok`
 - `deepseek`
+- `doubao`
 
 ## 1. 配置 API key
 
@@ -82,6 +84,7 @@ output/
 export GEMINI_API_KEY="你的 Gemini Key"
 export GROK_API_KEY="你的 xAI Key"
 export DEEPSEEK_API_KEY="你的 DeepSeek Key"
+export DOUBAO_API_KEY="你的豆包 / 火山方舟 Key"
 ```
 
 不用的 provider 可以留空。
@@ -123,6 +126,12 @@ DEFAULT_PROJECT_DESCRIPTION="由模型根据需求自动生成设定的长篇小
 
 ```bash
 ./quick_start.sh deepseek "三人小队在封闭校园里进行长期生存建设，要求注重水源、食物和保温细节。" "雪封穹顶"
+```
+
+或：
+
+```bash
+./quick_start.sh doubao "极寒校园中的长期生存故事，要求兼顾生活建设、人物互动与细节描写。" "雪封穹顶"
 ```
 
 初始化时脚本会：
@@ -185,6 +194,12 @@ DEFAULT_PROVIDER_OVERRIDE=""
 
 ```bash
 ./quick_continue.sh ./output/novel_project_20260318T022023Z_a3f280b2 2 "这几章想更注重生存细节" deepseek
+```
+
+也可以临时切到豆包：
+
+```bash
+./quick_continue.sh ./output/novel_project_20260318T022023Z_a3f280b2 2 "想让人物互动更细腻" doubao
 ```
 
 说明：
@@ -277,6 +292,16 @@ python3 app.py next --project ./output/novel_project_xxx --config ./runtime_conf
 - `gemini` -> `gemini-3.1-flash-lite-preview`
 - `grok` -> `grok-4.20-beta-latest-non-reasoning`
 - `deepseek` -> `deepseek-chat`
+- `doubao` -> `doubao-seed-1-8-251228`
+
+其中豆包默认会使用火山方舟 Ark Chat API：
+
+- `api_base` -> `https://ark.cn-beijing.volces.com/api/v3`
+
+说明：
+
+- 豆包的 `model_name` 建议填写模型 ID 或你的 Endpoint ID
+- 如果留空，脚本和 Web UI 会默认使用 `doubao-seed-1-8-251228`
 
 你也可以通过脚本顶部参数块长期保存这些设置，或者通过环境变量临时覆盖：
 
@@ -352,3 +377,4 @@ python3 app.py status --project <项目目录>
 - Gemini Thinking: https://ai.google.dev/gemini-api/docs/thinking
 - xAI Chat Completions: https://docs.x.ai/developers/model-capabilities/legacy/chat-completions
 - DeepSeek Chat Completions: https://api-docs.deepseek.com/api/create-chat-completion
+- 火山方舟 / 豆包 Chat API: https://www.volcengine.com/docs/82379/1494384

@@ -1,4 +1,4 @@
-"""LLM client with OpenAI-compatible, Gemini, and Grok backends."""
+"""LLM client with OpenAI-compatible, Gemini, Grok, DeepSeek, and Doubao backends."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def _normalize_chat_url(api_base: str) -> str:
     base = api_base.rstrip("/")
     if base.endswith("/chat/completions"):
         return base
-    if base.endswith("/v1"):
+    if base.endswith(("/v1", "/v2", "/v3", "/api/v1", "/api/v2", "/api/v3")):
         return f"{base}/chat/completions"
     return f"{base}/v1/chat/completions"
 
@@ -113,6 +113,13 @@ def _extract_gemini_text(payload: dict[str, Any]) -> str:
     candidates = payload.get("candidates") or []
     if not candidates:
         prompt_feedback = payload.get("promptFeedback")
+        block_reason = ""
+        if isinstance(prompt_feedback, dict):
+            block_reason = str(prompt_feedback.get("blockReason", "") or "").strip()
+        if block_reason:
+            raise RuntimeError(
+                f"Gemini blocked the request. blockReason={block_reason}, promptFeedback={prompt_feedback}"
+            )
         raise RuntimeError(
             f"Gemini response missing candidates. promptFeedback={prompt_feedback}"
         )
@@ -239,6 +246,15 @@ def _generate_deepseek(prompt: str, config: dict) -> str:
     return _generate_openai_compatible(prompt, deepseek_config)
 
 
+def _generate_doubao(prompt: str, config: dict) -> str:
+    doubao_config = dict(config)
+    doubao_config["api_base"] = (
+        doubao_config.get("api_base", "").strip()
+        or "https://ark.cn-beijing.volces.com/api/v3"
+    )
+    return _generate_openai_compatible(prompt, doubao_config)
+
+
 def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[str, Any]]:
     """Generate text and return normalized usage metadata."""
     provider = (config.get("model_provider") or "openai_compatible").strip().lower()
@@ -350,9 +366,22 @@ def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[st
         metadata["provider"] = "deepseek"
         return text, metadata
 
+    if provider == "doubao":
+        doubao_config = dict(config)
+        doubao_config["api_base"] = (
+            doubao_config.get("api_base", "").strip()
+            or "https://ark.cn-beijing.volces.com/api/v3"
+        )
+        text, metadata = generate_text_with_metadata(
+            prompt,
+            {**doubao_config, "model_provider": "openai_compatible"},
+        )
+        metadata["provider"] = "doubao"
+        return text, metadata
+
     raise ValueError(
         "Unsupported model_provider. Expected one of: "
-        "'openai_compatible', 'gemini', 'grok', 'deepseek'."
+        "'openai_compatible', 'gemini', 'grok', 'deepseek', 'doubao'."
     )
 
 

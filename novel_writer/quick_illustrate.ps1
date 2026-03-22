@@ -33,6 +33,7 @@ function Get-ApiKeys {
 		GEMINI_API_KEY = ""
 		GROK_API_KEY = ""
 		DEEPSEEK_API_KEY = ""
+		DOUBAO_API_KEY = ""
 	}
 	foreach ($name in @($keys.Keys)) {
 		$pattern = 'export\s+' + [regex]::Escape($name) + '="([^"]*)"'
@@ -66,6 +67,7 @@ if (-not $apiKey) {
 		"gemini" { $apiKey = $apiKeys["GEMINI_API_KEY"] }
 		"grok" { $apiKey = $apiKeys["GROK_API_KEY"] }
 		"deepseek" { $apiKey = $apiKeys["DEEPSEEK_API_KEY"] }
+		"doubao" { $apiKey = $apiKeys["DOUBAO_API_KEY"] }
 	}
 }
 

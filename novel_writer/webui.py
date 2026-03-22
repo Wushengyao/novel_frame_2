@@ -66,6 +66,7 @@ def _load_api_keys() -> dict[str, str]:
         "GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY", ""),
         "GROK_API_KEY": os.environ.get("GROK_API_KEY", ""),
         "DEEPSEEK_API_KEY": os.environ.get("DEEPSEEK_API_KEY", ""),
+    "DOUBAO_API_KEY": os.environ.get("DOUBAO_API_KEY", ""),
     }
     if all(env_keys.values()) or not API_KEYS_PATH.exists():
         return env_keys
@@ -85,6 +86,7 @@ def _api_key_for_provider(provider: str, api_keys: dict[str, str]) -> str:
         "gemini": api_keys.get("GEMINI_API_KEY", ""),
         "grok": api_keys.get("GROK_API_KEY", ""),
         "deepseek": api_keys.get("DEEPSEEK_API_KEY", ""),
+    "doubao": api_keys.get("DOUBAO_API_KEY", ""),
     }
     return mapping.get(provider, "")
 
@@ -94,8 +96,16 @@ def _default_model_for_provider(provider: str) -> str:
         "gemini": "gemini-3.1-flash-lite-preview",
         "grok": "grok-4.20-beta-latest-non-reasoning",
         "deepseek": "deepseek-chat",
+    "doubao": "doubao-seed-1-8-251228",
     }
     return defaults.get(provider, "")
+
+
+def _default_api_base_for_provider(provider: str) -> str:
+  defaults = {
+    "doubao": "https://ark.cn-beijing.volces.com/api/v3",
+  }
+  return defaults.get(provider, "")
 
 
 def _default_thinking_level(provider: str) -> str:
@@ -140,22 +150,39 @@ def _find_project(project_id: str) -> Path | None:
 def _build_runtime_config(project_path: Path, overrides: dict[str, str], api_keys: dict[str, str]) -> dict:
     project = load_json(str(project_path / "project.json"))
     saved = project.get("llm_config", {})
-    provider = (overrides.get("provider") or saved.get("model_provider") or "gemini").strip().lower()
-    if provider not in {"gemini", "grok", "deepseek", "openai_compatible"}:
+  saved_provider = (saved.get("model_provider") or "gemini").strip().lower()
+  provider = (overrides.get("provider") or saved_provider or "gemini").strip().lower()
+  if provider not in {"gemini", "grok", "deepseek", "doubao", "openai_compatible"}:
         provider = "gemini"
+
+  override_model_name = (overrides.get("model_name") or "").strip()
+  saved_model_name = (saved.get("model_name") or saved.get("model") or "").strip()
+  override_api_base = (overrides.get("api_base") or "").strip()
+  saved_api_base = (saved.get("api_base") or "").strip()
 
     runtime = {
         "model_provider": provider,
-        "model_name": (overrides.get("model_name") or saved.get("model_name") or saved.get("model") or "").strip(),
-        "model": (overrides.get("model_name") or saved.get("model") or saved.get("model_name") or "").strip(),
-        "api_base": (overrides.get("api_base") or saved.get("api_base") or "").strip(),
+    "model_name": override_model_name
+    or (_default_model_for_provider(provider) if provider != saved_provider else saved_model_name)
+    or _default_model_for_provider(provider),
+    "model": override_model_name
+    or (_default_model_for_provider(provider) if provider != saved_provider else saved_model_name)
+    or _default_model_for_provider(provider),
+    "api_base": override_api_base
+    or (
+      _default_api_base_for_provider(provider)
+      if provider != saved_provider
+      else (saved_api_base or _default_api_base_for_provider(provider))
+    ),
         "api_key": _api_key_for_provider(provider, api_keys) or overrides.get("api_key", ""),
         "temperature": float(overrides.get("temperature") or saved.get("temperature", 0.8)),
         "max_tokens": int(overrides.get("max_tokens") or saved.get("max_tokens", 4000)),
         "timeout": int(overrides.get("timeout") or saved.get("timeout", 120)),
     }
 
-    thinking_level = (overrides.get("thinking_level") or saved.get("thinking_level") or "").strip()
+  thinking_level = (overrides.get("thinking_level") or "").strip()
+  if not thinking_level and provider == saved_provider:
+    thinking_level = (saved.get("thinking_level") or "").strip()
     if thinking_level:
         runtime["thinking_level"] = thinking_level
     elif provider == "gemini":
@@ -165,14 +192,14 @@ def _build_runtime_config(project_path: Path, overrides: dict[str, str], api_key
         runtime["model_name"] = _default_model_for_provider(provider)
         runtime["model"] = runtime["model_name"]
 
-    if not runtime["api_key"] and provider in {"gemini", "grok", "deepseek"}:
+    if not runtime["api_key"] and provider in {"gemini", "grok", "deepseek", "doubao"}:
         raise RuntimeError(f"provider={provider} 缺少 API key，请先填写 api_keys.sh")
     return runtime
 
 
 def _create_project(form: dict[str, str], api_keys: dict[str, str]) -> str:
     provider = (form.get("provider") or "gemini").strip().lower()
-    if provider not in {"gemini", "grok", "deepseek"}:
+  if provider not in {"gemini", "grok", "deepseek", "doubao"}:
         raise RuntimeError(f"不支持的 provider: {provider}")
 
     api_key = _api_key_for_provider(provider, api_keys)
@@ -187,7 +214,7 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str]) -> str:
         "story_request": (form.get("story_request") or "").strip(),
         "model_provider": provider,
         "model_name": (form.get("model_name") or _default_model_for_provider(provider)).strip(),
-        "api_base": (form.get("api_base") or "").strip(),
+        "api_base": (form.get("api_base") or _default_api_base_for_provider(provider)).strip(),
         "api_key": api_key,
         "temperature": float(form.get("temperature") or 0.9),
         "max_tokens": int(form.get("max_tokens") or 4000),
@@ -583,10 +610,11 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                     <option value="gemini">gemini</option>
                     <option value="grok">grok</option>
                     <option value="deepseek">deepseek</option>
+                    <option value="doubao">doubao</option>
                   </select>
                 </label>
                 <label>模型名（可选）
-                  <input type="text" name="model_name" placeholder="留空则使用默认模型">
+                  <input type="text" name="model_name" placeholder="留空则使用对应后端默认模型 / Model ID">
                 </label>
               </div>
               <label>项目名
@@ -703,6 +731,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                       <option value="gemini">gemini</option>
                       <option value="grok">grok</option>
                       <option value="deepseek">deepseek</option>
+                      <option value="doubao">doubao</option>
                     </select>
                   </label>
                 </div>
@@ -711,7 +740,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 </label>
                 <div class="two-col">
                   <label>模型名（可选）
-                    <input type="text" name="model_name" placeholder="留空则沿用项目设置">
+                    <input type="text" name="model_name" placeholder="留空则沿用项目设置；切换后端时自动改为该后端默认模型 / Model ID">
                   </label>
                   <label>Thinking Level（可选）
                     <input type="text" name="thinking_level" placeholder="如 medium / high">

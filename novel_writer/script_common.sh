@@ -16,9 +16,9 @@ load_api_keys() {
 normalize_provider() {
   local provider="${1:-}"
   case "$provider" in
-    gemini|grok|deepseek) printf '%s\n' "$provider" ;;
+    gemini|grok|deepseek|doubao) printf '%s\n' "$provider" ;;
     *)
-      echo "不支持的 provider: $provider（可选: gemini / grok / deepseek）" >&2
+      echo "不支持的 provider: $provider（可选: gemini / grok / deepseek / doubao）" >&2
       exit 1
       ;;
   esac
@@ -31,6 +31,7 @@ default_model_for_provider() {
     gemini) printf '%s\n' "gemini-3.1-flash-lite-preview" ;;
     grok) printf '%s\n' "grok-4.20-beta-latest-non-reasoning" ;;
     deepseek) printf '%s\n' "deepseek-chat" ;;
+    doubao) printf '%s\n' "doubao-seed-1-8-251228" ;;
   esac
 }
 
@@ -39,6 +40,7 @@ default_api_base_for_provider() {
   provider="$(normalize_provider "$1")"
   case "$provider" in
     gemini|grok|deepseek) printf '%s\n' "" ;;
+    doubao) printf '%s\n' "https://ark.cn-beijing.volces.com/api/v3" ;;
   esac
 }
 
@@ -47,7 +49,7 @@ default_thinking_level_for_provider() {
   provider="$(normalize_provider "$1")"
   case "$provider" in
     gemini) printf '%s\n' "medium" ;;
-    grok|deepseek) printf '%s\n' "" ;;
+    grok|deepseek|doubao) printf '%s\n' "" ;;
   esac
 }
 
@@ -58,6 +60,7 @@ api_key_for_provider() {
     gemini) printf '%s\n' "${GEMINI_API_KEY:-}" ;;
     grok) printf '%s\n' "${GROK_API_KEY:-}" ;;
     deepseek) printf '%s\n' "${DEEPSEEK_API_KEY:-}" ;;
+    doubao) printf '%s\n' "${DOUBAO_API_KEY:-}" ;;
   esac
 }
 
@@ -123,20 +126,51 @@ config_path = pathlib.Path(sys.argv[1])
 project_path = pathlib.Path(sys.argv[2])
 project = json.loads((project_path / "project.json").read_text(encoding="utf-8"))
 saved = project.get("llm_config", {})
+saved_provider = str(saved.get("model_provider", "gemini") or "gemini").strip().lower()
+resolved_provider = os.environ.get("NOVEL_PROVIDER_OVERRIDE", "").strip() or saved_provider
+default_models = {
+  "gemini": "gemini-3.1-flash-lite-preview",
+  "grok": "grok-4.20-beta-latest-non-reasoning",
+  "deepseek": "deepseek-chat",
+  "doubao": "doubao-seed-1-8-251228",
+}
+default_api_bases = {
+  "doubao": "https://ark.cn-beijing.volces.com/api/v3",
+}
+default_thinking_levels = {
+  "gemini": "medium",
+}
+
+model_name_override = os.environ.get("NOVEL_MODEL_NAME_OVERRIDE", "").strip()
+api_base_override = os.environ.get("NOVEL_API_BASE_OVERRIDE", "").strip()
 
 data = {
-    "model_provider": os.environ.get("NOVEL_PROVIDER_OVERRIDE", "").strip() or saved.get("model_provider", "gemini"),
-    "model_name": os.environ.get("NOVEL_MODEL_NAME_OVERRIDE", "").strip()
-    or saved.get("model_name")
-    or saved.get("model", ""),
-    "api_base": os.environ.get("NOVEL_API_BASE_OVERRIDE", "").strip() or saved.get("api_base", ""),
+  "model_provider": resolved_provider,
+  "model_name": model_name_override
+  or (
+    default_models.get(resolved_provider, "")
+    if resolved_provider != saved_provider
+    else (saved.get("model_name") or saved.get("model", ""))
+  )
+  or default_models.get(resolved_provider, ""),
+  "api_base": api_base_override
+  or (
+    default_api_bases.get(resolved_provider, "")
+    if resolved_provider != saved_provider
+    else (saved.get("api_base", "") or default_api_bases.get(resolved_provider, ""))
+  ),
     "api_key": os.environ["NOVEL_API_KEY"],
     "temperature": float(os.environ.get("NOVEL_TEMPERATURE_OVERRIDE", "") or saved.get("temperature", 0.8)),
     "max_tokens": int(os.environ.get("NOVEL_MAX_TOKENS_OVERRIDE", "") or saved.get("max_tokens", 4000)),
     "timeout": int(os.environ.get("NOVEL_TIMEOUT_OVERRIDE", "") or saved.get("timeout", 120)),
 }
 
-thinking_level = os.environ.get("NOVEL_THINKING_LEVEL_OVERRIDE", "").strip() or str(saved.get("thinking_level", "") or "")
+thinking_level = os.environ.get("NOVEL_THINKING_LEVEL_OVERRIDE", "").strip()
+if not thinking_level:
+  if resolved_provider == saved_provider:
+    thinking_level = str(saved.get("thinking_level", "") or "")
+  else:
+    thinking_level = default_thinking_levels.get(resolved_provider, "")
 if thinking_level:
     data["thinking_level"] = thinking_level
 
