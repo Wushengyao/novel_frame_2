@@ -50,7 +50,7 @@ def build_init_prompt(data: dict) -> str:
 3. 人物要鲜明稳定，避免脸谱化
 4. 每个角色对象都必须包含 `name`、`role`、`description`、`appearance` 四个字段
 5. `description` 侧重人物身份、性格、能力、关系与叙事定位
-6. `appearance` 单独描写人物外貌特征、体态气质、发型发色、五官特点、常见衣着与穿搭风格
+6. `appearance` 单独描写人物外貌特征（包括人种，避免文生图模型的不确定性）、体态气质、发型发色、五官特点、常见衣着与穿搭风格
 7. plot_state 必须兼容以下结构
 8. style 要明确语气、视角和写作要求
 9. 如果种子设定为空，请根据用户需求自行完整设计

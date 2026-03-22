@@ -390,6 +390,33 @@ def _render_page(title: str, body: str, notice: str = "", error: str = "") -> st
       line-height: 1.9;
       font-size: 17px;
     }}
+    .chapter-nav {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 20px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+    }}
+    .chapter-nav-link, .chapter-nav-disabled {{
+      display: inline-flex;
+      align-items: center;
+      min-width: 160px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.72);
+      border: 1px solid rgba(124, 91, 62, 0.16);
+    }}
+    .chapter-nav-link.next, .chapter-nav-disabled.next {{
+      margin-left: auto;
+      justify-content: flex-end;
+      text-align: right;
+    }}
+    .chapter-nav-disabled {{
+      color: var(--muted);
+      background: rgba(255,255,255,0.38);
+    }}
     .two-col {{
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -788,6 +815,20 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
 
         project = load_json(str(project_path / "project.json"))
         project_name = _repair_display_text(project.get("name", project_id))
+        chapters = _read_chapters(project_path)
+        current_index = next((idx for idx, chapter in enumerate(chapters) if chapter["slug"] == chapter_slug), -1)
+        previous_chapter = chapters[current_index - 1] if current_index > 0 else None
+        next_chapter = chapters[current_index + 1] if 0 <= current_index < len(chapters) - 1 else None
+        previous_link = (
+            f'<a class="chapter-nav-link prev" href="/project/{escape(project_id)}/chapter/{escape(previous_chapter["slug"])}">← 上一章：{escape(previous_chapter["name"])}</a>'
+            if previous_chapter
+            else '<span class="chapter-nav-disabled prev">← 已是第一章</span>'
+        )
+        next_link = (
+            f'<a class="chapter-nav-link next" href="/project/{escape(project_id)}/chapter/{escape(next_chapter["slug"])}">下一章：{escape(next_chapter["name"])} →</a>'
+            if next_chapter
+            else '<span class="chapter-nav-disabled next">已是最后一章 →</span>'
+        )
         illustration_record = get_illustration_record(str(project_path), chapter_slug)
         illustration_gallery = "<p>当前还没有本章插图。</p>"
         if illustration_record and illustration_record.get("images"):
@@ -813,6 +854,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <a href="/project/{escape(project_id)}">返回项目</a>
             <h2>{escape(chapter_file.name)}</h2>
             <div class="chapter-view">{escape(chapter_file.read_text(encoding="utf-8"))}</div>
+            <div class="chapter-nav">
+              {previous_link}
+              {next_link}
+            </div>
           </section>
           <section class="panel">
             <h2>本章插图</h2>
