@@ -6,6 +6,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
+from console_logger import log_info, log_success, log_warning
 from llm_client import generate_text_with_metadata
 from prompt_builder import build_summary_prompt
 from project_manager import load_json, save_json, update_project_stats
@@ -75,6 +76,7 @@ def _fallback_summary(new_text: str, current_state: dict) -> dict:
 
 
 def update_plot_state(project_path: str, new_text: str, config: dict) -> None:
+    log_info(f"剧情状态更新: 开始处理项目 {project_path}")
     base = Path(project_path)
     plot_state_path = base / "plot_state.json"
     characters_path = base / "characters.json"
@@ -91,12 +93,14 @@ def update_plot_state(project_path: str, new_text: str, config: dict) -> None:
 
     summary = None
     last_error = None
-    for _ in range(2):
+    for attempt in range(2):
         try:
+            log_info(f"剧情状态更新: 第 {attempt + 1} 次请求模型总结本章。")
             response_text, metadata = generate_text_with_metadata(prompt, config)
         except Exception as exc:  # pragma: no cover - intentional resilience path
             update_project_stats(project_path, phase="summary", success=False, usage=None)
             last_error = exc
+            log_warning(f"剧情状态更新: 第 {attempt + 1} 次请求失败，原因: {exc}")
             continue
 
         try:
@@ -107,12 +111,15 @@ def update_plot_state(project_path: str, new_text: str, config: dict) -> None:
                 usage=metadata.get("usage"),
             )
             summary = _normalize_summary(_extract_json_object(response_text))
+            log_success("剧情状态更新: 模型总结成功，已解析状态 JSON。")
             break
         except Exception as exc:  # pragma: no cover - intentional resilience path
             last_error = exc
+            log_warning(f"剧情状态更新: 返回内容解析失败，原因: {exc}")
 
     if summary is None:
         summary = _fallback_summary(new_text, current_state)
+        log_warning("剧情状态更新: 改用兜底摘要更新 plot_state。")
         if last_error is not None:
             summary["last_summary_error"] = str(last_error)
 
@@ -124,3 +131,4 @@ def update_plot_state(project_path: str, new_text: str, config: dict) -> None:
     chapter_count = load_json(str(base / "project.json")).get("chapter_count", 0)
     summary_path = summaries_dir / f"summary_{chapter_count:04d}.json"
     save_json(str(summary_path), summary)
+    log_success(f"剧情状态更新: 已写入 plot_state.json 和 {summary_path.name}")
