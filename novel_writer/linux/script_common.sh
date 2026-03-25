@@ -68,8 +68,13 @@ resolve_python_exe() {
 load_api_keys() {
   local keys_file="${PROJECT_ROOT_DIR}/api_keys.sh"
   if [[ ! -f "$keys_file" ]]; then
-    echo "缺少 API key 文件: $keys_file" >&2
-    exit 1
+    export GEMINI_API_KEY="${GEMINI_API_KEY:-}"
+    export GROK_API_KEY="${GROK_API_KEY:-}"
+    export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
+    export DOUBAO_API_KEY="${DOUBAO_API_KEY:-}"
+    export OLLAMA_API_KEY="${OLLAMA_API_KEY:-}"
+    log_warning "未找到 API key 文件: $keys_file，后续将仅依赖环境变量或无需 API key 的 provider。"
+    return 0
   fi
 
   # shellcheck disable=SC1090
@@ -79,9 +84,9 @@ load_api_keys() {
 normalize_provider() {
   local provider="${1:-}"
   case "$provider" in
-    gemini|grok|deepseek|doubao) printf '%s\n' "$provider" ;;
+    gemini|grok|deepseek|doubao|ollama) printf '%s\n' "$provider" ;;
     *)
-      echo "不支持的 provider: $provider（可选: gemini / grok / deepseek / doubao）" >&2
+      echo "不支持的 provider: $provider（可选: gemini / grok / deepseek / doubao / ollama）" >&2
       exit 1
       ;;
   esac
@@ -95,6 +100,7 @@ default_model_for_provider() {
     grok) printf '%s\n' "grok-4.20-beta-latest-reasoning" ;;
     deepseek) printf '%s\n' "deepseek-reasoner" ;;
     doubao) printf '%s\n' "doubao-seed-2-0-pro-260215" ;;
+    ollama) printf '%s\n' "qwen3.5:35b" ;;
   esac
 }
 
@@ -104,6 +110,7 @@ default_api_base_for_provider() {
   case "$provider" in
     gemini|grok|deepseek) printf '%s\n' "" ;;
     doubao) printf '%s\n' "https://ark.cn-beijing.volces.com/api/v3" ;;
+    ollama) printf '%s\n' "http://127.0.0.1:11434/v1" ;;
   esac
 }
 
@@ -112,7 +119,7 @@ default_thinking_level_for_provider() {
   provider="$(normalize_provider "$1")"
   case "$provider" in
     gemini) printf '%s\n' "medium" ;;
-    grok|deepseek|doubao) printf '%s\n' "" ;;
+    grok|deepseek|doubao|ollama) printf '%s\n' "" ;;
   esac
 }
 
@@ -124,12 +131,16 @@ api_key_for_provider() {
     grok) printf '%s\n' "${GROK_API_KEY:-}" ;;
     deepseek) printf '%s\n' "${DEEPSEEK_API_KEY:-}" ;;
     doubao) printf '%s\n' "${DOUBAO_API_KEY:-}" ;;
+    ollama) printf '%s\n' "${OLLAMA_API_KEY:-}" ;;
   esac
 }
 
 ensure_api_key_present() {
   local provider="$1"
   local api_key="$2"
+  if [[ "$provider" == "ollama" ]]; then
+    return 0
+  fi
   if [[ -z "$api_key" ]]; then
     echo "provider=$provider 缺少 API key，请先填写 ${PROJECT_ROOT_DIR}/api_keys.sh" >&2
     exit 1
@@ -222,9 +233,11 @@ default_models = {
   "grok": "grok-4.20-beta-latest-reasoning",
   "deepseek": "deepseek-reasoner",
   "doubao": "doubao-seed-2-0-pro-260215",
+  "ollama": "llama3.2",
 }
 default_api_bases = {
   "doubao": "https://ark.cn-beijing.volces.com/api/v3",
+  "ollama": "http://127.0.0.1:11434/v1",
 }
 default_thinking_levels = {
   "gemini": "medium",

@@ -10,7 +10,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # 直接修改这里即可，不必每次写命令行参数。
 # 如果同时传入命令行参数，则命令行参数优先。
 # ==============================
-DEFAULT_PROVIDER="gemini"
+DEFAULT_PROVIDER="ollama"
 DEFAULT_STORY_REQUEST="""故事发生在一座高级奢华的校园中，3位主角都是学生。男主是团队力量担当，乐观；女主1号是倾国倾城的美丽少女，身材娇小纤细，团队智力担当，傲娇；女主二号同样美丽动人，善于照顾他人，温柔。小说故事聚焦于他们合作生存的过程上，从初期的保暖，到逐步确保水源和食物来源，然后再逐步提升生活水平。总体风格温馨，并加入情感升温。小说应当详细描写他们协力生存的方方面面，重点描写他们搭建/升级温暖的避难所，并且包括过程中的感情升温与适量的香艳情节。
 故事情节方面：
 1、故事的开始是放假期间只有主角们在校，突然极寒天气与暴风雪来临，他们被困在学校中。一开始他们认为只是短暂的极端天气很快会有救援，所以在只是团聚在女生宿舍避寒并且做了短期规划。
@@ -39,7 +39,7 @@ PYTHON_EXE="$(resolve_python_exe)"
 log_info "quick_start: 已加载脚本和 API keys。"
 
 if [[ $# -lt 1 ]]; then
-  PROVIDER="$(normalize_provider "$(prompt_optional_value "Provider (gemini/grok/deepseek/doubao)" "$DEFAULT_PROVIDER")")"
+  PROVIDER="$(normalize_provider "$(prompt_optional_value "Provider (gemini/grok/deepseek/doubao/ollama)" "$DEFAULT_PROVIDER")")"
 else
   PROVIDER="$(normalize_provider "${1:-$DEFAULT_PROVIDER}")"
 fi

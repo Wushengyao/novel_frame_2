@@ -46,7 +46,13 @@ function Resolve-PythonExe {
 function Get-ApiKeys {
 	param([string]$KeysFile)
 	if (-not (Test-Path $KeysFile)) {
-		throw "Missing API key file: $KeysFile"
+		return @{
+			GEMINI_API_KEY = ""
+			GROK_API_KEY = ""
+			DEEPSEEK_API_KEY = ""
+			DOUBAO_API_KEY = ""
+			OLLAMA_API_KEY = ""
+		}
 	}
 	$content = Get-Content -Path $KeysFile -Raw -Encoding UTF8
 	$keys = @{
@@ -54,6 +60,7 @@ function Get-ApiKeys {
 		GROK_API_KEY = ""
 		DEEPSEEK_API_KEY = ""
 		DOUBAO_API_KEY = ""
+		OLLAMA_API_KEY = ""
 	}
 	foreach ($name in @($keys.Keys)) {
 		$pattern = 'export\s+' + [regex]::Escape($name) + '="([^"]*)"'
@@ -72,7 +79,8 @@ function Normalize-Provider {
 		"grok" { return "grok" }
 		"deepseek" { return "deepseek" }
 		"doubao" { return "doubao" }
-		default { throw "Unsupported provider: $Name (allowed: gemini / grok / deepseek / doubao)" }
+		"ollama" { return "ollama" }
+		default { throw "Unsupported provider: $Name (allowed: gemini / grok / deepseek / doubao / ollama)" }
 	}
 }
 
@@ -83,12 +91,14 @@ function Default-ModelForProvider {
 		"grok" { return "grok-4.20-beta-latest-reasoning" }
 		"deepseek" { return "deepseek-reasoner" }
 		"doubao" { return "doubao-seed-2-0-pro-260215" }
+		"ollama" { return "llama3.2" }
 	}
 }
 
 function Default-ApiBaseForProvider {
 	param([string]$Name)
 	if ($Name -eq "doubao") { return "https://ark.cn-beijing.volces.com/api/v3" }
+	if ($Name -eq "ollama") { return "http://127.0.0.1:11434/v1" }
 	return ""
 }
 
@@ -126,7 +136,7 @@ function Test-IllustrationConnectionFailure {
 }
 
 if (-not $PSBoundParameters.ContainsKey("Provider")) {
-	$Provider = Prompt-OptionalValue -PromptText "Provider (gemini/grok/deepseek/doubao)" -DefaultValue $Provider
+	$Provider = Prompt-OptionalValue -PromptText "Provider (gemini/grok/deepseek/doubao/ollama)" -DefaultValue $Provider
 }
 $Provider = Normalize-Provider $Provider
 
@@ -150,9 +160,10 @@ if (-not $apiKey) {
 		"grok" { $apiKey = $apiKeys["GROK_API_KEY"] }
 		"deepseek" { $apiKey = $apiKeys["DEEPSEEK_API_KEY"] }
 		"doubao" { $apiKey = $apiKeys["DOUBAO_API_KEY"] }
+		"ollama" { $apiKey = $apiKeys["OLLAMA_API_KEY"] }
 	}
 }
-if (-not $apiKey) {
+if ($Provider -ne "ollama" -and -not $apiKey) {
 	throw "provider=$Provider missing API key. Please fill $ProjectRoot\api_keys.sh"
 }
 

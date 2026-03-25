@@ -1,4 +1,4 @@
-"""LLM client with OpenAI-compatible, Gemini, Grok, DeepSeek, and Doubao backends."""
+"""LLM client with OpenAI-compatible, Gemini, Grok, DeepSeek, Doubao, and Ollama backends."""
 
 from __future__ import annotations
 
@@ -68,6 +68,15 @@ def _request_json(
         "LLM connection was closed before a response was returned after multiple retries. "
         f"Endpoint: {endpoint}. Last error: {last_error}"
     )
+
+
+def _build_openai_compatible_headers(api_key: str) -> dict[str, str]:
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
 
 
 def _extract_openai_text(payload: dict[str, Any]) -> str:
@@ -169,10 +178,7 @@ def _generate_openai_compatible(prompt: str, config: dict) -> str:
         "max_tokens": max_tokens,
     }
     endpoint = _normalize_chat_url(api_base)
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
+    headers = _build_openai_compatible_headers(api_key)
     payload = _request_json(endpoint, headers, body, timeout)
     return _extract_openai_text(payload)
 
@@ -279,10 +285,7 @@ def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[st
             "max_tokens": max_tokens,
         }
         endpoint = _normalize_chat_url(api_base)
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }
+        headers = _build_openai_compatible_headers(api_key)
         payload = _request_json(endpoint, headers, body, timeout)
         return _extract_openai_text(payload), {
             "provider": provider,
@@ -379,9 +382,21 @@ def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[st
         metadata["provider"] = "doubao"
         return text, metadata
 
+    if provider == "ollama":
+        ollama_config = dict(config)
+        ollama_config["api_base"] = (
+            ollama_config.get("api_base", "").strip() or "http://127.0.0.1:11434/v1"
+        )
+        text, metadata = generate_text_with_metadata(
+            prompt,
+            {**ollama_config, "model_provider": "openai_compatible"},
+        )
+        metadata["provider"] = "ollama"
+        return text, metadata
+
     raise ValueError(
         "Unsupported model_provider. Expected one of: "
-        "'openai_compatible', 'gemini', 'grok', 'deepseek', 'doubao'."
+        "'openai_compatible', 'gemini', 'grok', 'deepseek', 'doubao', 'ollama'."
     )
 
 

@@ -49,7 +49,7 @@ else
 fi
 
 if [[ $# -lt 4 ]]; then
-  PROVIDER_OVERRIDE="$(prompt_optional_value "Provider override (optional: gemini/grok/deepseek/doubao)" "$DEFAULT_PROVIDER_OVERRIDE")"
+  PROVIDER_OVERRIDE="$(prompt_optional_value "Provider override (optional: gemini/grok/deepseek/doubao/ollama)" "$DEFAULT_PROVIDER_OVERRIDE")"
 else
   PROVIDER_OVERRIDE="${4:-$DEFAULT_PROVIDER_OVERRIDE}"
 fi

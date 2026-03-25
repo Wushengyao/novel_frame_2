@@ -27,7 +27,13 @@ function Resolve-PythonExe {
 function Get-ApiKeys {
 	param([string]$KeysFile)
 	if (-not (Test-Path $KeysFile)) {
-		throw "Missing API key file: $KeysFile"
+		return @{
+			GEMINI_API_KEY = ""
+			GROK_API_KEY = ""
+			DEEPSEEK_API_KEY = ""
+			DOUBAO_API_KEY = ""
+			OLLAMA_API_KEY = ""
+		}
 	}
 	$content = Get-Content -Path $KeysFile -Raw -Encoding UTF8
 	$keys = @{
@@ -35,6 +41,7 @@ function Get-ApiKeys {
 		GROK_API_KEY = ""
 		DEEPSEEK_API_KEY = ""
 		DOUBAO_API_KEY = ""
+		OLLAMA_API_KEY = ""
 	}
 	foreach ($name in @($keys.Keys)) {
 		$pattern = 'export\s+' + [regex]::Escape($name) + '="([^"]*)"'
@@ -69,6 +76,7 @@ if (-not $apiKey) {
 		"grok" { $apiKey = $apiKeys["GROK_API_KEY"] }
 		"deepseek" { $apiKey = $apiKeys["DEEPSEEK_API_KEY"] }
 		"doubao" { $apiKey = $apiKeys["DOUBAO_API_KEY"] }
+		"ollama" { $apiKey = $apiKeys["OLLAMA_API_KEY"] }
 	}
 }
 

@@ -721,7 +721,12 @@ def _generate_prompt_payload(
     user_request: str = "",
 ) -> dict:
     project_data = load_project(project_path)
-    if llm_config and llm_config.get("api_key") and llm_config.get("model_provider"):
+    provider = str((llm_config or {}).get("model_provider", "") or "").strip().lower()
+    has_remote_credentials = bool((llm_config or {}).get("api_key"))
+    has_local_ollama = provider == "ollama" and bool((llm_config or {}).get("api_base")) and bool(
+        (llm_config or {}).get("model") or (llm_config or {}).get("model_name")
+    )
+    if llm_config and llm_config.get("model_provider") and (has_remote_credentials or has_local_ollama):
         prompt = build_illustration_prompt(project_data, chapter_text, user_request=user_request)
         try:
             response_text, metadata = generate_text_with_metadata(prompt, llm_config)

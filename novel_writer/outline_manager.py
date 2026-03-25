@@ -261,6 +261,9 @@ def _generate_outline_json(prompt: str, config: dict, project_path: str) -> dict
     if provider == "openai_compatible" and (not api_key or not api_base):
         log_warning("大纲生成: openai_compatible 缺少 api_key 或 api_base，直接使用兜底大纲。")
         return None
+    if provider == "ollama" and not api_base:
+        log_warning("大纲生成: ollama 缺少 api_base，直接使用兜底大纲。")
+        return None
     if provider in {"gemini", "grok", "deepseek", "doubao"} and not api_key:
         log_warning(f"大纲生成: provider={provider} 缺少 api_key，直接使用兜底大纲。")
         return None

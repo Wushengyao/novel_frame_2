@@ -81,6 +81,7 @@ output/
 - `grok`
 - `deepseek`
 - `doubao`
+- `ollama`
 - `openai_compatible`
 
 当前脚本默认主要面向：
@@ -89,6 +90,7 @@ output/
 - `grok`
 - `deepseek`
 - `doubao`
+- `ollama`
 
 ## 1. 配置 API key
 
@@ -102,6 +104,19 @@ export DOUBAO_API_KEY="你的豆包 / 火山方舟 Key"
 ```
 
 不用的 provider 可以留空。
+
+如果你使用本地 `ollama`，可以不填写任何 API key；脚本和 Web UI 默认会连接：
+
+```text
+http://127.0.0.1:11434/v1
+```
+
+建议先确认本地服务和模型都已准备好，例如：
+
+```bash
+ollama serve
+ollama pull llama3.2
+```
 
 ## 2. 初始化新项目
 
@@ -149,9 +164,15 @@ DEFAULT_OUTLINE_REQUEST=""
 ./linux/quick_start.sh doubao "极寒校园中的长期生存故事，要求兼顾生活建设、人物互动与细节描写。" "雪封穹顶"
 ```
 
+或直接使用本地 Ollama：
+
+```bash
+./linux/quick_start.sh ollama "极寒校园中的长期生存故事，要求兼顾生活建设、人物互动与细节描写。" "雪封穹顶"
+```
+
 初始化时脚本会：
 
-1. 从 `api_keys.sh` 读取对应 provider 的 API key
+1. 按 provider 读取 `api_keys.sh` 中对应的 API key（`ollama` 可为空）
 2. 根据 provider 自动选择默认模型
 3. 临时生成运行配置
 4. 调用 `app.py init`
@@ -224,6 +245,7 @@ DEFAULT_PROVIDER_OVERRIDE=""
 
 - 如果不传第四个参数，脚本会读取项目里保存的 `model_provider`
 - 如果传了新的 provider，脚本会自动用 `api_keys.sh` 中对应的 key
+- 如果切到 `ollama`，则默认不要求 API key
 
 ## 4. 重生成分卷 / 分章大纲
 
@@ -360,10 +382,15 @@ python3 app.py next --project ./output/novel_project_xxx --config ./runtime_conf
 - `grok` -> `grok-4.20-beta-latest-non-reasoning`
 - `deepseek` -> `deepseek-chat`
 - `doubao` -> `doubao-seed-1-8-251228`
+- `ollama` -> `llama3.2`
 
 其中豆包默认会使用火山方舟 Ark Chat API：
 
 - `api_base` -> `https://ark.cn-beijing.volces.com/api/v3`
+
+其中本地 Ollama 默认会使用 OpenAI 兼容入口：
+
+- `api_base` -> `http://127.0.0.1:11434/v1`
 
 说明：
 
