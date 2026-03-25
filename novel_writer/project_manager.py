@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,6 +62,22 @@ CHAPTER_TITLE_PATTERN = re.compile(
     r"^\s*(?:#{1,6}\s*)?第[0-9零一二三四五六七八九十百千万两〇]+[章节卷回部篇]\s*[：:.-]?\s*.+$"
 )
 STATS_PHASES = ("init", "outline", "writer", "summary")
+SNAPSHOT_DIR_NAME = "snapshots"
+SNAPSHOT_STATE_FILES = (
+    "project.json",
+    "world.json",
+    "characters.json",
+    "plot_state.json",
+    "style.json",
+    "outlines.json",
+)
+ROLLBACK_SUMMARY_KEYS = (
+    "recent_events",
+    "open_threads",
+    "foreshadowing",
+    "character_updates",
+    "next_chapter_goal",
+)
 
 
 def _utc_now() -> str:
@@ -469,6 +486,8 @@ def init_project(config_path: str) -> str:
         log_success("初始化项目: 分章大纲生成完成。")
     except Exception:  # pragma: no cover - outline generation should not block init
         log_error("初始化项目: 分卷/分章大纲生成失败，项目已创建，但需要稍后手动重生成大纲。")
+    snapshot_path = create_state_snapshot(str(project_path), chapter_count=0, note="post-init checkpoint")
+    log_success(f"初始化项目: 已写入初始状态快照 {snapshot_path}")
     log_success(f"初始化项目: 项目已完成初始化 {project_path}")
     return str(project_path)
 
@@ -486,6 +505,242 @@ def load_project(project_path: str) -> dict:
         "chapters_path": str(base / "chapters"),
         "summaries_path": str(base / "summaries"),
         "illustrations_path": str(base / "illustrations"),
+    }
+
+
+def _parse_numbered_name(name: str, prefix: str, suffix: str) -> int | None:
+    if not name.startswith(prefix):
+        return None
+    if suffix and not name.endswith(suffix):
+        return None
+    raw = name[len(prefix) :]
+    if suffix:
+        raw = raw[: -len(suffix)]
+    if not raw.isdigit():
+        return None
+    return int(raw)
+
+
+def _snapshot_dir(project_path: str, chapter_count: int) -> Path:
+    return Path(project_path) / SNAPSHOT_DIR_NAME / f"chapter_{chapter_count:04d}"
+
+
+def _normalize_chapter_count(project_path: str, chapter_count: int | None = None) -> int:
+    if chapter_count is not None:
+        return max(0, int(chapter_count))
+    project_data = load_json(str(Path(project_path) / "project.json"))
+    return max(0, int(project_data.get("chapter_count", 0) or 0))
+
+
+def list_state_snapshots(project_path: str) -> list[int]:
+    snapshots_dir = Path(project_path) / SNAPSHOT_DIR_NAME
+    if not snapshots_dir.exists():
+        return []
+    numbers = []
+    for path in snapshots_dir.iterdir():
+        if not path.is_dir():
+            continue
+        chapter_number = _parse_numbered_name(path.name, "chapter_", "")
+        if chapter_number is not None:
+            numbers.append(chapter_number)
+    return sorted(numbers)
+
+
+def get_latest_state_snapshot_chapter(project_path: str) -> int | None:
+    snapshots = list_state_snapshots(project_path)
+    return snapshots[-1] if snapshots else None
+
+
+def create_state_snapshot(project_path: str, chapter_count: int | None = None, note: str = "") -> str:
+    normalized_count = _normalize_chapter_count(project_path, chapter_count)
+    base = Path(project_path)
+    snapshot_dir = _snapshot_dir(project_path, normalized_count)
+    if snapshot_dir.exists():
+        shutil.rmtree(snapshot_dir)
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    copied_files = []
+    for filename in SNAPSHOT_STATE_FILES:
+        source_path = base / filename
+        if not source_path.exists():
+            continue
+        shutil.copy2(source_path, snapshot_dir / filename)
+        copied_files.append(filename)
+
+    save_json(
+        str(snapshot_dir / "snapshot.json"),
+        {
+            "chapter_count": normalized_count,
+            "created_at": _utc_now(),
+            "note": note.strip(),
+            "files": copied_files,
+        },
+    )
+    return str(snapshot_dir)
+
+
+def ensure_state_snapshot(project_path: str, chapter_count: int | None = None, note: str = "") -> str:
+    normalized_count = _normalize_chapter_count(project_path, chapter_count)
+    snapshot_dir = _snapshot_dir(project_path, normalized_count)
+    if snapshot_dir.exists():
+        return str(snapshot_dir)
+    return create_state_snapshot(project_path, chapter_count=normalized_count, note=note)
+
+
+def _restore_state_from_snapshot(project_path: str, chapter_count: int) -> bool:
+    base = Path(project_path)
+    snapshot_dir = _snapshot_dir(project_path, chapter_count)
+    if not snapshot_dir.exists():
+        return False
+
+    for filename in SNAPSHOT_STATE_FILES:
+        if filename == "project.json":
+            continue
+        source_path = snapshot_dir / filename
+        target_path = base / filename
+        if source_path.exists():
+            shutil.copy2(source_path, target_path)
+        elif target_path.exists():
+            target_path.unlink()
+    return True
+
+
+def _restore_plot_state_from_summary(project_path: str, chapter_count: int) -> str:
+    base = Path(project_path)
+    plot_state_path = base / "plot_state.json"
+    plot_state = load_json(str(plot_state_path))
+
+    if chapter_count == 0:
+        plot_state["recent_events"] = []
+        plot_state["open_threads"] = []
+        plot_state["foreshadowing"] = []
+        plot_state["character_updates"] = []
+        plot_state["next_chapter_goal"] = ""
+        save_json(str(plot_state_path), plot_state)
+        return "best_effort_reset"
+
+    summary_path = base / "summaries" / f"summary_{chapter_count:04d}.json"
+    if not summary_path.exists():
+        raise FileNotFoundError(
+            f"找不到第 {chapter_count} 章对应的快照或 summary 文件，无法回滚到该状态: {summary_path}"
+        )
+
+    summary = load_json(str(summary_path))
+    for key in ROLLBACK_SUMMARY_KEYS:
+        default_value = "" if key == "next_chapter_goal" else []
+        value = summary.get(key, default_value)
+        if key == "next_chapter_goal":
+            plot_state[key] = value if isinstance(value, str) else str(value or "")
+        elif isinstance(value, list):
+            plot_state[key] = value
+        elif value is None:
+            plot_state[key] = []
+        else:
+            plot_state[key] = [str(value)]
+    save_json(str(plot_state_path), plot_state)
+    return "summary_fallback"
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def _delete_future_artifacts(project_path: str, keep_chapter_count: int) -> dict:
+    base = Path(project_path)
+    removed = {
+        "chapters": [],
+        "summaries": [],
+        "illustrations": [],
+        "snapshots": [],
+    }
+
+    for chapter_path in sorted((base / "chapters").glob("chapter_*.md")):
+        chapter_number = _parse_numbered_name(chapter_path.name, "chapter_", ".md")
+        if chapter_number is not None and chapter_number > keep_chapter_count:
+            _remove_path(chapter_path)
+            removed["chapters"].append(str(chapter_path.relative_to(base)).replace("\\", "/"))
+
+    for summary_path in sorted((base / "summaries").glob("summary_*.json")):
+        chapter_number = _parse_numbered_name(summary_path.name, "summary_", ".json")
+        if chapter_number is not None and chapter_number > keep_chapter_count:
+            _remove_path(summary_path)
+            removed["summaries"].append(str(summary_path.relative_to(base)).replace("\\", "/"))
+
+    illustrations_dir = base / "illustrations"
+    if illustrations_dir.exists():
+        for record_dir in sorted(illustrations_dir.glob("chapter_*")):
+            chapter_number = _parse_numbered_name(record_dir.name, "chapter_", "")
+            if chapter_number is not None and chapter_number > keep_chapter_count:
+                _remove_path(record_dir)
+                removed["illustrations"].append(str(record_dir.relative_to(base)).replace("\\", "/"))
+
+    snapshots_dir = base / SNAPSHOT_DIR_NAME
+    if snapshots_dir.exists():
+        for snapshot_dir in sorted(snapshots_dir.glob("chapter_*")):
+            chapter_number = _parse_numbered_name(snapshot_dir.name, "chapter_", "")
+            if chapter_number is not None and chapter_number > keep_chapter_count:
+                _remove_path(snapshot_dir)
+                removed["snapshots"].append(str(snapshot_dir.relative_to(base)).replace("\\", "/"))
+
+    return removed
+
+
+def _update_project_chapter_count(project_path: str, chapter_count: int) -> None:
+    project_file = Path(project_path) / "project.json"
+    project_data = load_json(str(project_file))
+    project_data["chapter_count"] = max(0, int(chapter_count))
+    project_data["updated_at"] = _utc_now()
+    save_json(str(project_file), project_data)
+
+
+def rollback_project(project_path: str, to_chapter: int) -> dict:
+    base = Path(project_path)
+    project_file = base / "project.json"
+    if not project_file.exists():
+        raise FileNotFoundError(f"项目目录中缺少 project.json: {project_path}")
+
+    current_project = load_json(str(project_file))
+    current_count = max(0, int(current_project.get("chapter_count", 0) or 0))
+    target_count = max(0, int(to_chapter))
+
+    if target_count > current_count:
+        raise ValueError(f"目标章节数不能大于当前章节数: current={current_count}, target={target_count}")
+
+    if target_count == current_count:
+        snapshot_path = create_state_snapshot(project_path, chapter_count=target_count, note="refreshed current state")
+        return {
+            "current_chapter_count": current_count,
+            "target_chapter_count": target_count,
+            "restore_source": "noop",
+            "snapshot_path": snapshot_path,
+            "removed": {
+                "chapters": [],
+                "summaries": [],
+                "illustrations": [],
+                "snapshots": [],
+            },
+        }
+
+    restored_from = "snapshot"
+    if not _restore_state_from_snapshot(project_path, target_count):
+        restored_from = _restore_plot_state_from_summary(project_path, target_count)
+
+    removed = _delete_future_artifacts(project_path, keep_chapter_count=target_count)
+    _update_project_chapter_count(project_path, target_count)
+
+    from outline_manager import sync_outline_progress
+
+    sync_outline_progress(project_path)
+    snapshot_path = create_state_snapshot(project_path, chapter_count=target_count, note="post-rollback state")
+    return {
+        "current_chapter_count": current_count,
+        "target_chapter_count": target_count,
+        "restore_source": restored_from,
+        "snapshot_path": snapshot_path,
+        "removed": removed,
     }
 
 

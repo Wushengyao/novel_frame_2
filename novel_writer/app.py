@@ -23,11 +23,15 @@ from outline_manager import (
 )
 from prompt_builder import build_writer_prompt
 from project_manager import (
+    create_state_snapshot,
+    ensure_state_snapshot,
+    get_latest_state_snapshot_chapter,
     get_last_chapter_text,
     init_project,
     load_json,
     load_project,
     normalize_chapter_text,
+    rollback_project,
     save_chapter,
     update_project_stats,
 )
@@ -81,6 +85,12 @@ def run_next_chapter(project_path: str, config: dict, user_request: str = ""):
     log_info(f"正文生成: 开始准备下一章，项目={project_path}")
     outlines = ensure_project_outlines(project_path, config)
     project_data = load_project(project_path)
+    current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
+    ensure_state_snapshot(
+        project_path,
+        chapter_count=current_chapter_count,
+        note="pre-write checkpoint",
+    )
     next_context = find_next_chapter_context(outlines, int(project_data["project"].get("chapter_count", 0) or 0))
     if next_context is None:
         log_error("正文生成: 未找到可用的下一章章纲。")
@@ -122,6 +132,8 @@ def run_next_chapter(project_path: str, config: dict, user_request: str = ""):
     update_plot_state(project_path, chapter_text, config)
     log_info("正文生成: 开始同步章纲进度。")
     sync_outline_progress(project_path)
+    snapshot_path = create_state_snapshot(project_path, note="post-write checkpoint")
+    log_success(f"正文生成: 已写入状态快照 {snapshot_path}")
     log_success("正文生成: 本章流程已完成。")
     return chapter_path
 
@@ -148,6 +160,11 @@ def _print_status(project_path: str) -> None:
     print(f"项目名称: {project.get('name', '')}")
     print(f"章节数量: {project.get('chapter_count', 0)}")
     print(f"更新时间: {project.get('updated_at', '')}")
+    latest_snapshot = get_latest_state_snapshot_chapter(project_path)
+    if latest_snapshot is None:
+        print("状态快照: 暂无")
+    else:
+        print(f"状态快照: 已保存到第 {latest_snapshot} 章")
     print(f"模型后端: {llm_config.get('model_provider', '')}")
     print(f"模型名称: {llm_config.get('model_name') or llm_config.get('model', '')}")
     print(
@@ -303,6 +320,15 @@ def main() -> None:
     status_parser = subparsers.add_parser("status", help="Show project status")
     status_parser.add_argument("--project", required=True, help="Path to novel_project")
 
+    rollback_parser = subparsers.add_parser("rollback", help="Rollback project state to a previous chapter")
+    rollback_parser.add_argument("--project", required=True, help="Path to novel_project")
+    rollback_parser.add_argument(
+        "--to-chapter",
+        required=True,
+        type=int,
+        help="Keep chapters up to this number and rollback state to the end of that chapter",
+    )
+
     outline_parser = subparsers.add_parser("outline", help="Generate or regenerate volume/chapter outlines")
     outline_parser.add_argument("--project", required=True, help="Path to novel_project")
     outline_parser.add_argument(
@@ -409,6 +435,26 @@ def main() -> None:
                 print(f"- {image.get('relative_path', '')}")
     elif args.command == "status":
         log_info("CLI: 收到 status 命令。")
+        _print_status(args.project)
+    elif args.command == "rollback":
+        log_info(f"CLI: 收到 rollback 命令，目标章节={args.to_chapter}。")
+        if args.to_chapter < 0:
+            parser.error("--to-chapter must be at least 0")
+        result = rollback_project(args.project, args.to_chapter)
+        print(
+            f"项目已回滚: {result.get('current_chapter_count', 0)} -> "
+            f"{result.get('target_chapter_count', 0)}"
+        )
+        print(f"状态恢复来源: {result.get('restore_source', '')}")
+        print(f"最新快照: {result.get('snapshot_path', '')}")
+        removed = result.get("removed") or {}
+        print(
+            "已清理内容: "
+            f"chapters={len(removed.get('chapters', []))}, "
+            f"summaries={len(removed.get('summaries', []))}, "
+            f"illustrations={len(removed.get('illustrations', []))}, "
+            f"snapshots={len(removed.get('snapshots', []))}"
+        )
         _print_status(args.project)
     elif args.command == "outline":
         log_info(f"CLI: 收到 outline 命令，stage={args.stage}。")
