@@ -10,6 +10,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from console_logger import log_error, log_info, log_success
 from illustration_manager import illustrate_chapters, illustrate_project_assets
 from llm_client import generate_text_with_metadata
 from outline_manager import (
@@ -77,11 +78,18 @@ def _extract_illustration_overrides(args: argparse.Namespace) -> dict:
 
 
 def run_next_chapter(project_path: str, config: dict, user_request: str = ""):
+    log_info(f"正文生成: 开始准备下一章，项目={project_path}")
     outlines = ensure_project_outlines(project_path, config)
     project_data = load_project(project_path)
     next_context = find_next_chapter_context(outlines, int(project_data["project"].get("chapter_count", 0) or 0))
     if next_context is None:
+        log_error("正文生成: 未找到可用的下一章章纲。")
         raise ValueError("当前没有可用的下一章分章大纲，请先重新生成分章大纲。")
+    log_info(
+        "正文生成: 本次将写作 "
+        f"第{next_context['volume'].get('volume_number', '?')}卷 / "
+        f"第{next_context['chapter'].get('chapter_number', '?')}章《{next_context['chapter'].get('title', '')}》"
+    )
     last_chapter = get_last_chapter_text(project_path)
     recent_text = last_chapter[-3000:] if last_chapter else "这是小说的开篇章节，请自然展开故事。"
 
@@ -93,9 +101,11 @@ def run_next_chapter(project_path: str, config: dict, user_request: str = ""):
         chapter_outline=next_context["chapter"],
     )
     try:
+        log_info("正文生成: 正在请求模型生成章节正文。")
         response_text, metadata = generate_text_with_metadata(prompt, config)
     except Exception:
         update_project_stats(project_path, phase="writer", success=False, usage=None)
+        log_error("正文生成: 模型写作失败。")
         raise
 
     update_project_stats(
@@ -104,10 +114,15 @@ def run_next_chapter(project_path: str, config: dict, user_request: str = ""):
         success=True,
         usage=metadata.get("usage"),
     )
+    log_success("正文生成: 模型返回成功。")
     chapter_text = normalize_chapter_text(response_text)
     chapter_path = save_chapter(project_path, chapter_text)
+    log_success(f"正文生成: 章节已保存到 {chapter_path}")
+    log_info("正文生成: 开始更新剧情状态。")
     update_plot_state(project_path, chapter_text, config)
+    log_info("正文生成: 开始同步章纲进度。")
     sync_outline_progress(project_path)
+    log_success("正文生成: 本章流程已完成。")
     return chapter_path
 
 
@@ -314,9 +329,11 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "init":
+        log_info("CLI: 收到 init 命令。")
         project_path = init_project(args.config)
         print(f"项目已初始化: {project_path}")
     elif args.command == "next":
+        log_info("CLI: 收到 next 命令。")
         if args.count < 1:
             parser.error("--count must be at least 1")
         config = (
@@ -324,6 +341,7 @@ def main() -> None:
             if args.config
             else _load_runtime_config(args.project)
         )
+        log_info(f"CLI: 本次计划连续生成 {args.count} 章。")
         chapter_paths = run_next_chapters(
             args.project,
             config,
@@ -348,6 +366,7 @@ def main() -> None:
                 for image in result.get("images", []):
                     print(f"- {image.get('relative_path', '')}")
     elif args.command == "illustrate":
+        log_info("CLI: 收到 illustrate 命令。")
         config = _extract_llm_config(args.config) if args.config else None
         chapter_refs = [args.chapter]
         if args.all:
@@ -368,6 +387,7 @@ def main() -> None:
             for image in result.get("images", []):
                 print(f"- {image.get('relative_path', '')}")
     elif args.command == "illustrate-assets":
+        log_info("CLI: 收到 illustrate-assets 命令。")
         result = illustrate_project_assets(
             args.project,
             user_request=args.user_request,
@@ -388,8 +408,10 @@ def main() -> None:
             for image in portrait.get("images", []):
                 print(f"- {image.get('relative_path', '')}")
     elif args.command == "status":
+        log_info("CLI: 收到 status 命令。")
         _print_status(args.project)
     elif args.command == "outline":
+        log_info(f"CLI: 收到 outline 命令，stage={args.stage}。")
         config = (
             _extract_llm_config(args.config)
             if args.config

@@ -28,6 +28,7 @@ DEFAULT_AUTO_ILLUSTRATE="false"
 source "$SCRIPT_DIR/script_common.sh"
 load_api_keys
 PYTHON_EXE="$(resolve_python_exe)"
+log_info "quick_continue: 已加载脚本和 API keys。"
 
 if [[ $# -lt 1 ]]; then
   PROJECT_PATH="$(prompt_optional_value "Project directory" "$DEFAULT_PROJECT_PATH")"
@@ -97,6 +98,7 @@ NOVEL_THINKING_LEVEL_OVERRIDE="${NOVEL_THINKING_LEVEL_OVERRIDE:-$DEFAULT_THINKIN
 NOVEL_API_KEY="${NOVEL_API_KEY:-$(api_key_for_provider "$RESOLVED_PROVIDER")}"
 
 ensure_api_key_present "$RESOLVED_PROVIDER" "$NOVEL_API_KEY"
+log_info "quick_continue: project=$PROJECT_PATH, provider=$RESOLVED_PROVIDER, count=$CHAPTER_COUNT"
 
 export NOVEL_PROVIDER_OVERRIDE
 export NOVEL_MODEL_NAME_OVERRIDE
@@ -109,6 +111,7 @@ export NOVEL_API_KEY
 
 TEMP_CONFIG="$(make_temp_config_path)"
 trap 'rm -f "$TEMP_CONFIG"' EXIT
+log_info "quick_continue: 正在写入临时配置 $TEMP_CONFIG"
 write_continue_config "$TEMP_CONFIG" "$PROJECT_PATH"
 
 NEXT_ARGS=(
@@ -123,21 +126,23 @@ if [[ -n "$USER_REQUEST" ]]; then
 fi
 
 set +e
+log_info "quick_continue: 开始执行正文续写。"
 NEXT_OUTPUT="$("${NEXT_ARGS[@]}" 2>&1)"
 NEXT_EXIT_CODE=$?
 set -e
 printf '%s\n' "$NEXT_OUTPUT"
 
 if [[ $NEXT_EXIT_CODE -ne 0 ]]; then
-  echo "章节生成失败，退出码: $NEXT_EXIT_CODE" >&2
+  log_error "quick_continue: 章节生成失败，退出码: $NEXT_EXIT_CODE"
   exit "$NEXT_EXIT_CODE"
 fi
+log_success "quick_continue: 正文续写完成。"
 
 if [[ "${DEFAULT_AUTO_ILLUSTRATE,,}" == "true" ]]; then
   mapfile -t GENERATED_CHAPTER_PATHS < <(printf '%s\n' "$NEXT_OUTPUT" | sed -n 's/^新章节已保存: //p')
 
   if [[ ${#GENERATED_CHAPTER_PATHS[@]} -gt 0 ]]; then
-    echo "正在尝试自动创建插图..."
+    log_info "quick_continue: 正在尝试自动创建插图。"
     for chapter_path in "${GENERATED_CHAPTER_PATHS[@]}"; do
       ILLUSTRATE_ARGS=(
         "$PYTHON_EXE" "$PROJECT_ROOT/app.py" illustrate
@@ -154,16 +159,19 @@ if [[ "${DEFAULT_AUTO_ILLUSTRATE,,}" == "true" ]]; then
 
       if [[ $ILLUSTRATE_EXIT_CODE -ne 0 ]]; then
         if test_illustration_connection_failure "$ILLUSTRATE_OUTPUT"; then
-          echo "ComfyUI 不可连接，已跳过自动插图创建。" >&2
+          log_warning "quick_continue: ComfyUI 不可连接，已跳过自动插图创建。"
           break
         fi
-        echo "插图生成失败，退出码: $ILLUSTRATE_EXIT_CODE" >&2
+        log_error "quick_continue: 插图生成失败，退出码: $ILLUSTRATE_EXIT_CODE"
         exit "$ILLUSTRATE_EXIT_CODE"
       fi
     done
+    log_success "quick_continue: 自动插图流程结束。"
   else
-    echo "未检测到新章节路径，已跳过自动插图创建。" >&2
+    log_warning "quick_continue: 未检测到新章节路径，已跳过自动插图创建。"
   fi
 fi
 
+log_info "quick_continue: 输出项目状态。"
 "$PYTHON_EXE" "$PROJECT_ROOT/app.py" status --project "$PROJECT_PATH"
+log_success "quick_continue: 流程结束。"

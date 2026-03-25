@@ -11,7 +11,14 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # 如果同时传入命令行参数，则命令行参数优先。
 # ==============================
 DEFAULT_PROVIDER="gemini"
-DEFAULT_STORY_REQUEST="""故事发生在高中校园中，男女主都是学生。故事的开始是放假期间只有主角们在校，突然极寒天气与暴风雪来临，他们被困在学校中，他们如何御寒储备物资并生存生活下去，故事由此展开。角色方面，男主力气较大，行为经常有意外的效果，团队力量担当，乐观；女主1号是倾国倾城的美丽少女，身材娇小纤细，团队智力担当，傲娇；女主二号同样美丽动人，善于照顾他人，温柔。小说故事聚焦于他们合作生存的过程上，从初期的保暖，到逐步确保水源和食物来源，然后再逐步提升生活水平。请注意：小说需要具备长篇潜力。"""
+DEFAULT_STORY_REQUEST="""故事发生在一座高级奢华的校园中，3位主角都是学生。男主是团队力量担当，乐观；女主1号是倾国倾城的美丽少女，身材娇小纤细，团队智力担当，傲娇；女主二号同样美丽动人，善于照顾他人，温柔。小说故事聚焦于他们合作生存的过程上，从初期的保暖，到逐步确保水源和食物来源，然后再逐步提升生活水平。总体风格温馨，并加入情感升温。小说应当详细描写他们协力生存的方方面面，重点描写他们搭建/升级温暖的避难所，并且包括过程中的感情升温与适量的香艳情节。
+故事情节方面：
+1、故事的开始是放假期间只有主角们在校，突然极寒天气与暴风雪来临，他们被困在学校中。一开始他们认为只是短暂的极端天气很快会有救援，所以在只是团聚在女生宿舍避寒并且做了短期规划。
+2、但是显然他们低估了极寒风暴的力量，温度持续下降，救援也不会来。他们必须转战更加保暖的地方御寒（比如桑拿房）、搜集并储备大量物资，并尝试资源再生与可持续利用，不断改善生活条件，由生存转向生活。
+3、桑拿房附近的资源也会耗尽，因此它们研究出一套校内探查与物资搜刮的装备与行动方案。可靠安全地收集更多物资，进一步提高生活水平，并逐步实现可持续。
+4、新的希望，外部电台发来断续的信号，他们决定去看看。工作内容转向保温载具的设计与改造。
+5、...
+"""
 DEFAULT_PROJECT_NAME="雪封穹顶"
 DEFAULT_PROJECT_DESCRIPTION="由模型根据需求自动生成设定的长篇小说项目。"
 DEFAULT_OUTLINE_REQUEST=""
@@ -29,6 +36,7 @@ DEFAULT_AUTO_CREATE_COVER_AND_PORTRAITS="false"
 source "$SCRIPT_DIR/script_common.sh"
 load_api_keys
 PYTHON_EXE="$(resolve_python_exe)"
+log_info "quick_start: 已加载脚本和 API keys。"
 
 if [[ $# -lt 1 ]]; then
   PROVIDER="$(normalize_provider "$(prompt_optional_value "Provider (gemini/grok/deepseek/doubao)" "$DEFAULT_PROVIDER")")"
@@ -81,6 +89,7 @@ NOVEL_TIMEOUT="${NOVEL_TIMEOUT:-$DEFAULT_TIMEOUT}"
 NOVEL_THINKING_LEVEL="${NOVEL_THINKING_LEVEL:-${DEFAULT_THINKING_LEVEL:-$(default_thinking_level_for_provider "$PROVIDER")}}"
 
 ensure_api_key_present "$PROVIDER" "$NOVEL_API_KEY"
+log_info "quick_start: provider=$PROVIDER, project_name=$PROJECT_NAME"
 
 export NOVEL_PROVIDER
 export NOVEL_PROJECT_NAME
@@ -97,10 +106,13 @@ export NOVEL_THINKING_LEVEL
 
 TEMP_CONFIG="$(make_temp_config_path)"
 trap 'rm -f "$TEMP_CONFIG"' EXIT
+log_info "quick_start: 正在写入临时配置 $TEMP_CONFIG"
 write_init_config "$TEMP_CONFIG"
 
+log_info "quick_start: 开始执行初始化。"
 INIT_OUTPUT="$("$PYTHON_EXE" "$PROJECT_ROOT/app.py" init --config "$TEMP_CONFIG")"
 printf '%s\n' "$INIT_OUTPUT"
+log_success "quick_start: 初始化命令执行完成。"
 
 PROJECT_PATH="$(printf '%s\n' "$INIT_OUTPUT" | sed -n 's/^项目已初始化: //p' | tail -n 1)"
 if [[ -z "$PROJECT_PATH" ]]; then
@@ -112,7 +124,7 @@ if [[ -z "$PROJECT_PATH" ]]; then
 fi
 
 if [[ "${DEFAULT_AUTO_CREATE_COVER_AND_PORTRAITS,,}" == "true" ]]; then
-  echo "正在尝试自动创建小说封面和人物立绘..."
+  log_info "quick_start: 正在尝试自动创建小说封面和人物立绘。"
   set +e
   ASSET_OUTPUT="$("$PYTHON_EXE" "$PROJECT_ROOT/app.py" illustrate-assets --project "$PROJECT_PATH" 2>&1)"
   ASSET_EXIT_CODE=$?
@@ -121,14 +133,18 @@ if [[ "${DEFAULT_AUTO_CREATE_COVER_AND_PORTRAITS,,}" == "true" ]]; then
 
   if [[ $ASSET_EXIT_CODE -ne 0 ]]; then
     if test_illustration_connection_failure "$ASSET_OUTPUT"; then
-      echo "ComfyUI 不可连接，已跳过自动创建封面和人物立绘。" >&2
+      log_warning "quick_start: ComfyUI 不可连接，已跳过自动创建封面和人物立绘。"
     else
-      echo "封面/人物立绘生成失败，退出码: $ASSET_EXIT_CODE" >&2
+      log_error "quick_start: 封面/人物立绘生成失败，退出码: $ASSET_EXIT_CODE"
       exit "$ASSET_EXIT_CODE"
     fi
+  else
+    log_success "quick_start: 自动创建封面和人物立绘完成。"
   fi
 fi
 
+log_info "quick_start: 输出项目状态。"
 "$PYTHON_EXE" "$PROJECT_ROOT/app.py" status --project "$PROJECT_PATH"
+log_success "quick_start: 流程结束。"
 printf '重生成大纲示例: ./linux/quick_outline.sh "%s" all "想补强的剧情要求"\n' "$PROJECT_PATH"
 printf '续写示例: ./linux/quick_continue.sh "%s" 3 "想看的情节"\n' "$PROJECT_PATH"

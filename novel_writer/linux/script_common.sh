@@ -3,6 +3,28 @@
 SCRIPT_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT_DIR="$(cd "${SCRIPT_COMMON_DIR}/.." && pwd)"
 
+script_log() {
+  local level="$1"
+  shift
+  printf '[%s] [%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$level" "$*" >&2
+}
+
+log_info() {
+  script_log "INFO" "$@"
+}
+
+log_success() {
+  script_log "SUCCESS" "$@"
+}
+
+log_warning() {
+  script_log "WARN" "$@"
+}
+
+log_error() {
+  script_log "ERROR" "$@"
+}
+
 prompt_optional_value() {
   local prompt_text="$1"
   local default_value="${2:-}"

@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
+from console_logger import log_error, log_info, log_success, log_warning
 from llm_client import generate_text_with_metadata
 from prompt_builder import build_chapter_outline_prompt, build_volume_outline_prompt
 from project_manager import load_json, load_project, save_json, update_project_stats
@@ -255,19 +256,24 @@ def _generate_outline_json(prompt: str, config: dict, project_path: str) -> dict
     api_key = str(config.get("api_key", "") or "").strip()
     api_base = str(config.get("api_base", "") or "").strip()
     if not model_name:
+        log_warning("大纲生成: 未提供模型名称，直接使用兜底大纲。")
         return None
     if provider == "openai_compatible" and (not api_key or not api_base):
+        log_warning("大纲生成: openai_compatible 缺少 api_key 或 api_base，直接使用兜底大纲。")
         return None
     if provider in {"gemini", "grok", "deepseek", "doubao"} and not api_key:
+        log_warning(f"大纲生成: provider={provider} 缺少 api_key，直接使用兜底大纲。")
         return None
 
     last_error = None
-    for _ in range(2):
+    for attempt in range(2):
         try:
+            log_info(f"大纲生成: 第 {attempt + 1} 次请求模型。")
             response_text, metadata = generate_text_with_metadata(prompt, config)
         except Exception as exc:  # pragma: no cover - resilience path
             update_project_stats(project_path, phase="outline", success=False, usage=None)
             last_error = exc
+            log_warning(f"大纲生成: 第 {attempt + 1} 次请求失败，原因: {exc}")
             continue
 
         try:
@@ -277,15 +283,19 @@ def _generate_outline_json(prompt: str, config: dict, project_path: str) -> dict
                 success=True,
                 usage=metadata.get("usage"),
             )
+            log_success("大纲生成: 模型返回成功，已解析 JSON。")
             return _extract_json_object(response_text)
         except Exception as exc:  # pragma: no cover - resilience path
             last_error = exc
+            log_warning(f"大纲生成: 返回内容解析失败，原因: {exc}")
     if last_error is not None:
+        log_warning(f"大纲生成: 改用兜底大纲。最后错误: {last_error}")
         return None
     return None
 
 
 def regenerate_volume_outline(project_path: str, config: dict, user_request: str = "") -> dict:
+    log_info(f"分卷大纲: 开始生成，项目={project_path}")
     project_data = load_project(project_path)
     prompt = build_volume_outline_prompt(
         {
@@ -296,9 +306,14 @@ def regenerate_volume_outline(project_path: str, config: dict, user_request: str
     )
     generated = _generate_outline_json(prompt, config, project_path)
     outlines = normalize_outlines(generated) if generated else _fallback_volume_outline(project_data, user_request=user_request)
+    if generated:
+        log_success(f"分卷大纲: 模型生成完成，共 {len(outlines.get('volumes', []))} 卷。")
+    else:
+        log_warning(f"分卷大纲: 使用兜底结果，共 {len(outlines.get('volumes', []))} 卷。")
     outlines["meta"]["chapter_outline_stale"] = True
     outlines["meta"]["last_volume_outline_request"] = user_request.strip()
     save_outlines(project_path, outlines)
+    log_success("分卷大纲: 已写入 outlines.json，并标记分章大纲需要同步。")
     return outlines
 
 
@@ -342,8 +357,13 @@ def regenerate_chapter_outline(
     volume_number: int | None = None,
     user_request: str = "",
 ) -> dict:
+    if volume_number is None:
+        log_info(f"分章大纲: 开始为全部卷生成，项目={project_path}")
+    else:
+        log_info(f"分章大纲: 开始为第 {volume_number} 卷生成，项目={project_path}")
     existing_outlines = load_outlines(project_path)
     if not existing_outlines.get("volumes"):
+        log_warning("分章大纲: 当前没有分卷大纲，先自动生成分卷大纲。")
         existing_outlines = regenerate_volume_outline(project_path, config, user_request="")
 
     project_data = load_project(project_path)
@@ -366,6 +386,10 @@ def regenerate_chapter_outline(
 
         should_regenerate = volume_number is None or _safe_int(volume.get("volume_number"), 0) == volume_number
         if should_regenerate:
+            log_info(
+                f"分章大纲: 正在生成第 {volume.get('volume_number', '?')} 卷，"
+                f"计划 {planned_count} 章，已完成 {completed_count} 章。"
+            )
             prompt = build_chapter_outline_prompt(
                 project_data,
                 volume=volume,
@@ -389,11 +413,14 @@ def regenerate_chapter_outline(
                 }
             )["volumes"][0]["chapters"]
             volume_chapters = preserved_completed + normalized_generated[completed_count:planned_count]
+            log_success(f"分章大纲: 第 {volume.get('volume_number', '?')} 卷生成完成。")
         else:
             volume_chapters = deepcopy(existing_volume.get("chapters") or [])
+            log_info(f"分章大纲: 第 {volume.get('volume_number', '?')} 卷沿用现有章纲。")
 
         if len(volume_chapters) < planned_count:
             volume_chapters.extend(_fallback_chapters_for_volume(volume)[len(volume_chapters) : planned_count])
+            log_warning(f"分章大纲: 第 {volume.get('volume_number', '?')} 卷章纲不足，已用兜底章纲补齐。")
         volume_copy = deepcopy(volume)
         volume_copy["chapters"] = volume_chapters[:planned_count]
         new_volumes.append(volume_copy)
@@ -404,10 +431,15 @@ def regenerate_chapter_outline(
     updated_outlines["meta"]["chapter_outline_stale"] = not _all_volumes_have_chapters(updated_outlines)
     save_outlines(project_path, updated_outlines)
     sync_outline_progress(project_path, updated_outlines)
+    if updated_outlines["meta"]["chapter_outline_stale"]:
+        log_warning("分章大纲: 已保存，但仍有卷缺少完整章纲。")
+    else:
+        log_success("分章大纲: 全部章纲已保存并同步到剧情状态。")
     return updated_outlines
 
 
 def sync_outline_progress(project_path: str, outlines: dict | None = None) -> dict:
+    log_info(f"章纲进度同步: 开始同步项目 {project_path}")
     outline_data = normalize_outlines(outlines) if outlines is not None else load_outlines(project_path)
     written_count = int(load_json(str(Path(project_path) / "project.json")).get("chapter_count", 0) or 0)
     chapter_index = 0
@@ -418,6 +450,7 @@ def sync_outline_progress(project_path: str, outlines: dict | None = None) -> di
     outline_data = normalize_outlines(outline_data)
     save_outlines(project_path, outline_data)
     _sync_plot_state_next_goal(project_path, outline_data)
+    log_success(f"章纲进度同步: 已按已写章节数 {written_count} 更新章纲状态。")
     return outline_data
 
 
@@ -447,14 +480,18 @@ def find_next_chapter_context(outlines: dict, written_chapter_count: int) -> dic
 def ensure_project_outlines(project_path: str, config: dict) -> dict:
     outlines = load_outlines(project_path)
     if not outlines.get("volumes"):
+        log_warning("章纲检查: 未发现 outlines.json，准备自动补全分卷和分章大纲。")
         regenerate_volume_outline(project_path, config, user_request="")
         outlines = regenerate_chapter_outline(project_path, config, volume_number=None, user_request="")
     elif outlines.get("meta", {}).get("chapter_outline_stale"):
+        log_error("章纲检查: 分卷大纲已更新，但分章大纲尚未同步。")
         raise ValueError("分卷大纲已经更新，但分章大纲尚未同步，请先重新生成分章大纲。")
     elif not _all_volumes_have_chapters(outlines):
+        log_warning("章纲检查: 检测到章纲不完整，准备自动补齐。")
         outlines = regenerate_chapter_outline(project_path, config, volume_number=None, user_request="")
     else:
         outlines = sync_outline_progress(project_path, outlines)
+        log_success("章纲检查: 分卷和分章大纲均可用。")
     return outlines
 
 

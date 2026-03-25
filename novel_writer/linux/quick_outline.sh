@@ -28,6 +28,7 @@ DEFAULT_THINKING_LEVEL_OVERRIDE=""
 source "$SCRIPT_DIR/script_common.sh"
 load_api_keys
 PYTHON_EXE="$(resolve_python_exe)"
+log_info "quick_outline: 已加载脚本和 API keys。"
 
 if [[ $# -lt 1 ]]; then
   PROJECT_PATH="$(prompt_optional_value "Project directory" "$DEFAULT_PROJECT_PATH")"
@@ -109,6 +110,7 @@ NOVEL_THINKING_LEVEL_OVERRIDE="${NOVEL_THINKING_LEVEL_OVERRIDE:-$DEFAULT_THINKIN
 NOVEL_API_KEY="${NOVEL_API_KEY:-$(api_key_for_provider "$RESOLVED_PROVIDER")}"
 
 ensure_api_key_present "$RESOLVED_PROVIDER" "$NOVEL_API_KEY"
+log_info "quick_outline: project=$PROJECT_PATH, stage=$STAGE, provider=$RESOLVED_PROVIDER"
 
 export NOVEL_PROVIDER_OVERRIDE
 export NOVEL_MODEL_NAME_OVERRIDE
@@ -121,6 +123,7 @@ export NOVEL_API_KEY
 
 TEMP_CONFIG="$(make_temp_config_path)"
 trap 'rm -f "$TEMP_CONFIG"' EXIT
+log_info "quick_outline: 正在写入临时配置 $TEMP_CONFIG"
 write_continue_config "$TEMP_CONFIG" "$PROJECT_PATH"
 
 OUTLINE_ARGS=(
@@ -138,5 +141,9 @@ if [[ "$STAGE" == "chapters" && -n "$VOLUME_NUMBER" ]]; then
   OUTLINE_ARGS+=(--volume "$VOLUME_NUMBER")
 fi
 
+log_info "quick_outline: 开始执行大纲重生成。"
 "${OUTLINE_ARGS[@]}"
+log_success "quick_outline: 大纲重生成完成。"
+log_info "quick_outline: 输出项目状态。"
 "$PYTHON_EXE" "$PROJECT_ROOT/app.py" status --project "$PROJECT_PATH"
+log_success "quick_outline: 流程结束。"

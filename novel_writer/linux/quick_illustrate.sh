@@ -27,6 +27,7 @@ DEFAULT_TIMEOUT_OVERRIDE=""
 source "$SCRIPT_DIR/script_common.sh"
 load_api_keys
 PYTHON_EXE="$(resolve_python_exe)"
+log_info "quick_illustrate: 已加载脚本和 API keys。"
 
 if [[ $# -lt 1 ]]; then
   PROJECT_PATH="$(prompt_optional_value "Project directory" "$DEFAULT_PROJECT_PATH")"
@@ -88,6 +89,7 @@ NOVEL_TIMEOUT_OVERRIDE="${NOVEL_TIMEOUT_OVERRIDE:-$DEFAULT_TIMEOUT_OVERRIDE}"
 NOVEL_API_KEY="${NOVEL_API_KEY:-$(api_key_for_provider "$RESOLVED_PROVIDER")}"
 
 ensure_api_key_present "$RESOLVED_PROVIDER" "$NOVEL_API_KEY"
+log_info "quick_illustrate: project=$PROJECT_PATH, chapter=$CHAPTER, provider=$RESOLVED_PROVIDER"
 
 export NOVEL_MODEL_NAME_OVERRIDE
 export NOVEL_API_BASE_OVERRIDE
@@ -98,6 +100,7 @@ export NOVEL_API_KEY
 
 TEMP_CONFIG="$(make_temp_config_path)"
 trap 'rm -f "$TEMP_CONFIG"' EXIT
+log_info "quick_illustrate: 正在写入临时配置 $TEMP_CONFIG"
 write_illustrate_config "$TEMP_CONFIG" "$PROJECT_PATH"
 
 ILLUSTRATE_ARGS=(
@@ -119,4 +122,6 @@ if [[ -n "$CHECKPOINT" ]]; then
   ILLUSTRATE_ARGS+=(--checkpoint "$CHECKPOINT")
 fi
 
+log_info "quick_illustrate: 开始执行插图生成。"
 "${ILLUSTRATE_ARGS[@]}"
+log_success "quick_illustrate: 插图生成流程结束。"

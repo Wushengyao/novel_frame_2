@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from console_logger import log_error, log_info, log_success, log_warning
 from llm_client import generate_text_with_metadata
 from prompt_builder import build_init_prompt
 
@@ -334,6 +335,7 @@ def _generate_initial_story_data(config: dict) -> tuple[dict, dict]:
     init_stats = _build_project_stats()
 
     if not config.get("init_with_llm", False):
+        log_info("初始化设定: 已关闭 LLM 初始化，使用本地兜底设定。")
         return fallback_data, {
             "used_llm": False,
             "llm_init_error": "",
@@ -356,24 +358,33 @@ def _generate_initial_story_data(config: dict) -> tuple[dict, dict]:
     llm_init_error = ""
     generated_data = None
 
-    for _ in range(2):
+    log_info("初始化设定: 开始请求模型生成世界观、人物、剧情状态和文风。")
+    for attempt in range(2):
         try:
+            log_info(f"初始化设定: 第 {attempt + 1} 次请求模型。")
             response_text, metadata = generate_text_with_metadata(prompt, llm_config)
         except Exception as exc:  # pragma: no cover - resilience path
             _merge_usage_stats(init_stats["total"], success=False, usage=None)
             _merge_usage_stats(init_stats["by_phase"]["init"], success=False, usage=None)
             llm_init_error = str(exc)
+            log_warning(f"初始化设定: 第 {attempt + 1} 次请求失败，原因: {llm_init_error}")
             continue
 
         try:
             _merge_usage_stats(init_stats["total"], success=True, usage=metadata.get("usage"))
             _merge_usage_stats(init_stats["by_phase"]["init"], success=True, usage=metadata.get("usage"))
             generated_data = _normalize_init_result(_extract_json_object(response_text))
+            log_success("初始化设定: 模型返回成功，已解析初始化设定。")
             break
         except Exception as exc:  # pragma: no cover - resilience path
             llm_init_error = str(exc)
+            log_warning(f"初始化设定: 返回内容解析失败，原因: {llm_init_error}")
 
     if generated_data is None:
+        if llm_init_error:
+            log_warning(f"初始化设定: 改用本地兜底设定。最后错误: {llm_init_error}")
+        else:
+            log_warning("初始化设定: 未拿到可用结果，改用本地兜底设定。")
         return fallback_data, {
             "used_llm": False,
             "llm_init_error": llm_init_error,
@@ -406,20 +417,24 @@ def load_json(path: str) -> dict:
 
 
 def init_project(config_path: str) -> str:
+    log_info(f"初始化项目: 开始读取配置 {config_path}")
     config_file = Path(config_path).resolve()
     config = load_json(str(config_file))
     project_id = config.get("project_id") or _build_project_id()
     project_path = _resolve_project_path(config_file, config, project_id)
+    log_info(f"初始化项目: 准备创建项目目录 {project_path}")
     project_path.mkdir(parents=True, exist_ok=True)
     (project_path / "chapters").mkdir(exist_ok=True)
     (project_path / "summaries").mkdir(exist_ok=True)
     (project_path / "illustrations").mkdir(exist_ok=True)
+    log_success("初始化项目: 基础目录已创建。")
 
     generated_data, init_meta = _generate_initial_story_data(config)
     world = generated_data["world"]
     characters = generated_data["characters"]
     plot_state = _normalize_initial_plot_state(generated_data["plot_state"])
     style = generated_data["style"]
+    log_info("初始化项目: 正在写入基础 JSON 文件。")
 
     project_data = {
         "project_id": project_id,
@@ -440,15 +455,21 @@ def init_project(config_path: str) -> str:
     save_json(str(project_path / "characters.json"), characters)
     save_json(str(project_path / "plot_state.json"), plot_state)
     save_json(str(project_path / "style.json"), style)
+    log_success("初始化项目: 基础设定文件写入完成。")
     try:
         from outline_manager import regenerate_chapter_outline, regenerate_volume_outline
 
         llm_config = _build_llm_config(config)
         outline_request = str(config.get("outline_request", "") or "").strip()
+        log_info("初始化项目: 开始生成分卷大纲。")
         regenerate_volume_outline(str(project_path), llm_config, user_request=outline_request)
+        log_success("初始化项目: 分卷大纲生成完成。")
+        log_info("初始化项目: 开始生成分章大纲。")
         regenerate_chapter_outline(str(project_path), llm_config, volume_number=None, user_request=outline_request)
+        log_success("初始化项目: 分章大纲生成完成。")
     except Exception:  # pragma: no cover - outline generation should not block init
-        pass
+        log_error("初始化项目: 分卷/分章大纲生成失败，项目已创建，但需要稍后手动重生成大纲。")
+    log_success(f"初始化项目: 项目已完成初始化 {project_path}")
     return str(project_path)
 
 
