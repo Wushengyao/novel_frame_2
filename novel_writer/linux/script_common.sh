@@ -169,6 +169,10 @@ thinking_level = os.environ.get("NOVEL_THINKING_LEVEL", "").strip()
 if thinking_level:
     data["thinking_level"] = thinking_level
 
+outline_request = os.environ.get("NOVEL_OUTLINE_REQUEST", "").strip()
+if outline_request:
+    data["outline_request"] = outline_request
+
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(data, fh, ensure_ascii=False, indent=2)
 PY

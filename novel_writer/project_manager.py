@@ -59,7 +59,7 @@ INIT_SECTION_KEYS = ("world", "characters", "plot_state", "style")
 CHAPTER_TITLE_PATTERN = re.compile(
     r"^\s*(?:#{1,6}\s*)?第[0-9零一二三四五六七八九十百千万两〇]+[章节卷回部篇]\s*[：:.-]?\s*.+$"
 )
-STATS_PHASES = ("init", "writer", "summary")
+STATS_PHASES = ("init", "outline", "writer", "summary")
 
 
 def _utc_now() -> str:
@@ -440,17 +440,28 @@ def init_project(config_path: str) -> str:
     save_json(str(project_path / "characters.json"), characters)
     save_json(str(project_path / "plot_state.json"), plot_state)
     save_json(str(project_path / "style.json"), style)
+    try:
+        from outline_manager import regenerate_chapter_outline, regenerate_volume_outline
+
+        llm_config = _build_llm_config(config)
+        outline_request = str(config.get("outline_request", "") or "").strip()
+        regenerate_volume_outline(str(project_path), llm_config, user_request=outline_request)
+        regenerate_chapter_outline(str(project_path), llm_config, volume_number=None, user_request=outline_request)
+    except Exception:  # pragma: no cover - outline generation should not block init
+        pass
     return str(project_path)
 
 
 def load_project(project_path: str) -> dict:
     base = Path(project_path)
+    outlines_path = base / "outlines.json"
     return {
         "project": load_json(str(base / "project.json")),
         "world": load_json(str(base / "world.json")),
         "characters": _normalize_characters(load_json(str(base / "characters.json"))),
         "plot_state": load_json(str(base / "plot_state.json")),
         "style": load_json(str(base / "style.json")),
+        "outlines": load_json(str(outlines_path)) if outlines_path.exists() else {"meta": {}, "volumes": []},
         "chapters_path": str(base / "chapters"),
         "summaries_path": str(base / "summaries"),
         "illustrations_path": str(base / "illustrations"),

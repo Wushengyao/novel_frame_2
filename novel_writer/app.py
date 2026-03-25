@@ -12,6 +12,14 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from illustration_manager import illustrate_chapters, illustrate_project_assets
 from llm_client import generate_text_with_metadata
+from outline_manager import (
+    ensure_project_outlines,
+    find_next_chapter_context,
+    get_outline_status,
+    regenerate_chapter_outline,
+    regenerate_volume_outline,
+    sync_outline_progress,
+)
 from prompt_builder import build_writer_prompt
 from project_manager import (
     get_last_chapter_text,
@@ -69,11 +77,21 @@ def _extract_illustration_overrides(args: argparse.Namespace) -> dict:
 
 
 def run_next_chapter(project_path: str, config: dict, user_request: str = ""):
+    outlines = ensure_project_outlines(project_path, config)
     project_data = load_project(project_path)
+    next_context = find_next_chapter_context(outlines, int(project_data["project"].get("chapter_count", 0) or 0))
+    if next_context is None:
+        raise ValueError("当前没有可用的下一章分章大纲，请先重新生成分章大纲。")
     last_chapter = get_last_chapter_text(project_path)
     recent_text = last_chapter[-3000:] if last_chapter else "这是小说的开篇章节，请自然展开故事。"
 
-    prompt = build_writer_prompt(project_data, recent_text, user_request=user_request)
+    prompt = build_writer_prompt(
+        project_data,
+        recent_text,
+        user_request=user_request,
+        current_volume_outline=next_context["volume"],
+        chapter_outline=next_context["chapter"],
+    )
     try:
         response_text, metadata = generate_text_with_metadata(prompt, config)
     except Exception:
@@ -89,6 +107,7 @@ def run_next_chapter(project_path: str, config: dict, user_request: str = ""):
     chapter_text = normalize_chapter_text(response_text)
     chapter_path = save_chapter(project_path, chapter_text)
     update_plot_state(project_path, chapter_text, config)
+    sync_outline_progress(project_path)
     return chapter_path
 
 
@@ -139,6 +158,21 @@ def _print_status(project_path: str) -> None:
     print(f"当前地点: {plot_state.get('current_location', '')}")
     print(f"当前时间: {plot_state.get('current_time', '')}")
     print(f"下章目标: {last_goal}")
+    outline_status = get_outline_status(project_path)
+    if outline_status.get("has_outlines"):
+        print(f"分卷数量: {outline_status.get('volume_count', 0)}")
+        if outline_status.get("chapter_outline_stale"):
+            print("分章大纲状态: 已过期，请先重新生成")
+        next_context = outline_status.get("next_context")
+        if next_context:
+            volume = next_context.get("volume") or {}
+            chapter = next_context.get("chapter") or {}
+            print(
+                "下一章对应大纲: "
+                f"第{volume.get('volume_number', '?')}卷《{volume.get('title', '')}》"
+                f" / 第{chapter.get('chapter_number', '?')}章《{chapter.get('title', '')}》"
+            )
+            print(f"下一章章纲摘要: {chapter.get('summary', '')}")
     open_threads = plot_state.get("open_threads", [])
     if open_threads:
         print("未解线索:")
@@ -254,6 +288,29 @@ def main() -> None:
     status_parser = subparsers.add_parser("status", help="Show project status")
     status_parser.add_argument("--project", required=True, help="Path to novel_project")
 
+    outline_parser = subparsers.add_parser("outline", help="Generate or regenerate volume/chapter outlines")
+    outline_parser.add_argument("--project", required=True, help="Path to novel_project")
+    outline_parser.add_argument(
+        "--config",
+        help="Optional config.json to override the project's saved LLM settings",
+    )
+    outline_parser.add_argument(
+        "--stage",
+        choices=("volumes", "chapters", "all"),
+        default="all",
+        help="Which outline stage to regenerate",
+    )
+    outline_parser.add_argument(
+        "--volume",
+        type=int,
+        help="Optional volume number for chapter outline regeneration",
+    )
+    outline_parser.add_argument(
+        "--user-request",
+        default="",
+        help="Optional extra plot requirements for outline regeneration",
+    )
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -332,6 +389,39 @@ def main() -> None:
                 print(f"- {image.get('relative_path', '')}")
     elif args.command == "status":
         _print_status(args.project)
+    elif args.command == "outline":
+        config = (
+            _extract_llm_config(args.config)
+            if args.config
+            else _load_runtime_config(args.project)
+        )
+        if args.stage in {"volumes", "all"}:
+            outlines = regenerate_volume_outline(
+                args.project,
+                config,
+                user_request=args.user_request,
+            )
+            print(f"已生成分卷大纲，卷数: {len(outlines.get('volumes', []))}")
+        if args.stage in {"chapters", "all"}:
+            outlines = regenerate_chapter_outline(
+                args.project,
+                config,
+                volume_number=args.volume if args.stage == "chapters" else None,
+                user_request=args.user_request,
+            )
+            target = f"第 {args.volume} 卷" if args.volume else "全部卷"
+            print(f"已生成分章大纲，范围: {target}")
+            next_context = find_next_chapter_context(
+                outlines,
+                int(load_project(args.project)["project"].get("chapter_count", 0) or 0),
+            )
+            if next_context:
+                volume = next_context["volume"]
+                chapter = next_context["chapter"]
+                print(
+                    f"下一章已对齐到第{volume.get('volume_number', '?')}卷《{volume.get('title', '')}》"
+                    f" / 第{chapter.get('chapter_number', '?')}章《{chapter.get('title', '')}》"
+                )
 
 
 if __name__ == "__main__":

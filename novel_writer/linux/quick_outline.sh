@@ -10,9 +10,10 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # 直接修改这里即可，不必每次写命令行参数。
 # 如果同时传入命令行参数，则命令行参数优先。
 # ==============================
-DEFAULT_PROJECT_PATH="/home/wsy/novel_frame_2/novel_writer/output/novel_project_20260318T063939Z_e97b9a09"
-DEFAULT_CHAPTER_COUNT="3"
+DEFAULT_PROJECT_PATH=""
+DEFAULT_STAGE="all"
 DEFAULT_USER_REQUEST=""
+DEFAULT_VOLUME_NUMBER=""
 DEFAULT_PROVIDER_OVERRIDE=""
 
 # Optional runtime overrides
@@ -22,7 +23,6 @@ DEFAULT_TEMPERATURE_OVERRIDE=""
 DEFAULT_MAX_TOKENS_OVERRIDE=""
 DEFAULT_TIMEOUT_OVERRIDE=""
 DEFAULT_THINKING_LEVEL_OVERRIDE=""
-DEFAULT_AUTO_ILLUSTRATE="false"
 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/script_common.sh"
@@ -36,27 +36,31 @@ else
 fi
 
 if [[ $# -lt 2 ]]; then
-  CHAPTER_COUNT="$(prompt_optional_value "Chapter count" "$DEFAULT_CHAPTER_COUNT")"
+  STAGE="$(prompt_optional_value "Outline stage (volumes/chapters/all)" "$DEFAULT_STAGE")"
 else
-  CHAPTER_COUNT="${2:-$DEFAULT_CHAPTER_COUNT}"
+  STAGE="${2:-$DEFAULT_STAGE}"
 fi
 
 if [[ $# -lt 3 ]]; then
-  USER_REQUEST="$(prompt_optional_value "User request (optional)" "$DEFAULT_USER_REQUEST")"
+  USER_REQUEST="$(prompt_optional_value "Outline request (optional)" "$DEFAULT_USER_REQUEST")"
 else
   USER_REQUEST="${3:-$DEFAULT_USER_REQUEST}"
 fi
 
 if [[ $# -lt 4 ]]; then
+  VOLUME_NUMBER="$(prompt_optional_value "Volume number (optional, only for chapters)" "$DEFAULT_VOLUME_NUMBER")"
+else
+  VOLUME_NUMBER="${4:-$DEFAULT_VOLUME_NUMBER}"
+fi
+
+if [[ $# -lt 5 ]]; then
   PROVIDER_OVERRIDE="$(prompt_optional_value "Provider override (optional: gemini/grok/deepseek/doubao)" "$DEFAULT_PROVIDER_OVERRIDE")"
 else
-  PROVIDER_OVERRIDE="${4:-$DEFAULT_PROVIDER_OVERRIDE}"
+  PROVIDER_OVERRIDE="${5:-$DEFAULT_PROVIDER_OVERRIDE}"
 fi
 
 if [[ -z "$PROJECT_PATH" ]]; then
-  echo "用法: ./linux/quick_continue.sh <项目目录> [续写章节数] [用户额外要求] [provider覆盖]" >&2
-  echo "也可以直接编辑脚本顶部的 Editable Parameters 区域，然后直接运行 ./linux/quick_continue.sh" >&2
-  echo "示例: ./linux/quick_continue.sh ./novel_project_xxx 3 \"想先解决水源问题\"" >&2
+  echo "用法: ./linux/quick_outline.sh <项目目录> [volumes|chapters|all] [大纲额外要求] [卷号] [provider覆盖]" >&2
   exit 1
 fi
 
@@ -69,6 +73,14 @@ if [[ ! -f "$PROJECT_PATH/project.json" ]]; then
   echo "项目目录中缺少 project.json: $PROJECT_PATH" >&2
   exit 1
 fi
+
+case "${STAGE:-all}" in
+  volumes|chapters|all) ;;
+  *)
+    echo "不支持的 stage: $STAGE（可选: volumes / chapters / all）" >&2
+    exit 1
+    ;;
+esac
 
 if [[ -n "$PROVIDER_OVERRIDE" ]]; then
   PROVIDER_OVERRIDE="$(normalize_provider "$PROVIDER_OVERRIDE")"
@@ -111,59 +123,20 @@ TEMP_CONFIG="$(make_temp_config_path)"
 trap 'rm -f "$TEMP_CONFIG"' EXIT
 write_continue_config "$TEMP_CONFIG" "$PROJECT_PATH"
 
-NEXT_ARGS=(
-  "$PYTHON_EXE" "$PROJECT_ROOT/app.py" next
+OUTLINE_ARGS=(
+  "$PYTHON_EXE" "$PROJECT_ROOT/app.py" outline
   --project "$PROJECT_PATH"
   --config "$TEMP_CONFIG"
-  --count "$CHAPTER_COUNT"
+  --stage "$STAGE"
 )
 
 if [[ -n "$USER_REQUEST" ]]; then
-  NEXT_ARGS+=(--user-request "$USER_REQUEST")
+  OUTLINE_ARGS+=(--user-request "$USER_REQUEST")
 fi
 
-set +e
-NEXT_OUTPUT="$("${NEXT_ARGS[@]}" 2>&1)"
-NEXT_EXIT_CODE=$?
-set -e
-printf '%s\n' "$NEXT_OUTPUT"
-
-if [[ $NEXT_EXIT_CODE -ne 0 ]]; then
-  echo "章节生成失败，退出码: $NEXT_EXIT_CODE" >&2
-  exit "$NEXT_EXIT_CODE"
+if [[ "$STAGE" == "chapters" && -n "$VOLUME_NUMBER" ]]; then
+  OUTLINE_ARGS+=(--volume "$VOLUME_NUMBER")
 fi
 
-if [[ "${DEFAULT_AUTO_ILLUSTRATE,,}" == "true" ]]; then
-  mapfile -t GENERATED_CHAPTER_PATHS < <(printf '%s\n' "$NEXT_OUTPUT" | sed -n 's/^新章节已保存: //p')
-
-  if [[ ${#GENERATED_CHAPTER_PATHS[@]} -gt 0 ]]; then
-    echo "正在尝试自动创建插图..."
-    for chapter_path in "${GENERATED_CHAPTER_PATHS[@]}"; do
-      ILLUSTRATE_ARGS=(
-        "$PYTHON_EXE" "$PROJECT_ROOT/app.py" illustrate
-        --project "$PROJECT_PATH"
-        --chapter "$chapter_path"
-        --config "$TEMP_CONFIG"
-      )
-
-      set +e
-      ILLUSTRATE_OUTPUT="$("${ILLUSTRATE_ARGS[@]}" 2>&1)"
-      ILLUSTRATE_EXIT_CODE=$?
-      set -e
-      printf '%s\n' "$ILLUSTRATE_OUTPUT"
-
-      if [[ $ILLUSTRATE_EXIT_CODE -ne 0 ]]; then
-        if test_illustration_connection_failure "$ILLUSTRATE_OUTPUT"; then
-          echo "ComfyUI 不可连接，已跳过自动插图创建。" >&2
-          break
-        fi
-        echo "插图生成失败，退出码: $ILLUSTRATE_EXIT_CODE" >&2
-        exit "$ILLUSTRATE_EXIT_CODE"
-      fi
-    done
-  else
-    echo "未检测到新章节路径，已跳过自动插图创建。" >&2
-  fi
-fi
-
+"${OUTLINE_ARGS[@]}"
 "$PYTHON_EXE" "$PROJECT_ROOT/app.py" status --project "$PROJECT_PATH"

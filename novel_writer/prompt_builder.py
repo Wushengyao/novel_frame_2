@@ -101,11 +101,154 @@ def build_init_prompt(data: dict) -> str:
 """
 
 
-def build_writer_prompt(data: dict, recent_text: str, user_request: str = "") -> str:
+def build_volume_outline_prompt(data: dict, user_request: str = "") -> str:
+    project = _to_block(data.get("project", {}))
     world = _to_block(data.get("world", {}))
     characters = _to_block(data.get("characters", {}))
     plot_state = _to_block(data.get("plot_state", {}))
     style = _to_block(data.get("style", {}))
+    story_request = data.get("project", {}).get("story_request", "") or data.get("story_request", "")
+    completed_chapters = _to_block(data.get("completed_chapters", []))
+    user_request_block = user_request.strip() or "无额外要求。请基于现有设定给出合理的长篇分卷规划。"
+
+    return f"""你是一名长篇小说总策划助手。请先为这部小说设计分卷大纲。
+
+【项目】
+{project}
+
+【用户需求】
+{story_request}
+
+【世界观】
+{world}
+
+【人物】
+{characters}
+
+【当前剧情状态】
+{plot_state}
+
+【文风】
+{style}
+
+【已完成章节（如有）】
+{completed_chapters}
+
+【用户对分卷的额外要求】
+{user_request_block}
+
+要求：
+1. 输出必须是合法 JSON
+2. 分卷规划要适合长篇连载，整体节奏要有递进，不要过早完结
+3. 如果已有已完成章节，请把它们视为既成事实，不要推翻
+4. 每卷都要有清晰的阶段目标、核心矛盾和推进重点
+5. `planned_chapter_count` 请给出一个合理正整数，建议单卷 4 到 15 章
+6. 卷与卷之间要有承接关系，既要延续主线，也要给人物关系升级留空间
+7. 不要输出解释，不要输出 Markdown
+
+输出 JSON：
+{{
+  "volumes": [
+    {{
+      "volume_number": 1,
+      "title": "",
+      "summary": "",
+      "story_goal": "",
+      "planned_chapter_count": 8
+    }}
+  ]
+}}
+"""
+
+
+def build_chapter_outline_prompt(
+    data: dict,
+    volume: dict,
+    previous_volumes: list[dict] | None = None,
+    completed_chapters: list[dict] | None = None,
+    user_request: str = "",
+) -> str:
+    project = _to_block(data.get("project", {}))
+    world = _to_block(data.get("world", {}))
+    characters = _to_block(data.get("characters", {}))
+    plot_state = _to_block(data.get("plot_state", {}))
+    style = _to_block(data.get("style", {}))
+    story_request = data.get("project", {}).get("story_request", "") or data.get("story_request", "")
+    volume_block = _to_block(volume)
+    previous_volumes_block = _to_block(previous_volumes or [])
+    completed_block = _to_block(completed_chapters or [])
+    user_request_block = user_request.strip() or "无额外要求。请基于当前卷纲细化出稳定的分章推进。"
+
+    return f"""你是一名长篇小说分章策划助手。请基于当前分卷大纲，为这一卷设计分章大纲。
+
+【项目】
+{project}
+
+【用户需求】
+{story_request}
+
+【世界观】
+{world}
+
+【人物】
+{characters}
+
+【当前剧情状态】
+{plot_state}
+
+【文风】
+{style}
+
+【前序分卷大纲】
+{previous_volumes_block}
+
+【当前卷大纲】
+{volume_block}
+
+【本卷已完成章节（如有）】
+{completed_block}
+
+【用户对分章的额外要求】
+{user_request_block}
+
+要求：
+1. 输出必须是合法 JSON
+2. 本卷必须输出与 `planned_chapter_count` 一致数量的章节规划
+3. 如果已有已完成章节，请把它们视为既成事实，并让剩余章节自然衔接
+4. 每章都要有明确任务，不要让多章内容重复或空转
+5. `summary` 侧重这一章会发生什么，`goal` 侧重写作时需要完成的叙事目标
+6. `key_events` 请列出 2 到 5 个关键事件或推进点
+7. 不要输出解释，不要输出 Markdown
+
+输出 JSON：
+{{
+  "volume_number": {int(volume.get("volume_number", 1) or 1)},
+  "chapters": [
+    {{
+      "chapter_in_volume": 1,
+      "title": "",
+      "summary": "",
+      "goal": "",
+      "key_events": []
+    }}
+  ]
+}}
+"""
+
+
+def build_writer_prompt(
+    data: dict,
+    recent_text: str,
+    user_request: str = "",
+    current_volume_outline: dict | None = None,
+    chapter_outline: dict | None = None,
+) -> str:
+    world = _to_block(data.get("world", {}))
+    characters = _to_block(data.get("characters", {}))
+    plot_state = _to_block(data.get("plot_state", {}))
+    style = _to_block(data.get("style", {}))
+    volume_outline = _to_block(current_volume_outline or {})
+    chapter_outline_block = _to_block(chapter_outline or {})
     next_chapter_goal = data.get("plot_state", {}).get("next_chapter_goal", "")
     user_request_block = user_request.strip() if user_request.strip() else "无。请在既有设定下自由发挥，自然推进剧情。"
     chapter_count = int(data.get("project", {}).get("chapter_count", 0) or 0)
@@ -126,6 +269,12 @@ def build_writer_prompt(data: dict, recent_text: str, user_request: str = "") ->
 
 【剧情状态】
 {plot_state}
+
+【所属卷大纲】
+{volume_outline}
+
+【本章分章大纲】
+{chapter_outline_block}
 
 【最近正文】
 {recent_text}
@@ -149,6 +298,7 @@ def build_writer_prompt(data: dict, recent_text: str, user_request: str = "") ->
 4. 输出纯正文
 5. 不要输出章标题、序号、小标题、Markdown标题
 6. 如果用户额外要求与既有设定不冲突，优先吸收；若有冲突，以既有设定一致性为先，并尽量柔和地兼容用户意图
+7. 本章必须完成分章大纲中的核心任务，同时与所属卷的阶段目标保持一致
 """
 
 
