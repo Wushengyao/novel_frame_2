@@ -8,6 +8,7 @@ Param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = Split-Path -Parent $ScriptDir
 
 function Resolve-PythonExe {
 	if ($env:NOVEL_PYTHON_EXE -and (Test-Path $env:NOVEL_PYTHON_EXE)) {
@@ -55,7 +56,7 @@ if (-not (Test-Path $projectFile)) {
 }
 
 $pythonExe = Resolve-PythonExe
-$apiKeys = Get-ApiKeys -KeysFile (Join-Path $ScriptDir "api_keys.sh")
+$apiKeys = Get-ApiKeys -KeysFile (Join-Path $ProjectRoot "api_keys.sh")
 $savedProject = Get-Content -Path $projectFile -Raw -Encoding UTF8 | ConvertFrom-Json
 $saved = $savedProject.llm_config
 if (-not $saved) { $saved = @{} }
@@ -92,7 +93,7 @@ $tempConfig = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ("novel
 
 try {
 	$argsList = @(
-		(Join-Path $ScriptDir "app.py"),
+		(Join-Path $ProjectRoot "app.py"),
 		"illustrate",
 		"--project", $ProjectPath,
 		"--chapter", $Chapter,

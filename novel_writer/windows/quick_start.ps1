@@ -12,6 +12,7 @@
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = Split-Path -Parent $ScriptDir
 
 function Prompt-OptionalValue {
 	param(
@@ -140,7 +141,7 @@ if (-not $PSBoundParameters.ContainsKey("ProjectDescription")) {
 }
 
 $pythonExe = Resolve-PythonExe
-$apiKeys = Get-ApiKeys -KeysFile (Join-Path $ScriptDir "api_keys.sh")
+$apiKeys = Get-ApiKeys -KeysFile (Join-Path $ProjectRoot "api_keys.sh")
 
 $apiKey = $env:NOVEL_API_KEY
 if (-not $apiKey) {
@@ -152,7 +153,7 @@ if (-not $apiKey) {
 	}
 }
 if (-not $apiKey) {
-	throw "provider=$Provider missing API key. Please fill $ScriptDir\api_keys.sh"
+	throw "provider=$Provider missing API key. Please fill $ProjectRoot\api_keys.sh"
 }
 
 $modelName = if ($env:NOVEL_MODEL_NAME) { $env:NOVEL_MODEL_NAME } else { Default-ModelForProvider $Provider }
@@ -162,7 +163,7 @@ $maxTokens = if ($env:NOVEL_MAX_TOKENS) { [int]$env:NOVEL_MAX_TOKENS } else { 10
 $timeout = if ($env:NOVEL_TIMEOUT) { [int]$env:NOVEL_TIMEOUT } else { 120 }
 $thinkingLevel = if ($env:NOVEL_THINKING_LEVEL) { $env:NOVEL_THINKING_LEVEL } else { Default-ThinkingLevel $Provider }
 
-$outputRoot = Join-Path $ScriptDir "output"
+$outputRoot = Join-Path $ProjectRoot "output"
 if (-not (Test-Path $outputRoot)) {
 	New-Item -Path $outputRoot -ItemType Directory | Out-Null
 }
@@ -189,7 +190,7 @@ $tempConfig = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ("novel
 [System.IO.File]::WriteAllText($tempConfig, ($config | ConvertTo-Json -Depth 10), [System.Text.UTF8Encoding]::new($false))
 
 try {
-	$initOutput = & $pythonExe (Join-Path $ScriptDir "app.py") init --config $tempConfig
+	$initOutput = & $pythonExe (Join-Path $ProjectRoot "app.py") init --config $tempConfig
 	$initOutput | ForEach-Object { Write-Output $_ }
 
 	$projectPath = ""
@@ -208,7 +209,7 @@ try {
 
 	if ($AutoCreateCoverAndPortraits) {
 		Write-Output "正在尝试自动创建小说封面和人物立绘..."
-		$assetOutput = & $pythonExe (Join-Path $ScriptDir "app.py") illustrate-assets --project $projectPath 2>&1
+		$assetOutput = & $pythonExe (Join-Path $ProjectRoot "app.py") illustrate-assets --project $projectPath 2>&1
 		$assetExitCode = $LASTEXITCODE
 		$assetOutput | ForEach-Object { Write-Output $_ }
 
@@ -223,10 +224,9 @@ try {
 		}
 	}
 
-	& $pythonExe (Join-Path $ScriptDir "app.py") status --project $projectPath
-	Write-Output ("Continue example: .\quick_continue.bat ""{0}"" 3 ""想看的情节""" -f $projectPath)
+	& $pythonExe (Join-Path $ProjectRoot "app.py") status --project $projectPath
+	Write-Output ("Continue example: .\windows\quick_continue.bat ""{0}"" 3 ""想看的情节""" -f $projectPath)
 }
 finally {
 	Remove-Item -Path $tempConfig -ErrorAction SilentlyContinue
 }
-

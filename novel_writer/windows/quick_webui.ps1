@@ -5,6 +5,7 @@
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = Split-Path -Parent $ScriptDir
 
 function Resolve-PythonExe {
 	if ($env:NOVEL_PYTHON_EXE -and (Test-Path $env:NOVEL_PYTHON_EXE)) {
@@ -24,5 +25,5 @@ function Resolve-PythonExe {
 }
 
 $pythonExe = Resolve-PythonExe
-Set-Location $ScriptDir
-& $pythonExe (Join-Path $ScriptDir "webui.py") --host $BindHost --port "$Port"
+Set-Location $ProjectRoot
+& $pythonExe (Join-Path $ProjectRoot "webui.py") --host $BindHost --port "$Port"

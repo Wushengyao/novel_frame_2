@@ -8,6 +8,7 @@
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = Split-Path -Parent $ScriptDir
 if ($PSVersionTable.PSVersion.Major -ge 7) {
 	$PSNativeCommandUseErrorActionPreference = $false
 }
@@ -170,7 +171,7 @@ if (-not $PSBoundParameters.ContainsKey("ProviderOverride")) {
 }
 
 $pythonExe = Resolve-PythonExe
-$apiKeys = Get-ApiKeys -KeysFile (Join-Path $ScriptDir "api_keys.sh")
+$apiKeys = Get-ApiKeys -KeysFile (Join-Path $ProjectRoot "api_keys.sh")
 $savedProject = Get-Content -Path $projectFile -Raw -Encoding UTF8 | ConvertFrom-Json
 $saved = $savedProject.llm_config
 if (-not $saved) { $saved = @{} }
@@ -189,7 +190,7 @@ if (-not $apiKey) {
 	}
 }
 if (-not $apiKey) {
-	throw "provider=$resolvedProvider missing API key. Please fill $ScriptDir\api_keys.sh"
+	throw "provider=$resolvedProvider missing API key. Please fill $ProjectRoot\api_keys.sh"
 }
 
 $modelName = if ($env:NOVEL_MODEL_NAME_OVERRIDE) {
@@ -244,7 +245,7 @@ $tempConfig = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ("novel
 
 try {
 	$nextArgs = @(
-		(Join-Path $ScriptDir "app.py"),
+		(Join-Path $ProjectRoot "app.py"),
 		"next",
 		"--project", $ProjectPath,
 		"--config", $tempConfig,
@@ -274,7 +275,7 @@ try {
 		Write-Output "正在尝试自动创建插图..."
 		foreach ($chapterPath in $generatedChapterPaths) {
 			$illustrateArgs = @(
-				(Join-Path $ScriptDir "app.py"),
+				(Join-Path $ProjectRoot "app.py"),
 				"illustrate",
 				"--project", $ProjectPath,
 				"--chapter", $chapterPath,
@@ -301,7 +302,7 @@ try {
 	}
 
 	$statusResult = Invoke-NativeCommandCapture -Executable $pythonExe -Arguments @(
-		(Join-Path $ScriptDir "app.py"),
+		(Join-Path $ProjectRoot "app.py"),
 		"status",
 		"--project", $ProjectPath
 	)
@@ -315,4 +316,3 @@ try {
 finally {
 	Remove-Item -Path $tempConfig -ErrorAction SilentlyContinue
 }
-

@@ -3,6 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ==============================
 # Editable Parameters
@@ -21,20 +22,41 @@ DEFAULT_TEMPERATURE="1.0"
 DEFAULT_MAX_TOKENS="10240"
 DEFAULT_TIMEOUT="120"
 DEFAULT_THINKING_LEVEL="medium"
+DEFAULT_AUTO_CREATE_COVER_AND_PORTRAITS="true"
 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/script_common.sh"
 load_api_keys
+PYTHON_EXE="$(resolve_python_exe)"
 
-PROVIDER="$(normalize_provider "${1:-$DEFAULT_PROVIDER}")"
-STORY_REQUEST="${2:-$DEFAULT_STORY_REQUEST}"
-PROJECT_NAME="${3:-$DEFAULT_PROJECT_NAME}"
-PROJECT_DESCRIPTION="${4:-$DEFAULT_PROJECT_DESCRIPTION}"
+if [[ $# -lt 1 ]]; then
+  PROVIDER="$(normalize_provider "$(prompt_optional_value "Provider (gemini/grok/deepseek/doubao)" "$DEFAULT_PROVIDER")")"
+else
+  PROVIDER="$(normalize_provider "${1:-$DEFAULT_PROVIDER}")"
+fi
+
+if [[ $# -lt 2 ]]; then
+  STORY_REQUEST="$(prompt_optional_value "Story request" "$DEFAULT_STORY_REQUEST")"
+else
+  STORY_REQUEST="${2:-$DEFAULT_STORY_REQUEST}"
+fi
+
+if [[ $# -lt 3 ]]; then
+  PROJECT_NAME="$(prompt_optional_value "Project name" "$DEFAULT_PROJECT_NAME")"
+else
+  PROJECT_NAME="${3:-$DEFAULT_PROJECT_NAME}"
+fi
+
+if [[ $# -lt 4 ]]; then
+  PROJECT_DESCRIPTION="$(prompt_optional_value "Project description" "$DEFAULT_PROJECT_DESCRIPTION")"
+else
+  PROJECT_DESCRIPTION="${4:-$DEFAULT_PROJECT_DESCRIPTION}"
+fi
 
 if [[ -z "$STORY_REQUEST" ]]; then
-  echo "用法: ./quick_start.sh <provider> <故事需求> [项目名] [项目简介]" >&2
-  echo "也可以直接编辑脚本顶部的 Editable Parameters 区域，然后直接运行 ./quick_start.sh" >&2
-  echo "示例: ./quick_start.sh gemini \"现代奢华校园中的极寒生存故事，男女主合作求生。\"" >&2
+  echo "用法: ./linux/quick_start.sh <provider> <故事需求> [项目名] [项目简介]" >&2
+  echo "也可以直接编辑脚本顶部的 Editable Parameters 区域，然后直接运行 ./linux/quick_start.sh" >&2
+  echo "示例: ./linux/quick_start.sh gemini \"现代奢华校园中的极寒生存故事，男女主合作求生。\"" >&2
   exit 1
 fi
 
@@ -68,14 +90,35 @@ TEMP_CONFIG="$(make_temp_config_path)"
 trap 'rm -f "$TEMP_CONFIG"' EXIT
 write_init_config "$TEMP_CONFIG"
 
-INIT_OUTPUT="$(python3 "$SCRIPT_DIR/app.py" init --config "$TEMP_CONFIG")"
+INIT_OUTPUT="$("$PYTHON_EXE" "$PROJECT_ROOT/app.py" init --config "$TEMP_CONFIG")"
 printf '%s\n' "$INIT_OUTPUT"
 
 PROJECT_PATH="$(printf '%s\n' "$INIT_OUTPUT" | sed -n 's/^项目已初始化: //p' | tail -n 1)"
+if [[ -z "$PROJECT_PATH" ]]; then
+  PROJECT_PATH="$(get_latest_project_path "$PROJECT_ROOT/output")"
+fi
 if [[ -z "$PROJECT_PATH" ]]; then
   echo "无法从 init 输出中解析项目路径。" >&2
   exit 1
 fi
 
-python3 "$SCRIPT_DIR/app.py" status --project "$PROJECT_PATH"
-printf '续写示例: ./quick_continue.sh "%s" 3 "想看的情节"\n' "$PROJECT_PATH"
+if [[ "${DEFAULT_AUTO_CREATE_COVER_AND_PORTRAITS,,}" == "true" ]]; then
+  echo "正在尝试自动创建小说封面和人物立绘..."
+  set +e
+  ASSET_OUTPUT="$("$PYTHON_EXE" "$PROJECT_ROOT/app.py" illustrate-assets --project "$PROJECT_PATH" 2>&1)"
+  ASSET_EXIT_CODE=$?
+  set -e
+  printf '%s\n' "$ASSET_OUTPUT"
+
+  if [[ $ASSET_EXIT_CODE -ne 0 ]]; then
+    if test_illustration_connection_failure "$ASSET_OUTPUT"; then
+      echo "ComfyUI 不可连接，已跳过自动创建封面和人物立绘。" >&2
+    else
+      echo "封面/人物立绘生成失败，退出码: $ASSET_EXIT_CODE" >&2
+      exit "$ASSET_EXIT_CODE"
+    fi
+  fi
+fi
+
+"$PYTHON_EXE" "$PROJECT_ROOT/app.py" status --project "$PROJECT_PATH"
+printf '续写示例: ./linux/quick_continue.sh "%s" 3 "想看的情节"\n' "$PROJECT_PATH"

@@ -3,6 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ==============================
 # Editable Parameters
@@ -12,8 +13,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_HOST="0.0.0.0"
 DEFAULT_PORT="8008"
 
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/script_common.sh"
+PYTHON_EXE="$(resolve_python_exe)"
+
 HOST="${1:-$DEFAULT_HOST}"
 PORT="${2:-$DEFAULT_PORT}"
 
-cd "$SCRIPT_DIR"
-python3 "$SCRIPT_DIR/webui.py" --host "$HOST" --port "$PORT"
+cd "$PROJECT_ROOT"
+"$PYTHON_EXE" "$PROJECT_ROOT/webui.py" --host "$HOST" --port "$PORT"

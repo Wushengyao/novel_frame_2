@@ -13,8 +13,8 @@
 
 - 不再手动维护 `config.json` 这类启动配置文件
 - 只保留两个常用脚本：
-  - `quick_start.sh`：只负责初始化项目
-  - `quick_continue.sh`：只负责续写已有项目
+  - `linux/quick_start.sh`：Linux 下只负责初始化项目
+  - `linux/quick_continue.sh`：Linux 下只负责续写已有项目
 - API key 单独放在 `api_keys.sh`
 - 参数优先直接写在脚本顶部的 `Editable Parameters` 区域
 - 脚本内部会按这些参数临时生成运行配置
@@ -32,12 +32,22 @@ novel_writer/
   illustration_manager.py
   state_updater.py
   webui.py
-  quick_start.sh
-  quick_continue.sh
-  quick_illustrate.sh
-  quick_webui.sh
   api_keys.sh
-  script_common.sh
+  linux/
+    quick_start.sh
+    quick_continue.sh
+    quick_illustrate.sh
+    quick_webui.sh
+    script_common.sh
+  windows/
+    quick_start.bat
+    quick_start.ps1
+    quick_continue.bat
+    quick_continue.ps1
+    quick_illustrate.bat
+    quick_illustrate.ps1
+    quick_webui.bat
+    quick_webui.ps1
   README.md
 ```
 
@@ -91,7 +101,7 @@ export DOUBAO_API_KEY="你的豆包 / 火山方舟 Key"
 
 ## 2. 初始化新项目
 
-`quick_start.sh` 现在只做一件事：初始化。
+`linux/quick_start.sh` 现在只做一件事：初始化。
 
 最推荐的方式是先编辑脚本顶部的 `Editable Parameters`：
 
@@ -105,13 +115,13 @@ DEFAULT_PROJECT_DESCRIPTION="由模型根据需求自动生成设定的长篇小
 然后直接运行：
 
 ```bash
-./quick_start.sh
+./linux/quick_start.sh
 ```
 
 用法：
 
 ```bash
-./quick_start.sh <provider> "<故事需求>" [项目名] [项目简介]
+./linux/quick_start.sh <provider> "<故事需求>" [项目名] [项目简介]
 ```
 
 命令行参数仍然可用，但现在更适合作为临时覆盖。
@@ -119,19 +129,19 @@ DEFAULT_PROJECT_DESCRIPTION="由模型根据需求自动生成设定的长篇小
 示例：
 
 ```bash
-./quick_start.sh gemini "现代奢华校园中，男女主在寒假被暴风雪困住，从保暖求生开始逐步建立长期生活。"
+./linux/quick_start.sh gemini "现代奢华校园中，男女主在寒假被暴风雪困住，从保暖求生开始逐步建立长期生活。"
 ```
 
 或者：
 
 ```bash
-./quick_start.sh deepseek "三人小队在封闭校园里进行长期生存建设，要求注重水源、食物和保温细节。" "雪封穹顶"
+./linux/quick_start.sh deepseek "三人小队在封闭校园里进行长期生存建设，要求注重水源、食物和保温细节。" "雪封穹顶"
 ```
 
 或：
 
 ```bash
-./quick_start.sh doubao "极寒校园中的长期生存故事，要求兼顾生活建设、人物互动与细节描写。" "雪封穹顶"
+./linux/quick_start.sh doubao "极寒校园中的长期生存故事，要求兼顾生活建设、人物互动与细节描写。" "雪封穹顶"
 ```
 
 初始化时脚本会：
@@ -147,7 +157,7 @@ DEFAULT_PROJECT_DESCRIPTION="由模型根据需求自动生成设定的长篇小
 
 ## 3. 续写已有项目
 
-`quick_continue.sh` 只负责续写。
+`linux/quick_continue.sh` 只负责续写。
 
 同样推荐先编辑脚本顶部的 `Editable Parameters`：
 
@@ -161,13 +171,13 @@ DEFAULT_PROVIDER_OVERRIDE=""
 然后直接运行：
 
 ```bash
-./quick_continue.sh
+./linux/quick_continue.sh
 ```
 
 用法：
 
 ```bash
-./quick_continue.sh <项目目录> [续写章节数] [用户额外要求] [provider覆盖]
+./linux/quick_continue.sh <项目目录> [续写章节数] [用户额外要求] [provider覆盖]
 ```
 
 命令行参数仍然可用，但现在更适合作为临时覆盖。
@@ -175,7 +185,7 @@ DEFAULT_PROVIDER_OVERRIDE=""
 示例：
 
 ```bash
-./quick_continue.sh ./output/novel_project_20260318T022023Z_a3f280b2
+./linux/quick_continue.sh ./output/novel_project_20260318T022023Z_a3f280b2
 ```
 
 默认会：
@@ -187,19 +197,19 @@ DEFAULT_PROVIDER_OVERRIDE=""
 带额外要求的示例：
 
 ```bash
-./quick_continue.sh ./output/novel_project_20260318T022023Z_a3f280b2 2 "想先推进食堂据点建设，并增加一点轻松互怼的互动。"
+./linux/quick_continue.sh ./output/novel_project_20260318T022023Z_a3f280b2 2 "想先推进食堂据点建设，并增加一点轻松互怼的互动。"
 ```
 
 如果你想临时换模型后端，也可以加第四个参数：
 
 ```bash
-./quick_continue.sh ./output/novel_project_20260318T022023Z_a3f280b2 2 "这几章想更注重生存细节" deepseek
+./linux/quick_continue.sh ./output/novel_project_20260318T022023Z_a3f280b2 2 "这几章想更注重生存细节" deepseek
 ```
 
 也可以临时切到豆包：
 
 ```bash
-./quick_continue.sh ./output/novel_project_20260318T022023Z_a3f280b2 2 "想让人物互动更细腻" doubao
+./linux/quick_continue.sh ./output/novel_project_20260318T022023Z_a3f280b2 2 "想让人物互动更细腻" doubao
 ```
 
 说明：
@@ -222,7 +232,7 @@ DEFAULT_PROVIDER_OVERRIDE=""
 
 ```bash
 cd /home/wsy/novel_frame_2/novel_writer
-./quick_webui.sh
+./linux/quick_webui.sh
 ```
 
 默认会监听：
@@ -234,13 +244,13 @@ http://0.0.0.0:8008
 如果你只想本机访问，也可以：
 
 ```bash
-python3 webui.py --host 127.0.0.1 --port 8008
+python3 ./webui.py --host 127.0.0.1 --port 8008
 ```
 
 如果想从局域网或公网访问，请保持：
 
 ```bash
-python3 webui.py --host 0.0.0.0 --port 8008
+python3 ./webui.py --host 0.0.0.0 --port 8008
 ```
 
 然后确保服务器防火墙或安全组放行对应端口。
@@ -251,7 +261,7 @@ python3 webui.py --host 0.0.0.0 --port 8008
 
 - `app.py illustrate`：为指定章节或全部章节生成插图
 - `app.py next --illustrate`：续写完后立即为本批新章节配图
-- `quick_illustrate.ps1` / `quick_illustrate.bat`：Windows 下快速给章节配图
+- `windows/quick_illustrate.ps1` / `windows/quick_illustrate.bat`：Windows 下快速给章节配图
 - Web UI 项目页与章节页都可以直接触发插图生成
 
 默认会优先自动寻找同级目录中的 ComfyUI 安装，例如：
@@ -327,7 +337,7 @@ python3 app.py next --project ./output/novel_project_xxx --config ./runtime_conf
 例如：
 
 ```bash
-NOVEL_THINKING_LEVEL=high ./quick_start.sh gemini "现代校园极寒生存故事"
+NOVEL_THINKING_LEVEL=high ./linux/quick_start.sh gemini "现代校园极寒生存故事"
 ```
 
 ## 6. 用户想看的内容
@@ -368,7 +378,7 @@ python3 app.py status --project <项目目录>
 
 - 你不需要维护多份 `config.*.json`
 - API key 不再混在项目配置里
-- `quick_start.sh` 和 `quick_continue.sh` 职责清晰
+- `linux/quick_start.sh` 和 `linux/quick_continue.sh` 职责清晰
 - 仍保留 `app.py --config` 这条底层能力，方便高级场景或后续自动化
 
 ## 参考文档
