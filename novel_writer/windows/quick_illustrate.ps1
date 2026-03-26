@@ -1,105 +1,90 @@
-Param(
-	[string]$ProjectPath = "F:\novel_frame_2\novel_writer\output\novel_project_20260321T094557Z_eb96bba9",
+﻿Param(
+	[string]$ProjectPath = "",
 	[string]$Chapter = "latest",
 	[string]$UserRequest = "",
-	[switch]$Force,
+	[string]$ForceValue = "false",
 	[string]$Checkpoint = ""
 )
 
 $ErrorActionPreference = "Stop"
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+	$PSNativeCommandUseErrorActionPreference = $false
+}
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Split-Path -Parent $ScriptDir
+. (Join-Path $ScriptDir "script_common.ps1")
 
-function Resolve-PythonExe {
-	if ($env:NOVEL_PYTHON_EXE -and (Test-Path $env:NOVEL_PYTHON_EXE)) {
-		return $env:NOVEL_PYTHON_EXE
-	}
-	if (Test-Path "D:\ProgramData\Anaconda3\python.exe") {
-		return "D:\ProgramData\Anaconda3\python.exe"
-	}
-	$cmd = Get-Command python -ErrorAction SilentlyContinue
-	if ($cmd) {
-		return $cmd.Path
-	}
-	throw "Python not found. Install Python or set NOVEL_PYTHON_EXE."
+# Optional runtime overrides
+$DefaultModelNameOverride = ""
+$DefaultApiBaseOverride = ""
+$DefaultTemperatureOverride = ""
+$DefaultMaxTokensOverride = ""
+$DefaultTimeoutOverride = ""
+
+if (-not $PSBoundParameters.ContainsKey("ProjectPath")) {
+	$ProjectPath = Prompt-OptionalValue -PromptText "Project directory" -DefaultValue $ProjectPath
+}
+if (-not $PSBoundParameters.ContainsKey("Chapter")) {
+	$Chapter = Prompt-OptionalValue -PromptText "Chapter" -DefaultValue $Chapter
+}
+if (-not $PSBoundParameters.ContainsKey("UserRequest")) {
+	$UserRequest = Prompt-OptionalValue -PromptText "User request (optional)" -DefaultValue $UserRequest
+}
+if (-not $PSBoundParameters.ContainsKey("ForceValue")) {
+	$ForceValue = Prompt-OptionalValue -PromptText "Force regenerate? (true/false)" -DefaultValue $ForceValue
+}
+if (-not $PSBoundParameters.ContainsKey("Checkpoint")) {
+	$Checkpoint = Prompt-OptionalValue -PromptText "Checkpoint (optional)" -DefaultValue $Checkpoint
 }
 
-function Get-ApiKeys {
-	param([string]$KeysFile)
-	if (-not (Test-Path $KeysFile)) {
-		return @{
-			GEMINI_API_KEY = ""
-			GROK_API_KEY = ""
-			DEEPSEEK_API_KEY = ""
-			DOUBAO_API_KEY = ""
-			OLLAMA_API_KEY = ""
-		}
-	}
-	$content = Get-Content -Path $KeysFile -Raw -Encoding UTF8
-	$keys = @{
-		GEMINI_API_KEY = ""
-		GROK_API_KEY = ""
-		DEEPSEEK_API_KEY = ""
-		DOUBAO_API_KEY = ""
-		OLLAMA_API_KEY = ""
-	}
-	foreach ($name in @($keys.Keys)) {
-		$pattern = 'export\s+' + [regex]::Escape($name) + '="([^"]*)"'
-		$match = [regex]::Match($content, $pattern)
-		if ($match.Success) {
-			$keys[$name] = $match.Groups[1].Value
-		}
-	}
-	return $keys
+if ([string]::IsNullOrWhiteSpace($ProjectPath)) {
+	throw "Usage: .\windows\quick_illustrate.ps1 <project directory> [chapter] [user request] [true|false] [checkpoint]"
 }
-
-if (-not (Test-Path $ProjectPath)) {
+if (-not (Test-Path -LiteralPath $ProjectPath)) {
 	throw "Project directory does not exist: $ProjectPath"
 }
 
 $projectFile = Join-Path $ProjectPath "project.json"
-if (-not (Test-Path $projectFile)) {
+if (-not (Test-Path -LiteralPath $projectFile)) {
 	throw "Missing project.json in directory: $ProjectPath"
+}
+
+$normalizedForceValue = if ($null -eq $ForceValue) { "" } else { $ForceValue }
+$shouldForce = switch ($normalizedForceValue.Trim().ToLowerInvariant()) {
+	"true" { $true; break }
+	"false" { $false; break }
+	default { throw "Force regenerate must be true or false." }
 }
 
 $pythonExe = Resolve-PythonExe
 $apiKeys = Get-ApiKeys -KeysFile (Join-Path $ProjectRoot "api_keys.sh")
-$savedProject = Get-Content -Path $projectFile -Raw -Encoding UTF8 | ConvertFrom-Json
+$savedProject = Get-Content -LiteralPath $projectFile -Raw -Encoding UTF8 | ConvertFrom-Json
 $saved = $savedProject.llm_config
 if (-not $saved) { $saved = @{} }
-$resolvedProvider = if ($saved.model_provider) { "$($saved.model_provider)" } else { "" }
+$resolvedProvider = if ($saved.model_provider) { "$($saved.model_provider)".Trim().ToLowerInvariant() } else { "gemini" }
+$apiKey = if ($env:NOVEL_API_KEY) { $env:NOVEL_API_KEY } else { Get-ApiKeyForProvider -Provider $resolvedProvider -ApiKeys $apiKeys }
+Ensure-ApiKeyPresent -Provider $resolvedProvider -ApiKey $apiKey -ProjectRoot $ProjectRoot
 
-$apiKey = $env:NOVEL_API_KEY
-if (-not $apiKey) {
-	switch ($resolvedProvider) {
-		"gemini" { $apiKey = $apiKeys["GEMINI_API_KEY"] }
-		"grok" { $apiKey = $apiKeys["GROK_API_KEY"] }
-		"deepseek" { $apiKey = $apiKeys["DEEPSEEK_API_KEY"] }
-		"doubao" { $apiKey = $apiKeys["DOUBAO_API_KEY"] }
-		"ollama" { $apiKey = $apiKeys["OLLAMA_API_KEY"] }
-	}
-}
+$modelNameOverride = if ($env:NOVEL_MODEL_NAME_OVERRIDE) { $env:NOVEL_MODEL_NAME_OVERRIDE } else { $DefaultModelNameOverride }
+$apiBaseOverride = if ($env:NOVEL_API_BASE_OVERRIDE) { $env:NOVEL_API_BASE_OVERRIDE } else { $DefaultApiBaseOverride }
+$temperatureOverride = if ($env:NOVEL_TEMPERATURE_OVERRIDE) { $env:NOVEL_TEMPERATURE_OVERRIDE } else { $DefaultTemperatureOverride }
+$maxTokensOverride = if ($env:NOVEL_MAX_TOKENS_OVERRIDE) { $env:NOVEL_MAX_TOKENS_OVERRIDE } else { $DefaultMaxTokensOverride }
+$timeoutOverride = if ($env:NOVEL_TIMEOUT_OVERRIDE) { $env:NOVEL_TIMEOUT_OVERRIDE } else { $DefaultTimeoutOverride }
 
-$config = [ordered]@{
-	model_provider = $resolvedProvider
-	model_name = if ($env:NOVEL_MODEL_NAME_OVERRIDE) { $env:NOVEL_MODEL_NAME_OVERRIDE } elseif ($saved.model_name) { "$($saved.model_name)" } elseif ($saved.model) { "$($saved.model)" } else { "" }
-	api_base = if ($env:NOVEL_API_BASE_OVERRIDE) { $env:NOVEL_API_BASE_OVERRIDE } elseif ($saved.api_base) { "$($saved.api_base)" } else { "" }
-	api_key = $apiKey
-	temperature = if ($env:NOVEL_TEMPERATURE_OVERRIDE) { [double]$env:NOVEL_TEMPERATURE_OVERRIDE } elseif ($saved.temperature) { [double]$saved.temperature } else { 0.8 }
-	max_tokens = if ($env:NOVEL_MAX_TOKENS_OVERRIDE) { [int]$env:NOVEL_MAX_TOKENS_OVERRIDE } elseif ($saved.max_tokens) { [int]$saved.max_tokens } else { 4000 }
-	timeout = if ($env:NOVEL_TIMEOUT_OVERRIDE) { [int]$env:NOVEL_TIMEOUT_OVERRIDE } elseif ($saved.timeout) { [int]$saved.timeout } else { 120 }
-}
-if ($saved.thinking_level) {
-	$config["thinking_level"] = "$($saved.thinking_level)"
-}
-if ($saved.thinking_budget) {
-	$config["thinking_budget"] = "$($saved.thinking_budget)"
-}
-
-$tempConfig = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ("novel_writer_illustrate_{0}.json" -f ([guid]::NewGuid().ToString("N"))))
-[System.IO.File]::WriteAllText($tempConfig, ($config | ConvertTo-Json -Depth 10), [System.Text.UTF8Encoding]::new($false))
+$tempConfig = New-TempConfigPath -Prefix "novel_writer_illustrate"
 
 try {
+	Write-IllustrateConfig `
+		-OutputPath $tempConfig `
+		-ProjectPath $ProjectPath `
+		-ApiKey $apiKey `
+		-ModelNameOverride $modelNameOverride `
+		-ApiBaseOverride $apiBaseOverride `
+		-TemperatureOverride $temperatureOverride `
+		-MaxTokensOverride $maxTokensOverride `
+		-TimeoutOverride $timeoutOverride
+
 	$argsList = @(
 		(Join-Path $ProjectRoot "app.py"),
 		"illustrate",
@@ -110,7 +95,7 @@ try {
 	if ($UserRequest) {
 		$argsList += @("--user-request", $UserRequest)
 	}
-	if ($Force) {
+	if ($shouldForce) {
 		$argsList += "--force"
 	}
 	if ($Checkpoint) {
@@ -120,5 +105,5 @@ try {
 	& $pythonExe @argsList
 }
 finally {
-	Remove-Item -Path $tempConfig -ErrorAction SilentlyContinue
+	Remove-Item -LiteralPath $tempConfig -ErrorAction SilentlyContinue
 }
