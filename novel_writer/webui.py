@@ -17,7 +17,13 @@ from pathlib import Path
 
 from app import run_next_chapters
 from illustration_manager import get_illustration_record, illustrate_chapters, list_illustration_records
-from project_manager import init_project, load_json, load_project
+from project_manager import (
+    get_latest_state_snapshot_chapter,
+    init_project,
+    load_json,
+    load_project,
+    rollback_project,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -256,6 +262,13 @@ def _read_chapters(project_path: Path) -> list[dict]:
     return chapters
 
 
+def _chapter_number_from_slug(chapter_slug: str) -> int | None:
+    match = re.fullmatch(r"chapter_(\d{4})", (chapter_slug or "").strip())
+    if not match:
+        return None
+    return int(match.group(1))
+
+
 def _illustration_overrides_from_form(form: dict[str, str]) -> dict:
     mapping = {
         "checkpoint": (form.get("checkpoint") or "").strip(),
@@ -491,6 +504,28 @@ def _render_page(title: str, body: str, notice: str = "", error: str = "") -> st
       background: rgba(255,255,255,0.8);
     }}
     .muted {{ color: var(--muted); font-size: 14px; }}
+    .warning-box {{
+      margin-top: 12px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(180, 79, 47, 0.08);
+      border: 1px solid rgba(180, 79, 47, 0.18);
+      color: var(--accent-dark);
+      font-size: 14px;
+      line-height: 1.6;
+    }}
+    .inline-form {{
+      display: inline;
+    }}
+    .ghost-button {{
+      background: rgba(255,255,255,0.72);
+      color: var(--accent-dark);
+      border: 1px solid rgba(124, 91, 62, 0.18);
+      padding: 10px 14px;
+    }}
+    .ghost-button:hover {{
+      background: rgba(255,255,255,0.9);
+    }}
     @media (max-width: 920px) {{
       .grid {{ grid-template-columns: 1fr; }}
       .two-col {{ grid-template-columns: 1fr; }}
@@ -552,6 +587,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         parts = [part for part in parsed.path.split("/") if part]
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "continue":
             self._handle_continue(parts[1], form)
+            return
+        if len(parts) == 3 and parts[0] == "project" and parts[2] == "rollback":
+            self._handle_rollback(parts[1], form)
             return
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "illustrate":
             self._handle_illustrate(parts[1], form)
@@ -678,6 +716,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         project_name = _repair_display_text(project.get("name", project_id))
         plot_state = data["plot_state"]
         chapters = _read_chapters(project_path)
+        latest_snapshot = get_latest_state_snapshot_chapter(str(project_path))
         stats = (project.get("stats") or {}).get("total", {})
         illustration_records = list_illustration_records(str(project_path))
 
@@ -720,6 +759,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <h2>{escape(project_name)}</h2>
               <p class="meta">{escape(project.get("description", ""))}</p>
               <p class="meta"><span class="pill">{escape((project.get("llm_config") or {}).get("model_provider", ""))}</span><span class="pill">{project.get("chapter_count", 0)} 章</span></p>
+              <p><strong>状态快照：</strong>{escape(f'已保存到第 {latest_snapshot} 章' if latest_snapshot is not None else '暂无')}</p>
               <p><strong>下章目标：</strong>{escape(plot_state.get("next_chapter_goal", "") or "暂无")}</p>
               <p><strong>当前地点：</strong>{escape(plot_state.get("current_location", "") or "未知")}</p>
               <p><strong>当前时间：</strong>{escape(plot_state.get("current_time", "") or "未知")}</p>
@@ -776,6 +816,18 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                   <input type="text" name="illustration_request" placeholder="例如：突出雪夜窗景与室内暖光反差。">
                 </label>
                 <button type="submit">开始续写</button>
+              </form>
+            </section>
+            <section class="panel">
+              <h3>状态回滚</h3>
+              <form method="post" action="/project/{escape(project_id)}/rollback">
+                <label>保留到第几章
+                  <input type="number" name="to_chapter" value="{max(0, int(project.get('chapter_count', 0) or 0))}" min="0" max="{max(0, int(project.get('chapter_count', 0) or 0))}">
+                </label>
+                <div class="warning-box">
+                  回滚会删除目标章节之后的正文、摘要、章节插图和更晚的状态快照。回滚完成后，可以直接继续续写，从保留章节的状态往后写新版本。
+                </div>
+                <button class="ghost-button" type="submit">回滚到该章节</button>
               </form>
             </section>
             <section class="panel">
@@ -854,6 +906,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         project = load_json(str(project_path / "project.json"))
         project_name = _repair_display_text(project.get("name", project_id))
         chapters = _read_chapters(project_path)
+        chapter_number = _chapter_number_from_slug(chapter_slug)
         current_index = next((idx for idx, chapter in enumerate(chapters) if chapter["slug"] == chapter_slug), -1)
         previous_chapter = chapters[current_index - 1] if current_index > 0 else None
         next_chapter = chapters[current_index + 1] if 0 <= current_index < len(chapters) - 1 else None
@@ -896,6 +949,14 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               {previous_link}
               {next_link}
             </div>
+            <div class="warning-box">
+              如果你希望以本章作为新的分叉点继续写，可以直接回滚到本章状态。这样会删除后续章节及其摘要、插图和快照。
+            </div>
+            <form method="post" action="/project/{escape(project_id)}/rollback">
+              <input type="hidden" name="to_chapter" value="{chapter_number if chapter_number is not None else 0}">
+              <input type="hidden" name="return_to_chapter" value="{escape(chapter_slug)}">
+              <button class="ghost-button" type="submit">回滚到本章并从这里继续写</button>
+            </form>
           </section>
           <section class="panel">
             <h2>本章插图</h2>
@@ -1020,6 +1081,55 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 )
                 new_count = sum(0 if item.get("reused") else 1 for item in illustration_results)
                 notice += f" 插图处理完成（新生成 {new_count} 章插图）。"
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?notice="
+                + urllib.parse.quote(notice)
+            )
+        except Exception as exc:
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote(str(exc))
+            )
+
+    def _handle_rollback(self, project_id: str, form: dict[str, str]) -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+
+        try:
+            to_chapter = int((form.get("to_chapter") or "").strip())
+        except ValueError:
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote("回滚目标章节必须是非负整数。")
+            )
+            return
+
+        try:
+            result = rollback_project(str(project_path), to_chapter)
+            removed = result.get("removed") or {}
+            notice = (
+                f"项目已回滚到第 {result.get('target_chapter_count', 0)} 章。"
+                f" 已清理 {len(removed.get('chapters', []))} 个后续章节。"
+            )
+            return_to_chapter = (form.get("return_to_chapter") or "").strip()
+            if to_chapter > 0 and return_to_chapter and _chapter_number_from_slug(return_to_chapter) == to_chapter:
+                self._redirect(
+                    "/project/"
+                    + urllib.parse.quote(project_id)
+                    + "/chapter/"
+                    + urllib.parse.quote(return_to_chapter)
+                    + "?notice="
+                    + urllib.parse.quote(notice)
+                )
+                return
             self._redirect(
                 "/project/"
                 + urllib.parse.quote(project_id)
