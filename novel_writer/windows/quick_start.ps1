@@ -1,129 +1,32 @@
 ﻿Param(
-	[string]$Provider = "doubao",
-	[string]$StoryRequest = """请你以如下内容为灵感，进行小说设定：故事发生在一座高级奢华的校园中，3位主角都是学生。男主是团队力量担当，乐观；女主1号是倾国倾城的美丽少女，身材娇小纤细，团队智力担当，傲娇；女主二号同样美丽动人，善于照顾他人，温柔。小说故事聚焦于他们合作生存的过程上，从初期的保暖，到逐步确保水源和食物来源，然后再逐步提升生活水平。总体风格温馨，并加入情感升温。
-故事的开始是放假期间只有主角们在校，突然极寒天气与暴风雪来临，他们被困在学校中。一开始他们认为只是短暂的极端天气很快会有救援，所以在只是团聚在女生宿舍避寒并且做了短期规划。但是显然他们低估了极寒风暴的力量，温度持续下降，救援也不会来。他们必须转战更加保暖的地方御寒（比如桑拿房）、搜集并储备大量物资，并尝试资源再生与可持续利用，不断改善生活条件，由生存转向生活。小说应当详细描写他们协力生存的方方面面，并且包括过程中的感情升温与适量的香艳情节。
-请注意：
-1、小说需要具备长篇潜力。
-2、现在你只需要给出小说设定，而不要写正文。""",
-	[string]$ProjectName = "极寒校园生存记",
-	[string]$ProjectDescription = "小说",
+	[string]$Provider = "gemini",
+	[string]$StoryRequest = "",
+	[string]$ProjectName = "",
+	[string]$ProjectDescription = "",
 	[bool]$AutoCreateCoverAndPortraits = $true
 )
 
 $ErrorActionPreference = "Stop"
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+	$PSNativeCommandUseErrorActionPreference = $false
+}
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Split-Path -Parent $ScriptDir
+. (Join-Path $ScriptDir "script_common.ps1")
 
-function Prompt-OptionalValue {
-	param(
-		[string]$PromptText,
-		[string]$DefaultValue = ""
-	)
-	if ($DefaultValue) {
-		$inputValue = Read-Host "$PromptText [$DefaultValue]"
-		if ([string]::IsNullOrWhiteSpace($inputValue)) {
-			return $DefaultValue
-		}
-		return $inputValue.Trim()
-	}
-	return (Read-Host $PromptText).Trim()
-}
+# Editable defaults
+$DefaultStoryRequest = "故事发生在一座高级太空站中，太空站收到异族入侵和占领，主角3人因为在隔离区而躲过一劫。男主是团队力量担当，乐观；女主1号是倾国倾城的美丽少女，身材娇小纤细，体味清冷，团队智力担当，傲娇；女主二号同样美丽异常，善于照顾他人，温柔，体味芬芳。小说故事聚焦于他们合作生存的过程上，从初期的确保自身安全，建立安全据点，确保食物和水源，然后再逐步提升生活水平。总体风格温馨，并加入情感升温。小说应当详细描写他们协力生存的方方面面，重点描写他们搭建/升级安全的避难所，并且包括过程中的感情升温与适量的香艳情节。故事情节方面：1、故事的开始是空间站遭到入侵，他们被困在太空站中。他们需要首先应对异族部队的搜捕和清洗，隐藏起来，建立安全据点并确保生存必要条件，等待救援。2、但是显然他们低估了敌人力量，救援似乎不会来。他们必须转战更加安全的地方、搜集并储备大量物资，并尝试资源再生与可持续利用，不断改善生活条件，由生存转向生活。3、安全地点的资源也会耗尽，因此他们决定与敌人游击作战，获取物资和装备。可靠安全地收集更多物资，进一步提高生活水平，并逐步实现可持续。4、新的希望，外部电台发来断续的信号，他们决定去看看。工作内容转向星际载具的偷取与改造。5、..."
+$DefaultProjectName = "太空站生存记"
+$DefaultProjectDescription = "由模型根据需求自动生成设定的长篇小说项目。"
 
-function Resolve-PythonExe {
-	if ($env:NOVEL_PYTHON_EXE -and (Test-Path $env:NOVEL_PYTHON_EXE)) {
-		return $env:NOVEL_PYTHON_EXE
-	}
-	if (Test-Path "D:\ProgramData\Anaconda3\python.exe") {
-		return "D:\ProgramData\Anaconda3\python.exe"
-	}
-	$cmd = Get-Command python -ErrorAction SilentlyContinue
-	if ($cmd) {
-		return $cmd.Path
-	}
-	throw "Python not found. Install Python or set NOVEL_PYTHON_EXE."
-}
-
-function Get-ApiKeys {
-	param([string]$KeysFile)
-	if (-not (Test-Path $KeysFile)) {
-		throw "Missing API key file: $KeysFile"
-	}
-	$content = Get-Content -Path $KeysFile -Raw -Encoding UTF8
-	$keys = @{
-		GEMINI_API_KEY = ""
-		GROK_API_KEY = ""
-		DEEPSEEK_API_KEY = ""
-		DOUBAO_API_KEY = ""
-	}
-	foreach ($name in @($keys.Keys)) {
-		$pattern = 'export\s+' + [regex]::Escape($name) + '="([^"]*)"'
-		$match = [regex]::Match($content, $pattern)
-		if ($match.Success) {
-			$keys[$name] = $match.Groups[1].Value
-		}
-	}
-	return $keys
-}
-
-function Normalize-Provider {
-	param([string]$Name)
-	switch (($Name | ForEach-Object { $_.ToLowerInvariant() })) {
-		"gemini" { return "gemini" }
-		"grok" { return "grok" }
-		"deepseek" { return "deepseek" }
-		"doubao" { return "doubao" }
-		default { throw "Unsupported provider: $Name (allowed: gemini / grok / deepseek / doubao)" }
-	}
-}
-
-function Default-ModelForProvider {
-	param([string]$Name)
-	switch ($Name) {
-		"gemini" { return "gemini-3.1-pro-preview" }
-		"grok" { return "grok-4.20-beta-latest-reasoning" }
-		"deepseek" { return "deepseek-reasoner" }
-		"doubao" { return "doubao-seed-2-0-pro-260215" }
-	}
-}
-
-function Default-ApiBaseForProvider {
-	param([string]$Name)
-	if ($Name -eq "doubao") { return "https://ark.cn-beijing.volces.com/api/v3" }
-	return ""
-}
-
-function Default-ThinkingLevel {
-	param([string]$Name)
-	if ($Name -eq "gemini") { return "medium" }
-	return ""
-}
-
-function Get-LatestProjectPath {
-	param([string]$OutputRoot)
-	$latest = Get-ChildItem -Path $OutputRoot -Directory -ErrorAction SilentlyContinue |
-		Where-Object { $_.Name -like 'novel_project_*' } |
-		Sort-Object LastWriteTime -Descending |
-		Select-Object -First 1
-	if ($latest) {
-		return $latest.FullName
-	}
-	return ""
-}
-
-function Test-IllustrationConnectionFailure {
-	param([string]$Text)
-	if (-not $Text) {
-		return $false
-	}
-	return (
-		$Text -match "Failed to connect to ComfyUI" -or
-		$Text -match "actively refused" -or
-		$Text -match "Connection refused" -or
-		$Text -match "WinError 10061" -or
-		$Text -match "No connection could be made" -or
-		$Text -match "timed out"
-	)
-}
+# Optional runtime overrides
+$DefaultModelName = ""
+$DefaultApiBase = ""
+$DefaultTemperature = "1.0"
+$DefaultMaxTokens = "10240"
+$DefaultTimeout = "120"
+$DefaultThinkingLevel = "medium"
 
 if (-not $PSBoundParameters.ContainsKey("Provider")) {
 	$Provider = Prompt-OptionalValue -PromptText "Provider (gemini/grok/deepseek/doubao)" -DefaultValue $Provider
@@ -131,102 +34,121 @@ if (-not $PSBoundParameters.ContainsKey("Provider")) {
 $Provider = Normalize-Provider $Provider
 
 if (-not $PSBoundParameters.ContainsKey("StoryRequest")) {
-	$StoryRequest = Prompt-OptionalValue -PromptText "Story request" -DefaultValue $StoryRequest
+	$StoryRequest = Prompt-OptionalValue -PromptText "Story request" -DefaultValue $DefaultStoryRequest
 }
+elseif ([string]::IsNullOrWhiteSpace($StoryRequest)) {
+	$StoryRequest = $DefaultStoryRequest
+}
+
 if (-not $PSBoundParameters.ContainsKey("ProjectName")) {
-	$ProjectName = Prompt-OptionalValue -PromptText "Project name" -DefaultValue $ProjectName
+	$ProjectName = Prompt-OptionalValue -PromptText "Project name" -DefaultValue $DefaultProjectName
 }
+elseif ([string]::IsNullOrWhiteSpace($ProjectName)) {
+	$ProjectName = $DefaultProjectName
+}
+
 if (-not $PSBoundParameters.ContainsKey("ProjectDescription")) {
-	$ProjectDescription = Prompt-OptionalValue -PromptText "Project description" -DefaultValue $ProjectDescription
+	$ProjectDescription = Prompt-OptionalValue -PromptText "Project description" -DefaultValue $DefaultProjectDescription
+}
+elseif ([string]::IsNullOrWhiteSpace($ProjectDescription)) {
+	$ProjectDescription = $DefaultProjectDescription
+}
+
+if ([string]::IsNullOrWhiteSpace($StoryRequest)) {
+	throw "Usage: .\windows\quick_start.ps1 <provider> <story request> [project name] [project description]"
 }
 
 $pythonExe = Resolve-PythonExe
 $apiKeys = Get-ApiKeys -KeysFile (Join-Path $ProjectRoot "api_keys.sh")
+$apiKey = if ($env:NOVEL_API_KEY) { $env:NOVEL_API_KEY } else { Get-ApiKeyForProvider -Provider $Provider -ApiKeys $apiKeys }
+Ensure-ApiKeyPresent -Provider $Provider -ApiKey $apiKey -ProjectRoot $ProjectRoot
 
-$apiKey = $env:NOVEL_API_KEY
-if (-not $apiKey) {
-	switch ($Provider) {
-		"gemini" { $apiKey = $apiKeys["GEMINI_API_KEY"] }
-		"grok" { $apiKey = $apiKeys["GROK_API_KEY"] }
-		"deepseek" { $apiKey = $apiKeys["DEEPSEEK_API_KEY"] }
-		"doubao" { $apiKey = $apiKeys["DOUBAO_API_KEY"] }
-	}
-}
-if (-not $apiKey) {
-	throw "provider=$Provider missing API key. Please fill $ProjectRoot\api_keys.sh"
-}
-
-$modelName = if ($env:NOVEL_MODEL_NAME) { $env:NOVEL_MODEL_NAME } else { Default-ModelForProvider $Provider }
-$apiBase = if ($env:NOVEL_API_BASE) { $env:NOVEL_API_BASE } else { Default-ApiBaseForProvider $Provider }
-$temperature = if ($env:NOVEL_TEMPERATURE) { [double]$env:NOVEL_TEMPERATURE } else { 1.0 }
-$maxTokens = if ($env:NOVEL_MAX_TOKENS) { [int]$env:NOVEL_MAX_TOKENS } else { 10240 }
-$timeout = if ($env:NOVEL_TIMEOUT) { [int]$env:NOVEL_TIMEOUT } else { 120 }
-$thinkingLevel = if ($env:NOVEL_THINKING_LEVEL) { $env:NOVEL_THINKING_LEVEL } else { Default-ThinkingLevel $Provider }
+$modelName = if ($env:NOVEL_MODEL_NAME) { $env:NOVEL_MODEL_NAME } elseif ($DefaultModelName) { $DefaultModelName } else { Get-DefaultModelForProvider $Provider }
+$apiBase = if ($env:NOVEL_API_BASE) { $env:NOVEL_API_BASE } elseif ($DefaultApiBase) { $DefaultApiBase } else { Get-DefaultApiBaseForProvider $Provider }
+$temperature = if ($env:NOVEL_TEMPERATURE) { [double]$env:NOVEL_TEMPERATURE } else { [double]$DefaultTemperature }
+$maxTokens = if ($env:NOVEL_MAX_TOKENS) { [int]$env:NOVEL_MAX_TOKENS } else { [int]$DefaultMaxTokens }
+$timeout = if ($env:NOVEL_TIMEOUT) { [int]$env:NOVEL_TIMEOUT } else { [int]$DefaultTimeout }
+$thinkingLevel = if ($env:NOVEL_THINKING_LEVEL) { $env:NOVEL_THINKING_LEVEL } elseif ($DefaultThinkingLevel) { $DefaultThinkingLevel } else { Get-DefaultThinkingLevelForProvider $Provider }
 
 $outputRoot = Join-Path $ProjectRoot "output"
-if (-not (Test-Path $outputRoot)) {
-	New-Item -Path $outputRoot -ItemType Directory | Out-Null
+$existingProjects = @()
+if (Test-Path -LiteralPath $outputRoot) {
+	$existingProjects = @(Get-ChildItem -LiteralPath $outputRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 }
 
-$config = [ordered]@{
-	project_name = $ProjectName
-	project_description = $ProjectDescription
-	project_path = (Join-Path $outputRoot "novel_project_{project_id}")
-	init_with_llm = $true
-	story_request = $StoryRequest
-	model_provider = $Provider
-	model_name = $modelName
-	api_base = $apiBase
-	api_key = $apiKey
-	temperature = $temperature
-	max_tokens = $maxTokens
-	timeout = $timeout
-}
-if ($thinkingLevel) {
-	$config["thinking_level"] = $thinkingLevel
-}
-
-$tempConfig = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ("novel_writer_config_{0}.json" -f ([guid]::NewGuid().ToString("N"))))
-[System.IO.File]::WriteAllText($tempConfig, ($config | ConvertTo-Json -Depth 10), [System.Text.UTF8Encoding]::new($false))
+$tempConfig = New-TempConfigPath -Prefix "novel_writer_config"
 
 try {
-	$initOutput = & $pythonExe (Join-Path $ProjectRoot "app.py") init --config $tempConfig
-	$initOutput | ForEach-Object { Write-Output $_ }
+	Write-InitConfig `
+		-OutputPath $tempConfig `
+		-ProjectRoot $ProjectRoot `
+		-ProjectName $ProjectName `
+		-ProjectDescription $ProjectDescription `
+		-StoryRequest $StoryRequest `
+		-Provider $Provider `
+		-ModelName $modelName `
+		-ApiBase $apiBase `
+		-ApiKey $apiKey `
+		-Temperature $temperature `
+		-MaxTokens $maxTokens `
+		-Timeout $timeout `
+		-ThinkingLevel $thinkingLevel
 
-	$projectPath = ""
-	foreach ($line in $initOutput) {
-		$lineText = "$line"
-		if ($lineText -match '^项目已初始化:\s+(.+)$') {
-			$projectPath = $matches[1].Trim()
-		}
+	$initResult = Invoke-NativeCommandCapture -Executable $pythonExe -Arguments @(
+		(Join-Path $ProjectRoot "app.py"),
+		"init",
+		"--config", $tempConfig
+	)
+	$initResult.Output | ForEach-Object { Write-Output $_ }
+	if ($initResult.ExitCode -ne 0) {
+		throw "Project initialization failed with exit code $($initResult.ExitCode)."
 	}
-	if (-not $projectPath) {
-		$projectPath = Get-LatestProjectPath -OutputRoot $outputRoot
+
+	$newProjects = @()
+	if (Test-Path -LiteralPath $outputRoot) {
+		$newProjects = @(Get-ChildItem -LiteralPath $outputRoot -Directory -ErrorAction SilentlyContinue |
+			Where-Object { $existingProjects -notcontains $_.FullName } |
+			Sort-Object LastWriteTime -Descending)
 	}
+
+	$projectPath = if ($newProjects.Count -gt 0) { $newProjects[0].FullName } else { Get-LatestProjectPath -OutputRoot $outputRoot }
 	if (-not $projectPath) {
-		throw "Unable to detect initialized project path under output directory."
+		throw "Unable to detect the initialized project path under the output directory."
 	}
 
 	if ($AutoCreateCoverAndPortraits) {
-		Write-Output "正在尝试自动创建小说封面和人物立绘..."
-		$assetOutput = & $pythonExe (Join-Path $ProjectRoot "app.py") illustrate-assets --project $projectPath 2>&1
-		$assetExitCode = $LASTEXITCODE
+		Write-Output "Attempting to auto-generate cover and character portraits..."
+		$assetResult = Invoke-NativeCommandCapture -Executable $pythonExe -Arguments @(
+			(Join-Path $ProjectRoot "app.py"),
+			"illustrate-assets",
+			"--project", $projectPath
+		)
+		$assetOutput = $assetResult.Output
 		$assetOutput | ForEach-Object { Write-Output $_ }
 
-		if ($assetExitCode -ne 0) {
+		if ($assetResult.ExitCode -ne 0) {
 			$assetText = ($assetOutput | ForEach-Object { "$_" }) -join "`n"
 			if (Test-IllustrationConnectionFailure -Text $assetText) {
-				Write-Warning "ComfyUI 不可连接，已跳过自动创建封面和人物立绘。"
+				Write-Warning "ComfyUI is not reachable. Skipping automatic cover and portrait generation."
 			}
 			else {
-				throw "Cover/portrait generation failed with exit code $assetExitCode."
+				throw "Cover or portrait generation failed with exit code $($assetResult.ExitCode)."
 			}
 		}
 	}
 
-	& $pythonExe (Join-Path $ProjectRoot "app.py") status --project $projectPath
-	Write-Output ("Continue example: .\windows\quick_continue.bat ""{0}"" 3 ""想看的情节""" -f $projectPath)
+	$statusResult = Invoke-NativeCommandCapture -Executable $pythonExe -Arguments @(
+		(Join-Path $ProjectRoot "app.py"),
+		"status",
+		"--project", $projectPath
+	)
+	$statusResult.Output | ForEach-Object { Write-Output $_ }
+	if ($statusResult.ExitCode -ne 0) {
+		throw "Status command failed with exit code $($statusResult.ExitCode)."
+	}
+
+	Write-Output ("Continue example: .\windows\quick_continue.bat ""{0}"" 3 ""preferred scene""" -f $projectPath)
 }
 finally {
-	Remove-Item -Path $tempConfig -ErrorAction SilentlyContinue
+	Remove-Item -LiteralPath $tempConfig -ErrorAction SilentlyContinue
 }
