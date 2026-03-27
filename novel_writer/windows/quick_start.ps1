@@ -25,11 +25,11 @@ $DefaultModelName = ""
 $DefaultApiBase = ""
 $DefaultTemperature = "1.0"
 $DefaultMaxTokens = "10240"
-$DefaultTimeout = "120"
+$DefaultTimeout = ""
 $DefaultThinkingLevel = "medium"
 
 if (-not $PSBoundParameters.ContainsKey("Provider")) {
-	$Provider = Prompt-OptionalValue -PromptText "Provider (gemini/grok/deepseek/doubao)" -DefaultValue $Provider
+	$Provider = Prompt-OptionalValue -PromptText "Provider (gemini/grok/deepseek/doubao/ollama)" -DefaultValue $Provider
 }
 $Provider = Normalize-Provider $Provider
 
@@ -67,7 +67,7 @@ $modelName = if ($env:NOVEL_MODEL_NAME) { $env:NOVEL_MODEL_NAME } elseif ($Defau
 $apiBase = if ($env:NOVEL_API_BASE) { $env:NOVEL_API_BASE } elseif ($DefaultApiBase) { $DefaultApiBase } else { Get-DefaultApiBaseForProvider $Provider }
 $temperature = if ($env:NOVEL_TEMPERATURE) { [double]$env:NOVEL_TEMPERATURE } else { [double]$DefaultTemperature }
 $maxTokens = if ($env:NOVEL_MAX_TOKENS) { [int]$env:NOVEL_MAX_TOKENS } else { [int]$DefaultMaxTokens }
-$timeout = if ($env:NOVEL_TIMEOUT) { [int]$env:NOVEL_TIMEOUT } else { [int]$DefaultTimeout }
+$timeout = if ($env:NOVEL_TIMEOUT) { [int]$env:NOVEL_TIMEOUT } elseif ($DefaultTimeout) { [int]$DefaultTimeout } else { Get-DefaultTimeoutForProvider $Provider }
 $thinkingLevel = if ($env:NOVEL_THINKING_LEVEL) { $env:NOVEL_THINKING_LEVEL } elseif ($DefaultThinkingLevel) { $DefaultThinkingLevel } else { Get-DefaultThinkingLevelForProvider $Provider }
 
 $outputRoot = Join-Path $ProjectRoot "output"

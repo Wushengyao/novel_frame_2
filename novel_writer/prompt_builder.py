@@ -12,6 +12,28 @@ def _to_block(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)
 
 
+def _writer_volume_outline_block(volume: dict | None, chapter_outline: dict | None) -> str:
+    source = volume if isinstance(volume, dict) else {}
+    chapter = chapter_outline if isinstance(chapter_outline, dict) else {}
+    compact = {
+        "volume_number": source.get("volume_number", ""),
+        "title": source.get("title", ""),
+        "summary": source.get("summary", ""),
+        "story_goal": source.get("story_goal", ""),
+        "planned_chapter_count": source.get("planned_chapter_count", 0),
+        "current_chapter_number": chapter.get("chapter_number", ""),
+        "current_chapter_title": chapter.get("title", ""),
+    }
+    return _to_block(compact)
+
+
+def _writer_plot_state_block(plot_state: dict | None, chapter_outline: dict | None) -> str:
+    state = dict(plot_state) if isinstance(plot_state, dict) else {}
+    if chapter_outline:
+        state.pop("next_chapter_goal", None)
+    return _to_block(state)
+
+
 def build_init_prompt(data: dict) -> str:
     project_name = data.get("project_name", "")
     project_description = data.get("project_description", "")
@@ -245,11 +267,13 @@ def build_writer_prompt(
 ) -> str:
     world = _to_block(data.get("world", {}))
     characters = _to_block(data.get("characters", {}))
-    plot_state = _to_block(data.get("plot_state", {}))
+    plot_state = _writer_plot_state_block(data.get("plot_state", {}), chapter_outline)
     style = _to_block(data.get("style", {}))
-    volume_outline = _to_block(current_volume_outline or {})
+    volume_outline = _writer_volume_outline_block(current_volume_outline, chapter_outline)
     chapter_outline_block = _to_block(chapter_outline or {})
     next_chapter_goal = data.get("plot_state", {}).get("next_chapter_goal", "")
+    has_chapter_outline = bool(chapter_outline)
+    fallback_goal_block = next_chapter_goal.strip() if not has_chapter_outline else ""
     user_request_block = user_request.strip() if user_request.strip() else "无。请在既有设定下自由发挥，自然推进剧情。"
     chapter_count = int(data.get("project", {}).get("chapter_count", 0) or 0)
     first_chapter_note = (
@@ -279,8 +303,8 @@ def build_writer_prompt(
 【最近正文】
 {recent_text}
 
-【本章目标】
-{next_chapter_goal}
+【本章目标补充说明】
+{fallback_goal_block or "无额外补充；请以本章分章大纲为准。"}
 
 【开篇说明】
 {first_chapter_note or "这不是第一章，请延续已有状态与正文。"}
@@ -298,7 +322,10 @@ def build_writer_prompt(
 4. 输出纯正文
 5. 不要输出章标题、序号、小标题、Markdown标题
 6. 如果用户额外要求与既有设定不冲突，优先吸收；若有冲突，以既有设定一致性为先，并尽量柔和地兼容用户意图
-7. 本章必须完成分章大纲中的核心任务，同时与所属卷的阶段目标保持一致
+7. 如果提供了“本章分章大纲”，它就是当前章节任务的最高优先级来源；不要再自行改写成另一个目标
+8. 本章必须完成分章大纲中的核心任务，同时与所属卷的阶段目标保持一致
+9. 严格只写当前这一章，不要提前完成下一章或后续章节的大事件
+10. 如果本章结尾需要承接后续内容，可以留下明确悬念或过渡，但不要把后续章的核心情节直接写完
 """
 
 

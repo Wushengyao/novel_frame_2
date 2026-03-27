@@ -121,6 +121,23 @@ def _default_thinking_level(provider: str) -> str:
     return "medium" if provider == "gemini" else ""
 
 
+def _default_timeout_for_provider(provider: str) -> int:
+    return 900 if provider == "ollama" else 120
+
+
+def _resolve_timeout_for_provider(provider: str, raw_value: object) -> int:
+    default_timeout = _default_timeout_for_provider(provider)
+    try:
+        timeout = int(raw_value)
+    except (TypeError, ValueError):
+        timeout = default_timeout
+    if timeout <= 0:
+        timeout = default_timeout
+    if provider == "ollama":
+        return max(timeout, default_timeout)
+    return timeout
+
+
 def _provider_requires_api_key(provider: str) -> bool:
     return provider in {"gemini", "grok", "deepseek", "doubao"}
 
@@ -190,7 +207,11 @@ def _build_runtime_config(project_path: Path, overrides: dict[str, str], api_key
         "api_key": _api_key_for_provider(provider, api_keys) or overrides.get("api_key", ""),
         "temperature": float(overrides.get("temperature") or saved.get("temperature", 0.8)),
         "max_tokens": int(overrides.get("max_tokens") or saved.get("max_tokens", 4000)),
-        "timeout": int(overrides.get("timeout") or saved.get("timeout", 120)),
+        "timeout": _resolve_timeout_for_provider(
+            provider,
+            overrides.get("timeout")
+            or saved.get("timeout", _default_timeout_for_provider(provider)),
+        ),
     }
 
     thinking_level = (overrides.get("thinking_level") or "").strip()
@@ -231,7 +252,7 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str]) -> str:
         "api_key": api_key,
         "temperature": float(form.get("temperature") or 0.9),
         "max_tokens": int(form.get("max_tokens") or 4000),
-        "timeout": int(form.get("timeout") or 120),
+        "timeout": _resolve_timeout_for_provider(provider, form.get("timeout") or _default_timeout_for_provider(provider)),
     }
     thinking_level = (form.get("thinking_level") or _default_thinking_level(provider)).strip()
     if thinking_level:
