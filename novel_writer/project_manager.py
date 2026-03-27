@@ -473,19 +473,16 @@ def init_project(config_path: str) -> str:
     save_json(str(project_path / "plot_state.json"), plot_state)
     save_json(str(project_path / "style.json"), style)
     log_success("初始化项目: 基础设定文件写入完成。")
-    try:
-        from outline_manager import regenerate_chapter_outline, regenerate_volume_outline
+    from outline_manager import regenerate_chapter_outline, regenerate_volume_outline
 
-        llm_config = _build_llm_config(config)
-        outline_request = str(config.get("outline_request", "") or "").strip()
-        log_info("初始化项目: 开始生成分卷大纲。")
-        regenerate_volume_outline(str(project_path), llm_config, user_request=outline_request)
-        log_success("初始化项目: 分卷大纲生成完成。")
-        log_info("初始化项目: 开始生成分章大纲。")
-        regenerate_chapter_outline(str(project_path), llm_config, volume_number=None, user_request=outline_request)
-        log_success("初始化项目: 分章大纲生成完成。")
-    except Exception:  # pragma: no cover - outline generation should not block init
-        log_error("初始化项目: 分卷/分章大纲生成失败，项目已创建，但需要稍后手动重生成大纲。")
+    llm_config = _build_llm_config(config)
+    outline_request = str(config.get("outline_request", "") or "").strip()
+    log_info("初始化项目: 开始生成分卷大纲。")
+    regenerate_volume_outline(str(project_path), llm_config, user_request=outline_request)
+    log_success("初始化项目: 分卷大纲生成完成。")
+    log_info("初始化项目: 开始生成分章大纲。")
+    regenerate_chapter_outline(str(project_path), llm_config, volume_number=None, user_request=outline_request)
+    log_success("初始化项目: 分章大纲生成完成。")
     snapshot_path = create_state_snapshot(str(project_path), chapter_count=0, note="post-init checkpoint")
     log_success(f"初始化项目: 已写入初始状态快照 {snapshot_path}")
     log_success(f"初始化项目: 项目已完成初始化 {project_path}")

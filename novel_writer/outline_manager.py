@@ -39,6 +39,12 @@ EMPTY_CHAPTER_OUTLINE = {
     "status": "planned",
 }
 
+OUTLINE_MAX_ATTEMPTS = 3
+
+
+class OutlineGenerationError(RuntimeError):
+    """Raised when outline generation does not produce a usable result."""
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -181,120 +187,131 @@ def _build_completed_chapter_context(project_data: dict) -> list[dict]:
     return completed[-8:]
 
 
-def _fallback_volume_outline(project_data: dict, user_request: str = "") -> dict:
-    project = project_data.get("project", {})
-    story_request = str(project.get("story_request", "") or "").strip()
-    prompt_text = user_request.strip() or story_request or str(project.get("description", "") or "").strip()
-    base_summary = prompt_text[:180] or "围绕主角群展开长期故事，逐步推进主线与人物关系。"
-    return normalize_outlines(
-        {
-            "meta": deepcopy(EMPTY_OUTLINE_META),
-            "volumes": [
-                {
-                    "volume_number": 1,
-                    "title": "第一卷 困局初成",
-                    "summary": base_summary or "建立核心困局、人物关系与主线目标。",
-                    "story_goal": "完成开篇铺陈，确立核心矛盾与初步生存/行动逻辑。",
-                    "planned_chapter_count": 6,
-                },
-                {
-                    "volume_number": 2,
-                    "title": "第二卷 局势扩展",
-                    "summary": "在既有困局基础上扩大行动范围，引入更多资源、矛盾和人物关系变化。",
-                    "story_goal": "推动主线升级，让人物关系和外部挑战同步加深。",
-                    "planned_chapter_count": 6,
-                },
-                {
-                    "volume_number": 3,
-                    "title": "第三卷 危机升级",
-                    "summary": "让前期伏笔集中兑现，使故事进入更复杂、更难回避的阶段。",
-                    "story_goal": "形成阶段性高潮，并为下一阶段发展预留空间。",
-                    "planned_chapter_count": 6,
-                },
-            ],
-        }
-    )
-
-
-def _fallback_chapters_for_volume(volume: dict) -> list[dict]:
-    planned_count = max(1, _safe_int(volume.get("planned_chapter_count"), 1))
-    default_titles = [
-        "局面建立",
-        "第一次应对",
-        "局势试探",
-        "问题加深",
-        "阶段突破",
-        "余波扩散",
-        "新线索出现",
-        "冲突转向",
-        "阶段收束",
-        "新的悬念",
-    ]
-    chapters = []
-    for chapter_index in range(1, planned_count + 1):
-        title = default_titles[chapter_index - 1] if chapter_index <= len(default_titles) else f"推进节点{chapter_index}"
-        chapters.append(
-            {
-                "chapter_in_volume": chapter_index,
-                "title": title,
-                "summary": f"围绕“{volume.get('title', '当前卷')}”的阶段目标，推进到第{chapter_index}个关键节点。",
-                "goal": f"完成第{chapter_index}章应承担的推进任务，并自然承接上下章。",
-                "key_events": [
-                    "推动当前阶段的核心事件",
-                    "深化人物互动或矛盾",
-                    "为下一章留下明确延续点",
-                ],
-                "status": "planned",
-            }
-        )
-    return chapters
-
-
-def _generate_outline_json(prompt: str, config: dict, project_path: str) -> dict | None:
+def _ensure_outline_model_config(config: dict) -> None:
     provider = str(config.get("model_provider", "") or "").strip().lower()
     model_name = str(config.get("model") or config.get("model_name") or "").strip()
     api_key = str(config.get("api_key", "") or "").strip()
     api_base = str(config.get("api_base", "") or "").strip()
-    if not model_name:
-        log_warning("大纲生成: 未提供模型名称，直接使用兜底大纲。")
-        return None
-    if provider == "openai_compatible" and (not api_key or not api_base):
-        log_warning("大纲生成: openai_compatible 缺少 api_key 或 api_base，直接使用兜底大纲。")
-        return None
-    if provider == "ollama" and not api_base:
-        log_warning("大纲生成: ollama 缺少 api_base，直接使用兜底大纲。")
-        return None
-    if provider in {"gemini", "grok", "deepseek", "doubao"} and not api_key:
-        log_warning(f"大纲生成: provider={provider} 缺少 api_key，直接使用兜底大纲。")
-        return None
 
+    if not model_name:
+        raise OutlineGenerationError("大纲生成失败：缺少模型名称。")
+    if provider == "openai_compatible" and (not api_key or not api_base):
+        raise OutlineGenerationError("大纲生成失败：openai_compatible 缺少 api_key 或 api_base。")
+    if provider == "ollama" and not api_base:
+        raise OutlineGenerationError("大纲生成失败：ollama 缺少 api_base。")
+    if provider in {"gemini", "grok", "deepseek", "doubao"} and not api_key:
+        raise OutlineGenerationError(f"大纲生成失败：provider={provider} 缺少 api_key。")
+
+
+def _validate_volume_outline_response(data: dict) -> dict:
+    raw_volumes = data.get("volumes")
+    if not isinstance(raw_volumes, list) or not raw_volumes:
+        raise ValueError("模型返回的分卷结果为空。")
+    for index, raw_volume in enumerate(raw_volumes, start=1):
+        if not isinstance(raw_volume, dict):
+            raise ValueError(f"第 {index} 卷数据格式非法。")
+        if _safe_int(raw_volume.get("planned_chapter_count"), 0) < 1:
+            raise ValueError(f"第 {index} 卷 planned_chapter_count 非法。")
+
+    normalized = normalize_outlines(data)
+    for volume in normalized.get("volumes", []):
+        if not volume.get("title"):
+            raise ValueError(f"第 {volume.get('volume_number', '?')} 卷缺少 title。")
+        if not volume.get("summary"):
+            raise ValueError(f"第 {volume.get('volume_number', '?')} 卷缺少 summary。")
+        if not volume.get("story_goal"):
+            raise ValueError(f"第 {volume.get('volume_number', '?')} 卷缺少 story_goal。")
+    return normalized
+
+
+def _validate_chapter_outline_response(data: dict, volume: dict) -> dict:
+    planned_count = max(1, _safe_int(volume.get("planned_chapter_count"), 1))
+    raw_chapters = data.get("chapters")
+    if not isinstance(raw_chapters, list):
+        raise ValueError("模型返回缺少 chapters 列表。")
+    if len(raw_chapters) != planned_count:
+        raise ValueError(
+            f"模型返回章节数不匹配：期望 {planned_count} 章，实际 {len(raw_chapters)} 章。"
+        )
+
+    normalized_volume = normalize_outlines(
+        {
+            "volumes": [
+                {
+                    **volume,
+                    "chapters": raw_chapters,
+                }
+            ]
+        }
+    )["volumes"][0]
+    chapters = normalized_volume.get("chapters") or []
+
+    for chapter in chapters:
+        chapter_label = f"第 {chapter.get('chapter_in_volume', '?')} 章"
+        if not chapter.get("title"):
+            raise ValueError(f"{chapter_label} 缺少 title。")
+        if not chapter.get("summary"):
+            raise ValueError(f"{chapter_label} 缺少 summary。")
+        if not chapter.get("goal"):
+            raise ValueError(f"{chapter_label} 缺少 goal。")
+        key_events = chapter.get("key_events") or []
+        if not 2 <= len(key_events) <= 5:
+            raise ValueError(f"{chapter_label} 的 key_events 数量必须在 2 到 5 之间。")
+
+    return {
+        "volume_number": normalized_volume.get("volume_number", volume.get("volume_number", 1)),
+        "chapters": chapters,
+    }
+
+
+def _generate_outline_json(
+    prompt: str,
+    config: dict,
+    project_path: str,
+    *,
+    validator,
+    context: str,
+    max_attempts: int = OUTLINE_MAX_ATTEMPTS,
+) -> dict:
+    _ensure_outline_model_config(config)
     last_error = None
-    for attempt in range(2):
+
+    for attempt in range(max_attempts):
         try:
-            log_info(f"大纲生成: 第 {attempt + 1} 次请求模型。")
+            log_info(f"{context}: 第 {attempt + 1}/{max_attempts} 次请求模型。")
             response_text, metadata = generate_text_with_metadata(prompt, config)
         except Exception as exc:  # pragma: no cover - resilience path
             update_project_stats(project_path, phase="outline", success=False, usage=None)
             last_error = exc
-            log_warning(f"大纲生成: 第 {attempt + 1} 次请求失败，原因: {exc}")
+            log_warning(f"{context}: 第 {attempt + 1}/{max_attempts} 次请求失败，原因: {exc}")
             continue
 
         try:
+            parsed = _extract_json_object(response_text)
+            validated = validator(parsed)
+        except Exception as exc:  # pragma: no cover - resilience path
             update_project_stats(
                 project_path,
                 phase="outline",
-                success=True,
+                success=False,
                 usage=metadata.get("usage"),
             )
-            log_success("大纲生成: 模型返回成功，已解析 JSON。")
-            return _extract_json_object(response_text)
-        except Exception as exc:  # pragma: no cover - resilience path
             last_error = exc
-            log_warning(f"大纲生成: 返回内容解析失败，原因: {exc}")
-    if last_error is not None:
-        log_warning(f"大纲生成: 改用兜底大纲。最后错误: {last_error}")
-        return None
-    return None
+            log_warning(f"{context}: 第 {attempt + 1}/{max_attempts} 次返回内容无效，原因: {exc}")
+            continue
+
+        update_project_stats(
+            project_path,
+            phase="outline",
+            success=True,
+            usage=metadata.get("usage"),
+        )
+        log_success(f"{context}: 第 {attempt + 1}/{max_attempts} 次请求成功。")
+        return validated
+
+    raise OutlineGenerationError(
+        f"{context} 在 {max_attempts} 次尝试后仍未生成可用结果。最后错误: {last_error}"
+    )
 
 
 def regenerate_volume_outline(project_path: str, config: dict, user_request: str = "") -> dict:
@@ -307,12 +324,14 @@ def regenerate_volume_outline(project_path: str, config: dict, user_request: str
         },
         user_request=user_request,
     )
-    generated = _generate_outline_json(prompt, config, project_path)
-    outlines = normalize_outlines(generated) if generated else _fallback_volume_outline(project_data, user_request=user_request)
-    if generated:
-        log_success(f"分卷大纲: 模型生成完成，共 {len(outlines.get('volumes', []))} 卷。")
-    else:
-        log_warning(f"分卷大纲: 使用兜底结果，共 {len(outlines.get('volumes', []))} 卷。")
+    outlines = _generate_outline_json(
+        prompt,
+        config,
+        project_path,
+        validator=_validate_volume_outline_response,
+        context="分卷大纲",
+    )
+    log_success(f"分卷大纲: 模型生成完成，共 {len(outlines.get('volumes', []))} 卷。")
     outlines["meta"]["chapter_outline_stale"] = True
     outlines["meta"]["last_volume_outline_request"] = user_request.strip()
     save_outlines(project_path, outlines)
@@ -336,6 +355,24 @@ def _all_volumes_have_chapters(outlines: dict) -> bool:
         if len(volume.get("chapters") or []) < planned_count:
             return False
     return True
+
+
+def _save_partial_chapter_outlines(
+    project_path: str,
+    existing_outlines: dict,
+    new_volumes: list[dict],
+    user_request: str,
+) -> None:
+    partial_outlines = deepcopy(existing_outlines)
+    remaining_volumes = [
+        deepcopy(volume)
+        for volume in existing_outlines.get("volumes", [])[len(new_volumes) :]
+    ]
+    partial_outlines["volumes"] = new_volumes + remaining_volumes
+    partial_outlines = normalize_outlines(partial_outlines)
+    partial_outlines["meta"]["last_chapter_outline_request"] = user_request.strip()
+    partial_outlines["meta"]["chapter_outline_stale"] = True
+    save_outlines(project_path, partial_outlines)
 
 
 def _build_placeholder_completed_chapters(count: int) -> list[dict]:
@@ -364,6 +401,7 @@ def regenerate_chapter_outline(
         log_info(f"分章大纲: 开始为全部卷生成，项目={project_path}")
     else:
         log_info(f"分章大纲: 开始为第 {volume_number} 卷生成，项目={project_path}")
+
     existing_outlines = load_outlines(project_path)
     if not existing_outlines.get("volumes"):
         log_warning("分章大纲: 当前没有分卷大纲，先自动生成分卷大纲。")
@@ -400,33 +438,30 @@ def regenerate_chapter_outline(
                 completed_chapters=preserved_completed,
                 user_request=user_request,
             )
-            generated = _generate_outline_json(prompt, config, project_path)
-            generated_chapters = []
-            if generated and isinstance(generated.get("chapters"), list):
-                generated_chapters = generated.get("chapters") or []
+            try:
+                generated = _generate_outline_json(
+                    prompt,
+                    config,
+                    project_path,
+                    validator=lambda data, current_volume=volume: _validate_chapter_outline_response(data, current_volume),
+                    context=f"分章大纲: 第 {volume.get('volume_number', '?')} 卷",
+                )
+            except Exception as exc:
+                log_error(f"分章大纲: 第 {volume.get('volume_number', '?')} 卷生成失败，原因: {exc}")
+                raise
 
-            normalized_generated = normalize_outlines(
-                {
-                    "volumes": [
-                        {
-                            **volume,
-                            "chapters": generated_chapters or _fallback_chapters_for_volume(volume),
-                        }
-                    ]
-                }
-            )["volumes"][0]["chapters"]
-            volume_chapters = preserved_completed + normalized_generated[completed_count:planned_count]
+            generated_chapters = generated.get("chapters") or []
+            volume_chapters = preserved_completed + generated_chapters[completed_count:planned_count]
             log_success(f"分章大纲: 第 {volume.get('volume_number', '?')} 卷生成完成。")
         else:
-            volume_chapters = deepcopy(existing_volume.get("chapters") or [])
+            volume_chapters = deepcopy(existing_volume.get("chapters") or []) if existing_volume else []
             log_info(f"分章大纲: 第 {volume.get('volume_number', '?')} 卷沿用现有章纲。")
 
-        if len(volume_chapters) < planned_count:
-            volume_chapters.extend(_fallback_chapters_for_volume(volume)[len(volume_chapters) : planned_count])
-            log_warning(f"分章大纲: 第 {volume.get('volume_number', '?')} 卷章纲不足，已用兜底章纲补齐。")
         volume_copy = deepcopy(volume)
         volume_copy["chapters"] = volume_chapters[:planned_count]
         new_volumes.append(volume_copy)
+        _save_partial_chapter_outlines(project_path, existing_outlines, new_volumes, user_request)
+        log_info(f"分章大纲: 第 {volume.get('volume_number', '?')} 卷进度已保存到 outlines.json。")
 
     updated_outlines["volumes"] = new_volumes
     updated_outlines = normalize_outlines(updated_outlines)
@@ -458,7 +493,10 @@ def sync_outline_progress(project_path: str, outlines: dict | None = None) -> di
 
 
 def _sync_plot_state_next_goal(project_path: str, outlines: dict) -> None:
-    next_context = find_next_chapter_context(outlines, int(load_json(str(Path(project_path) / "project.json")).get("chapter_count", 0) or 0))
+    next_context = find_next_chapter_context(
+        outlines,
+        int(load_json(str(Path(project_path) / "project.json")).get("chapter_count", 0) or 0),
+    )
     if next_context is None:
         return
     plot_state_path = Path(project_path) / "plot_state.json"
@@ -487,10 +525,10 @@ def ensure_project_outlines(project_path: str, config: dict) -> dict:
         regenerate_volume_outline(project_path, config, user_request="")
         outlines = regenerate_chapter_outline(project_path, config, volume_number=None, user_request="")
     elif outlines.get("meta", {}).get("chapter_outline_stale"):
-        log_error("章纲检查: 分卷大纲已更新，但分章大纲尚未同步。")
+        log_error("章纲检查: 分卷大纲已经更新，但分章大纲尚未同步。")
         raise ValueError("分卷大纲已经更新，但分章大纲尚未同步，请先重新生成分章大纲。")
     elif not _all_volumes_have_chapters(outlines):
-        log_warning("章纲检查: 检测到章纲不完整，准备自动补齐。")
+        log_warning("章纲检查: 检测到章纲不完整，准备自动补全。")
         outlines = regenerate_chapter_outline(project_path, config, volume_number=None, user_request="")
     else:
         outlines = sync_outline_progress(project_path, outlines)
