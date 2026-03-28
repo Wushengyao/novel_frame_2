@@ -106,8 +106,7 @@ try {
 		$nextArgs += @("--user-request", $UserRequest)
 	}
 
-	$nextResult = Invoke-NativeCommandCapture -Executable $pythonExe -Arguments $nextArgs
-	$nextResult.Output | ForEach-Object { Write-Output $_ }
+	$nextResult = Invoke-NativeCommandCapture -Executable $pythonExe -Arguments $nextArgs -StreamOutput
 	if ($nextResult.ExitCode -ne 0) {
 		throw "Chapter generation failed with exit code $($nextResult.ExitCode)."
 	}
@@ -131,9 +130,8 @@ try {
 				"--config", $tempConfig
 			)
 
-			$illustrateResult = Invoke-NativeCommandCapture -Executable $pythonExe -Arguments $illustrateArgs
+			$illustrateResult = Invoke-NativeCommandCapture -Executable $pythonExe -Arguments $illustrateArgs -StreamOutput
 			$illustrateOutput = $illustrateResult.Output
-			$illustrateOutput | ForEach-Object { Write-Output $_ }
 
 			if ($illustrateResult.ExitCode -ne 0) {
 				$illustrateText = ($illustrateOutput | ForEach-Object { "$_" }) -join "`n"
@@ -153,8 +151,7 @@ try {
 		(Join-Path $ProjectRoot "app.py"),
 		"status",
 		"--project", $ProjectPath
-	)
-	$statusResult.Output | ForEach-Object { Write-Output $_ }
+	) -StreamOutput
 	if ($statusResult.ExitCode -ne 0) {
 		throw "Status command failed with exit code $($statusResult.ExitCode)."
 	}

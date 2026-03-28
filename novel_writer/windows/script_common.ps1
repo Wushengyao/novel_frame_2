@@ -157,7 +157,7 @@ function Get-DefaultModelForProvider {
 	param([string]$Provider)
 
 	switch (Normalize-Provider $Provider) {
-		"gemini" { return "gemini-3.1-pro-preview" }
+		"gemini" { return "gemini-3.1-flash-lite-preview" }
 		"grok" { return "grok-4.20-beta-latest-reasoning" }
 		"deepseek" { return "deepseek-reasoner" }
 		"doubao" { return "doubao-seed-2-0-pro-260215" }
@@ -252,19 +252,24 @@ function Test-IllustrationConnectionFailure {
 function Invoke-NativeCommandCapture {
 	param(
 		[string]$Executable,
-		[string[]]$Arguments
+		[string[]]$Arguments,
+		[switch]$StreamOutput
 	)
 
 	$previousErrorActionPreference = $ErrorActionPreference
 	try {
 		$ErrorActionPreference = "Continue"
 		$output = & $Executable @Arguments 2>&1 | ForEach-Object {
-			if ($_ -is [System.Management.Automation.ErrorRecord]) {
+			$line = if ($_ -is [System.Management.Automation.ErrorRecord]) {
 				$_.ToString()
 			}
 			else {
 				"$_"
 			}
+			if ($StreamOutput) {
+				Write-Host $line
+			}
+			$line
 		}
 
 		$exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
