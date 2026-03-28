@@ -51,7 +51,7 @@ if (-not $PSBoundParameters.ContainsKey("UserRequest")) {
 	$UserRequest = Prompt-OptionalValue -PromptText "User request (optional)"
 }
 if (-not $PSBoundParameters.ContainsKey("ProviderOverride")) {
-	$ProviderOverride = Prompt-OptionalValue -PromptText "Provider override (optional: gemini/grok/deepseek/doubao)"
+	$ProviderOverride = Prompt-OptionalValue -PromptText "Provider override (optional: gemini/grok/deepseek/doubao/ollama)"
 }
 
 $savedProject = Get-Content -LiteralPath $projectFile -Raw -Encoding UTF8 | ConvertFrom-Json

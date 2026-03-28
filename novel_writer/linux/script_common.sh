@@ -123,6 +123,15 @@ default_thinking_level_for_provider() {
   esac
 }
 
+default_timeout_for_provider() {
+  local provider
+  provider="$(normalize_provider "$1")"
+  case "$provider" in
+    ollama) printf '%s\n' "900" ;;
+    gemini|grok|deepseek|doubao) printf '%s\n' "120" ;;
+  esac
+}
+
 api_key_for_provider() {
   local provider
   provider="$(normalize_provider "$1")"
@@ -184,6 +193,13 @@ project_root = pathlib.Path(sys.argv[2]).resolve()
 output_root = project_root / "output"
 output_root.mkdir(parents=True, exist_ok=True)
 provider = os.environ["NOVEL_PROVIDER"]
+default_timeouts = {
+    "ollama": 900,
+    "gemini": 120,
+    "grok": 120,
+    "deepseek": 120,
+    "doubao": 120,
+}
 data = {
     "project_name": os.environ["NOVEL_PROJECT_NAME"],
     "project_description": os.environ["NOVEL_PROJECT_DESCRIPTION"],
@@ -196,7 +212,7 @@ data = {
     "api_key": os.environ["NOVEL_API_KEY"],
     "temperature": float(os.environ["NOVEL_TEMPERATURE"]),
     "max_tokens": int(os.environ["NOVEL_MAX_TOKENS"]),
-    "timeout": int(os.environ["NOVEL_TIMEOUT"]),
+    "timeout": int(os.environ.get("NOVEL_TIMEOUT") or default_timeouts.get(provider, 120)),
 }
 thinking_level = os.environ.get("NOVEL_THINKING_LEVEL", "").strip()
 if thinking_level:
@@ -242,6 +258,13 @@ default_api_bases = {
 default_thinking_levels = {
   "gemini": "medium",
 }
+default_timeouts = {
+  "gemini": 120,
+  "grok": 120,
+  "deepseek": 120,
+  "doubao": 120,
+  "ollama": 900,
+}
 
 model_name_override = os.environ.get("NOVEL_MODEL_NAME_OVERRIDE", "").strip()
 api_base_override = os.environ.get("NOVEL_API_BASE_OVERRIDE", "").strip()
@@ -264,7 +287,14 @@ data = {
     "api_key": os.environ["NOVEL_API_KEY"],
     "temperature": float(os.environ.get("NOVEL_TEMPERATURE_OVERRIDE", "") or saved.get("temperature", 0.8)),
     "max_tokens": int(os.environ.get("NOVEL_MAX_TOKENS_OVERRIDE", "") or saved.get("max_tokens", 4000)),
-    "timeout": int(os.environ.get("NOVEL_TIMEOUT_OVERRIDE", "") or saved.get("timeout", 120)),
+    "timeout": int(
+      os.environ.get("NOVEL_TIMEOUT_OVERRIDE", "")
+      or (
+        max(int(saved.get("timeout", 0) or 0), default_timeouts.get("ollama", 900))
+        if resolved_provider == "ollama"
+        else (saved.get("timeout", default_timeouts.get(resolved_provider, 120)))
+      )
+    ),
 }
 
 thinking_level = os.environ.get("NOVEL_THINKING_LEVEL_OVERRIDE", "").strip()
@@ -301,6 +331,13 @@ project_path = pathlib.Path(sys.argv[2])
 project = json.loads((project_path / "project.json").read_text(encoding="utf-8"))
 saved = project.get("llm_config", {})
 resolved_provider = str(saved.get("model_provider", "") or "").strip().lower()
+default_timeouts = {
+  "gemini": 120,
+  "grok": 120,
+  "deepseek": 120,
+  "doubao": 120,
+  "ollama": 900,
+}
 
 data = {
   "model_provider": resolved_provider,
@@ -311,7 +348,14 @@ data = {
   "api_key": os.environ.get("NOVEL_API_KEY", "").strip(),
   "temperature": float(os.environ.get("NOVEL_TEMPERATURE_OVERRIDE", "") or saved.get("temperature", 0.8)),
   "max_tokens": int(os.environ.get("NOVEL_MAX_TOKENS_OVERRIDE", "") or saved.get("max_tokens", 4000)),
-  "timeout": int(os.environ.get("NOVEL_TIMEOUT_OVERRIDE", "") or saved.get("timeout", 120)),
+  "timeout": int(
+    os.environ.get("NOVEL_TIMEOUT_OVERRIDE", "")
+    or (
+      max(int(saved.get("timeout", 0) or 0), default_timeouts.get("ollama", 900))
+      if resolved_provider == "ollama"
+      else (saved.get("timeout", default_timeouts.get(resolved_provider, 120)))
+    )
+  ),
 }
 
 thinking_level = str(saved.get("thinking_level", "") or "").strip()

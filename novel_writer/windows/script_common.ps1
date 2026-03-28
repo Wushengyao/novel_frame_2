@@ -112,7 +112,13 @@ function Get-ApiKeys {
 	param([string]$KeysFile)
 
 	if (-not (Test-Path -LiteralPath $KeysFile)) {
-		throw "Missing API key file: $KeysFile"
+		return @{
+			GEMINI_API_KEY = ""
+			GROK_API_KEY = ""
+			DEEPSEEK_API_KEY = ""
+			DOUBAO_API_KEY = ""
+			OLLAMA_API_KEY = ""
+		}
 	}
 
 	$content = Get-Content -LiteralPath $KeysFile -Raw -Encoding UTF8
@@ -121,6 +127,7 @@ function Get-ApiKeys {
 		GROK_API_KEY = ""
 		DEEPSEEK_API_KEY = ""
 		DOUBAO_API_KEY = ""
+		OLLAMA_API_KEY = ""
 	}
 
 	foreach ($name in @($keys.Keys)) {
@@ -149,7 +156,8 @@ function Normalize-Provider {
 		"grok" { return "grok" }
 		"deepseek" { return "deepseek" }
 		"doubao" { return "doubao" }
-		default { throw "Unsupported provider: $Name (allowed: gemini / grok / deepseek / doubao)" }
+		"ollama" { return "ollama" }
+		default { throw "Unsupported provider: $Name (allowed: gemini / grok / deepseek / doubao / ollama)" }
 	}
 }
 
@@ -161,6 +169,7 @@ function Get-DefaultModelForProvider {
 		"grok" { return "grok-4.20-beta-latest-reasoning" }
 		"deepseek" { return "deepseek-reasoner" }
 		"doubao" { return "doubao-seed-2-0-pro-260215" }
+		"ollama" { return "llama3.2" }
 	}
 }
 
@@ -169,6 +178,7 @@ function Get-DefaultApiBaseForProvider {
 
 	switch (Normalize-Provider $Provider) {
 		"doubao" { return "https://ark.cn-beijing.volces.com/api/v3" }
+		"ollama" { return "http://127.0.0.1:11434/v1" }
 		default { return "" }
 	}
 }
@@ -179,6 +189,15 @@ function Get-DefaultThinkingLevelForProvider {
 	switch (Normalize-Provider $Provider) {
 		"gemini" { return "medium" }
 		default { return "" }
+	}
+}
+
+function Get-DefaultTimeoutForProvider {
+	param([string]$Provider)
+
+	switch (Normalize-Provider $Provider) {
+		"ollama" { return 900 }
+		default { return 120 }
 	}
 }
 
@@ -193,6 +212,7 @@ function Get-ApiKeyForProvider {
 		"grok" { return $ApiKeys["GROK_API_KEY"] }
 		"deepseek" { return $ApiKeys["DEEPSEEK_API_KEY"] }
 		"doubao" { return $ApiKeys["DOUBAO_API_KEY"] }
+		"ollama" { return $ApiKeys["OLLAMA_API_KEY"] }
 	}
 }
 
@@ -203,9 +223,32 @@ function Ensure-ApiKeyPresent {
 		[string]$ProjectRoot
 	)
 
+	if ((Normalize-Provider $Provider) -eq "ollama") {
+		return
+	}
+
 	if ([string]::IsNullOrWhiteSpace($ApiKey)) {
 		throw "provider=$Provider missing API key. Please fill $ProjectRoot\api_keys.sh"
 	}
+}
+
+function Resolve-ProviderTimeout {
+	param(
+		[string]$Provider,
+		[Nullable[int]]$Timeout
+	)
+
+	$defaultTimeout = Get-DefaultTimeoutForProvider $Provider
+	if ($null -eq $Timeout) {
+		return $defaultTimeout
+	}
+
+	$resolvedTimeout = [int]$Timeout
+	if ((Normalize-Provider $Provider) -eq "ollama" -and $resolvedTimeout -lt $defaultTimeout) {
+		return $defaultTimeout
+	}
+
+	return $resolvedTimeout
 }
 
 function New-TempConfigPath {
@@ -398,7 +441,15 @@ function Write-ContinueConfig {
 
 	$temperature = if ($TemperatureOverride) { [double]$TemperatureOverride } elseif ($null -ne $saved.temperature) { [double]$saved.temperature } else { 0.8 }
 	$maxTokens = if ($MaxTokensOverride) { [int]$MaxTokensOverride } elseif ($null -ne $saved.max_tokens) { [int]$saved.max_tokens } else { 4000 }
-	$timeout = if ($TimeoutOverride) { [int]$TimeoutOverride } elseif ($null -ne $saved.timeout) { [int]$saved.timeout } else { 120 }
+	$timeout = if ($TimeoutOverride) {
+		Resolve-ProviderTimeout -Provider $resolvedProvider -Timeout ([int]$TimeoutOverride)
+	}
+	elseif ($null -ne $saved.timeout) {
+		Resolve-ProviderTimeout -Provider $resolvedProvider -Timeout ([int]$saved.timeout)
+	}
+	else {
+		Resolve-ProviderTimeout -Provider $resolvedProvider -Timeout $null
+	}
 
 	$thinkingLevel = if ($ThinkingLevelOverride) {
 		$ThinkingLevelOverride
@@ -475,7 +526,15 @@ function Write-IllustrateConfig {
 
 	$temperature = if ($TemperatureOverride) { [double]$TemperatureOverride } elseif ($null -ne $saved.temperature) { [double]$saved.temperature } else { 0.8 }
 	$maxTokens = if ($MaxTokensOverride) { [int]$MaxTokensOverride } elseif ($null -ne $saved.max_tokens) { [int]$saved.max_tokens } else { 4000 }
-	$timeout = if ($TimeoutOverride) { [int]$TimeoutOverride } elseif ($null -ne $saved.timeout) { [int]$saved.timeout } else { 120 }
+	$timeout = if ($TimeoutOverride) {
+		Resolve-ProviderTimeout -Provider $resolvedProvider -Timeout ([int]$TimeoutOverride)
+	}
+	elseif ($null -ne $saved.timeout) {
+		Resolve-ProviderTimeout -Provider $resolvedProvider -Timeout ([int]$saved.timeout)
+	}
+	else {
+		Resolve-ProviderTimeout -Provider $resolvedProvider -Timeout $null
+	}
 
 	$config = [ordered]@{
 		model_provider = $resolvedProvider

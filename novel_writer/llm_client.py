@@ -12,6 +12,10 @@ from urllib import parse
 from urllib import error, request
 
 
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 120
+OLLAMA_MIN_TIMEOUT_SECONDS = 900
+
+
 def _normalize_chat_url(api_base: str) -> str:
     base = api_base.rstrip("/")
     if base.endswith("/chat/completions"):
@@ -19,6 +23,21 @@ def _normalize_chat_url(api_base: str) -> str:
     if base.endswith(("/v1", "/v2", "/v3", "/api/v1", "/api/v2", "/api/v3")):
         return f"{base}/chat/completions"
     return f"{base}/v1/chat/completions"
+
+
+def _resolve_timeout(config: dict[str, Any], provider: str) -> int:
+    default_timeout = OLLAMA_MIN_TIMEOUT_SECONDS if provider == "ollama" else DEFAULT_REQUEST_TIMEOUT_SECONDS
+    raw_timeout = config.get("timeout", default_timeout)
+    try:
+        timeout = int(raw_timeout)
+    except (TypeError, ValueError):
+        timeout = default_timeout
+
+    if timeout <= 0:
+        timeout = default_timeout
+    if provider == "ollama":
+        return max(timeout, OLLAMA_MIN_TIMEOUT_SECONDS)
+    return timeout
 
 
 def _request_json(
@@ -164,7 +183,7 @@ def _generate_openai_compatible(prompt: str, config: dict) -> str:
     model = config.get("model") or config.get("model_name")
     temperature = config.get("temperature", 0.8)
     max_tokens = config.get("max_tokens", 4000)
-    timeout = config.get("timeout", 120)
+    timeout = _resolve_timeout(config, "openai_compatible")
 
     if not api_base:
         raise ValueError("Missing 'api_base' in config.")
@@ -188,7 +207,7 @@ def _generate_gemini(prompt: str, config: dict) -> str:
     model = config.get("model") or config.get("model_name")
     temperature = config.get("temperature", 1.0)
     max_tokens = config.get("max_tokens", 4000)
-    timeout = config.get("timeout", 120)
+    timeout = _resolve_timeout(config, "gemini")
     thinking_level = config.get("thinking_level")
     thinking_budget = config.get("thinking_budget")
     api_base = (
@@ -271,7 +290,7 @@ def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[st
         model = config.get("model") or config.get("model_name")
         temperature = config.get("temperature", 0.8)
         max_tokens = config.get("max_tokens", 4000)
-        timeout = config.get("timeout", 120)
+        timeout = _resolve_timeout(config, "openai_compatible")
 
         if not api_base:
             raise ValueError("Missing 'api_base' in config.")
@@ -298,7 +317,7 @@ def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[st
         model = config.get("model") or config.get("model_name")
         temperature = config.get("temperature", 1.0)
         max_tokens = config.get("max_tokens", 4000)
-        timeout = config.get("timeout", 120)
+        timeout = _resolve_timeout(config, "gemini")
         thinking_level = config.get("thinking_level")
         thinking_budget = config.get("thinking_budget")
         api_base = (
@@ -387,6 +406,7 @@ def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[st
         ollama_config["api_base"] = (
             ollama_config.get("api_base", "").strip() or "http://127.0.0.1:11434/v1"
         )
+        ollama_config["timeout"] = _resolve_timeout(ollama_config, "ollama")
         text, metadata = generate_text_with_metadata(
             prompt,
             {**ollama_config, "model_provider": "openai_compatible"},
