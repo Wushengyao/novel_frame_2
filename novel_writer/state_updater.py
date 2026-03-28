@@ -21,6 +21,17 @@ SUMMARY_KEYS = (
 )
 
 
+def _emit_progress(progress_callback, stage: str, message: str) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        {
+            "stage": stage,
+            "message": message,
+        }
+    )
+
+
 def _extract_json_object(text: str) -> dict:
     text = text.strip()
     candidates = [text]
@@ -75,8 +86,9 @@ def _fallback_summary(new_text: str, current_state: dict) -> dict:
     return fallback
 
 
-def update_plot_state(project_path: str, new_text: str, config: dict) -> None:
+def update_plot_state(project_path: str, new_text: str, config: dict, progress_callback=None) -> None:
     log_info(f"剧情状态更新: 开始处理项目 {project_path}")
+    _emit_progress(progress_callback, "summary_prepare", "正在总结新章节并刷新剧情状态")
     base = Path(project_path)
     plot_state_path = base / "plot_state.json"
     characters_path = base / "characters.json"
@@ -96,6 +108,7 @@ def update_plot_state(project_path: str, new_text: str, config: dict) -> None:
     for attempt in range(2):
         try:
             log_info(f"剧情状态更新: 第 {attempt + 1} 次请求模型总结本章。")
+            _emit_progress(progress_callback, "summary_request", f"正在请求剧情状态总结（第 {attempt + 1}/2 次）")
             response_text, metadata = generate_text_with_metadata(prompt, config)
         except Exception as exc:  # pragma: no cover - intentional resilience path
             update_project_stats(project_path, phase="summary", success=False, usage=None)
@@ -131,4 +144,5 @@ def update_plot_state(project_path: str, new_text: str, config: dict) -> None:
     chapter_count = load_json(str(base / "project.json")).get("chapter_count", 0)
     summary_path = summaries_dir / f"summary_{chapter_count:04d}.json"
     save_json(str(summary_path), summary)
+    _emit_progress(progress_callback, "summary_done", "剧情状态已更新并保存")
     log_success(f"剧情状态更新: 已写入 plot_state.json 和 {summary_path.name}")

@@ -45,6 +45,17 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _emit_progress(progress_callback, stage: str, message: str, **extra) -> None:
+    if progress_callback is None:
+        return
+    payload = {
+        "stage": stage,
+        "message": message,
+    }
+    payload.update(extra)
+    progress_callback(payload)
+
+
 def _add_illustration_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workers", type=int, help="Max concurrent illustration jobs")
     parser.add_argument("--comfyui-api-base", help="ComfyUI API base URL")
@@ -155,11 +166,18 @@ def _launch_background_illustration_job(
     }
 
 
-def run_next_chapter(project_path: str, config: dict, user_request: str = "") -> str:
+def run_next_chapter(project_path: str, config: dict, user_request: str = "", progress_callback=None) -> str:
     log_info(f"next_chapter: prepare project={project_path}")
-    outlines = ensure_project_outlines(project_path, config, sync_progress=False)
+    _emit_progress(progress_callback, "chapter_prepare", "正在检查并同步大纲")
+    outlines = ensure_project_outlines(
+        project_path,
+        config,
+        sync_progress=False,
+        progress_callback=progress_callback,
+    )
     project_data = load_project(project_path)
     current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
+    _emit_progress(progress_callback, "chapter_snapshot_prepare", "正在保存续写前快照")
     ensure_state_snapshot(
         project_path,
         chapter_count=current_chapter_count,
@@ -194,6 +212,7 @@ def run_next_chapter(project_path: str, config: dict, user_request: str = "") ->
 
     try:
         log_info("next_chapter: requesting model output")
+        _emit_progress(progress_callback, "chapter_write", "正在生成正文")
         response_text, metadata = generate_text_with_metadata(prompt, config)
     except Exception:
         update_project_stats(project_path, phase="writer", success=False, usage=None)
@@ -207,23 +226,58 @@ def run_next_chapter(project_path: str, config: dict, user_request: str = "") ->
         usage=metadata.get("usage"),
     )
     chapter_text = normalize_chapter_text(response_text)
+    _emit_progress(progress_callback, "chapter_save", "正在保存正文章节")
     chapter_path = save_chapter(project_path, chapter_text)
     log_success(f"next_chapter: saved to {chapter_path}")
 
     log_info("next_chapter: updating plot_state")
-    update_plot_state(project_path, chapter_text, config)
+    _emit_progress(progress_callback, "chapter_summary", "正在更新剧情状态")
+    update_plot_state(project_path, chapter_text, config, progress_callback=progress_callback)
     log_info("next_chapter: syncing outline progress")
+    _emit_progress(progress_callback, "chapter_outline_sync", "正在同步大纲进度")
     sync_outline_progress(project_path)
 
+    _emit_progress(progress_callback, "chapter_snapshot", "正在保存续写后快照")
     snapshot_path = create_state_snapshot(project_path, note="post-write checkpoint")
     log_success(f"next_chapter: snapshot saved to {snapshot_path}")
+    _emit_progress(progress_callback, "chapter_done", f"章节已完成：{Path(chapter_path).name}")
     return chapter_path
 
 
-def run_next_chapters(project_path: str, config: dict, count: int, user_request: str = "") -> list[str]:
+def run_next_chapters(
+    project_path: str,
+    config: dict,
+    count: int,
+    user_request: str = "",
+    progress_callback=None,
+) -> list[str]:
     if count < 1:
         raise ValueError("count must be at least 1.")
-    return [run_next_chapter(project_path, config, user_request=user_request) for _ in range(count)]
+    chapter_paths = []
+    for index in range(count):
+        _emit_progress(
+            progress_callback,
+            "chapter_batch",
+            f"正在续写第 {index + 1}/{count} 章",
+            current=index,
+            total=count,
+        )
+        chapter_paths.append(
+            run_next_chapter(
+                project_path,
+                config,
+                user_request=user_request,
+                progress_callback=progress_callback,
+            )
+        )
+        _emit_progress(
+            progress_callback,
+            "chapter_batch_done",
+            f"第 {index + 1}/{count} 章已完成",
+            current=index + 1,
+            total=count,
+        )
+    return chapter_paths
 
 
 def _print_status(project_path: str) -> None:

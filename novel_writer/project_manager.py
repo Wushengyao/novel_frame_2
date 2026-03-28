@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import tempfile
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -82,6 +84,17 @@ ROLLBACK_SUMMARY_KEYS = (
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _emit_progress(progress_callback, stage: str, message: str) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        {
+            "stage": stage,
+            "message": message,
+        }
+    )
 
 
 def normalize_chapter_text(text: str) -> str:
@@ -423,8 +436,20 @@ def _generate_initial_story_data(config: dict) -> tuple[dict, dict]:
 def save_json(path: str, data: dict) -> None:
     file_path = Path(path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    with file_path.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=f".{file_path.stem}_",
+        suffix=file_path.suffix or ".json",
+        dir=str(file_path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_path, file_path)
+    except Exception:
+        Path(temp_path).unlink(missing_ok=True)
+        raise
 
 
 def load_json(path: str) -> dict:
@@ -433,19 +458,22 @@ def load_json(path: str) -> dict:
         return json.load(fh)
 
 
-def init_project(config_path: str) -> str:
+def init_project(config_path: str, progress_callback=None) -> str:
     log_info(f"初始化项目: 开始读取配置 {config_path}")
+    _emit_progress(progress_callback, "init_config", "正在读取项目配置")
     config_file = Path(config_path).resolve()
     config = load_json(str(config_file))
     project_id = config.get("project_id") or _build_project_id()
     project_path = _resolve_project_path(config_file, config, project_id)
     log_info(f"初始化项目: 准备创建项目目录 {project_path}")
+    _emit_progress(progress_callback, "init_dirs", "正在创建项目目录结构")
     project_path.mkdir(parents=True, exist_ok=True)
     (project_path / "chapters").mkdir(exist_ok=True)
     (project_path / "summaries").mkdir(exist_ok=True)
     (project_path / "illustrations").mkdir(exist_ok=True)
     log_success("初始化项目: 基础目录已创建。")
 
+    _emit_progress(progress_callback, "init_story", "正在生成初始设定、角色与剧情状态")
     generated_data, init_meta = _generate_initial_story_data(config)
     world = generated_data["world"]
     characters = generated_data["characters"]
@@ -467,6 +495,7 @@ def init_project(config_path: str) -> str:
         "llm_config": _build_persisted_llm_config(config),
     }
 
+    _emit_progress(progress_callback, "init_files", "正在写入项目基础文件")
     save_json(str(project_path / "project.json"), project_data)
     save_json(str(project_path / "world.json"), world)
     save_json(str(project_path / "characters.json"), characters)
@@ -478,14 +507,29 @@ def init_project(config_path: str) -> str:
     llm_config = _build_llm_config(config)
     outline_request = str(config.get("outline_request", "") or "").strip()
     log_info("初始化项目: 开始生成分卷大纲。")
-    regenerate_volume_outline(str(project_path), llm_config, user_request=outline_request)
+    _emit_progress(progress_callback, "init_volume_outline", "正在生成分卷大纲")
+    regenerate_volume_outline(
+        str(project_path),
+        llm_config,
+        user_request=outline_request,
+        progress_callback=progress_callback,
+    )
     log_success("初始化项目: 分卷大纲生成完成。")
     log_info("初始化项目: 开始生成分章大纲。")
-    regenerate_chapter_outline(str(project_path), llm_config, volume_number=None, user_request=outline_request)
+    _emit_progress(progress_callback, "init_chapter_outline", "正在生成分章大纲")
+    regenerate_chapter_outline(
+        str(project_path),
+        llm_config,
+        volume_number=None,
+        user_request=outline_request,
+        progress_callback=progress_callback,
+    )
     log_success("初始化项目: 分章大纲生成完成。")
+    _emit_progress(progress_callback, "init_snapshot", "正在保存初始状态快照")
     snapshot_path = create_state_snapshot(str(project_path), chapter_count=0, note="post-init checkpoint")
     log_success(f"初始化项目: 已写入初始状态快照 {snapshot_path}")
     log_success(f"初始化项目: 项目已完成初始化 {project_path}")
+    _emit_progress(progress_callback, "init_done", "项目初始化完成")
     return str(project_path)
 
 

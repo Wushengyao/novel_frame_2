@@ -50,6 +50,17 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _emit_progress(progress_callback, stage: str, message: str, **extra) -> None:
+    if progress_callback is None:
+        return
+    payload = {
+        "stage": stage,
+        "message": message,
+    }
+    payload.update(extra)
+    progress_callback(payload)
+
+
 def _safe_int(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -737,6 +748,7 @@ def _generate_prompt_payload(
     llm_config: dict | None,
     runtime_config: dict,
     user_request: str = "",
+    progress_callback=None,
 ) -> dict:
     project_data = load_project(project_path)
     provider = str((llm_config or {}).get("model_provider", "") or "").strip().lower()
@@ -747,6 +759,7 @@ def _generate_prompt_payload(
     if llm_config and llm_config.get("model_provider") and (has_remote_credentials or has_local_ollama):
         prompt = build_illustration_prompt(project_data, chapter_text, user_request=user_request)
         try:
+            _emit_progress(progress_callback, "illustration_prompt", "正在生成插图提示词")
             response_text, metadata = generate_text_with_metadata(prompt, llm_config)
             _update_project_stats_threadsafe(
                 project_path,
@@ -776,6 +789,7 @@ def _generate_prompt_payload(
         except Exception:
             _update_project_stats_threadsafe(project_path, phase="illustration_prompt", success=False, usage=None)
 
+    _emit_progress(progress_callback, "illustration_prompt_fallback", "插图提示词回退到本地规则生成")
     return _default_prompt_payload(project_data, chapter_text, runtime_config, user_request)
 
 
@@ -1004,6 +1018,7 @@ def _render_illustration_images(
     record_dir: Path,
     prompt_payload: dict,
     runtime_config: dict,
+    progress_callback=None,
 ) -> tuple[str, int, list[dict]]:
     seed = int(runtime_config.get("seed") or 0) or random.randint(1, 2**31 - 1)
     project_id = load_json(str(Path(project_path) / "project.json")).get("project_id", Path(project_path).name)
@@ -1039,7 +1054,9 @@ def _render_illustration_images(
             filename_prefix=filename_prefix,
         )
 
+    _emit_progress(progress_callback, "illustration_queue", "正在提交到 ComfyUI")
     prompt_id = _queue_prompt(runtime_config["comfyui_api_base"], workflow)
+    _emit_progress(progress_callback, "illustration_wait", "ComfyUI 正在生成图片")
     history_item = _wait_for_prompt(
         runtime_config["comfyui_api_base"],
         prompt_id,
@@ -1050,6 +1067,7 @@ def _render_illustration_images(
     if not output_images:
         raise RuntimeError("ComfyUI 已完成执行，但没有返回图片输出。")
 
+    _emit_progress(progress_callback, "illustration_download", "正在下载并保存插图结果")
     record_dir.mkdir(parents=True, exist_ok=True)
     for old_file in record_dir.glob("image_*"):
         old_file.unlink(missing_ok=True)
@@ -1078,6 +1096,7 @@ def _render_illustration_images(
             }
         )
 
+    _emit_progress(progress_callback, "illustration_saved", "插图文件已保存")
     return prompt_id, seed, saved_images
 
 
@@ -1217,15 +1236,18 @@ def illustrate_chapter(
     force: bool = False,
     runtime_config: dict | None = None,
     persist_runtime_config: bool = True,
+    progress_callback=None,
 ) -> dict:
     chapter_file = _resolve_chapter_file(project_path, chapter_ref)
     chapter_slug = chapter_file.stem
     record_dir = _chapter_record_dir(project_path, chapter_slug)
     metadata_path = record_dir / "metadata.json"
+    _emit_progress(progress_callback, "illustration_prepare", f"正在处理 {chapter_slug} 的插图")
 
     if not force:
         existing = _load_existing_record(project_path, metadata_path)
         if existing:
+            _emit_progress(progress_callback, "illustration_reused", f"{chapter_slug} 已复用已有插图")
             return existing
 
     resolved_runtime = dict(runtime_config or _build_runtime_config(project_path))
@@ -1239,6 +1261,7 @@ def illustrate_chapter(
         llm_config,
         resolved_runtime,
         user_request=user_request,
+        progress_callback=progress_callback,
     )
 
     prompt_id, seed, saved_images = _render_illustration_images(
@@ -1247,6 +1270,7 @@ def illustrate_chapter(
         record_dir=record_dir,
         prompt_payload=prompt_payload,
         runtime_config=resolved_runtime,
+        progress_callback=progress_callback,
     )
 
     record = {
@@ -1275,6 +1299,7 @@ def illustrate_chapter(
         "reused": False,
     }
     save_json(str(metadata_path), record)
+    _emit_progress(progress_callback, "illustration_done", f"{chapter_slug} 的插图已完成")
     return record
 
 
@@ -1287,24 +1312,44 @@ def illustrate_chapters(
     force: bool = False,
     overrides: dict | None = None,
     max_workers: int | None = None,
+    progress_callback=None,
 ) -> list[dict]:
     runtime_config = _build_runtime_config(project_path, overrides=overrides)
     refs = chapter_refs or ["latest"]
     _persist_runtime_config(project_path, runtime_config)
+    if progress_callback is not None:
+        max_workers = 1
     worker_count = _coerce_worker_count(max_workers, len(refs))
     if worker_count == 1:
-        return [
-            illustrate_chapter(
-                project_path,
-                chapter_ref,
-                llm_config=llm_config,
-                user_request=user_request,
-                force=force,
-                runtime_config=runtime_config,
-                persist_runtime_config=False,
+        results = []
+        for index, chapter_ref in enumerate(refs):
+            _emit_progress(
+                progress_callback,
+                "illustration_batch",
+                f"正在生成第 {index + 1}/{len(refs)} 个章节插图",
+                current=index,
+                total=len(refs),
             )
-            for chapter_ref in refs
-        ]
+            results.append(
+                illustrate_chapter(
+                    project_path,
+                    chapter_ref,
+                    llm_config=llm_config,
+                    user_request=user_request,
+                    force=force,
+                    runtime_config=runtime_config,
+                    persist_runtime_config=False,
+                    progress_callback=progress_callback,
+                )
+            )
+            _emit_progress(
+                progress_callback,
+                "illustration_batch_done",
+                f"第 {index + 1}/{len(refs)} 个章节插图已完成",
+                current=index + 1,
+                total=len(refs),
+            )
+        return results
 
     results: list[dict | None] = [None] * len(refs)
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="illustrate") as executor:
@@ -1318,6 +1363,7 @@ def illustrate_chapters(
                 force=force,
                 runtime_config=runtime_config,
                 persist_runtime_config=False,
+                progress_callback=progress_callback,
             ): index
             for index, chapter_ref in enumerate(refs)
         }

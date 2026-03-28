@@ -50,6 +50,17 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _emit_progress(progress_callback, stage: str, message: str) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        {
+            "stage": stage,
+            "message": message,
+        }
+    )
+
+
 def _extract_json_object(text: str) -> dict:
     text = text.strip()
     candidates = [text]
@@ -314,8 +325,14 @@ def _generate_outline_json(
     )
 
 
-def regenerate_volume_outline(project_path: str, config: dict, user_request: str = "") -> dict:
+def regenerate_volume_outline(
+    project_path: str,
+    config: dict,
+    user_request: str = "",
+    progress_callback=None,
+) -> dict:
     log_info(f"分卷大纲: 开始生成，项目={project_path}")
+    _emit_progress(progress_callback, "volume_outline", "正在生成分卷大纲")
     project_data = load_project(project_path)
     prompt = build_volume_outline_prompt(
         {
@@ -335,6 +352,7 @@ def regenerate_volume_outline(project_path: str, config: dict, user_request: str
     outlines["meta"]["chapter_outline_stale"] = True
     outlines["meta"]["last_volume_outline_request"] = user_request.strip()
     save_outlines(project_path, outlines)
+    _emit_progress(progress_callback, "volume_outline_done", "分卷大纲已写入")
     log_success("分卷大纲: 已写入 outlines.json，并标记分章大纲需要同步。")
     return outlines
 
@@ -396,6 +414,7 @@ def regenerate_chapter_outline(
     config: dict,
     volume_number: int | None = None,
     user_request: str = "",
+    progress_callback=None,
 ) -> dict:
     if volume_number is None:
         log_info(f"分章大纲: 开始为全部卷生成，项目={project_path}")
@@ -405,7 +424,13 @@ def regenerate_chapter_outline(
     existing_outlines = load_outlines(project_path)
     if not existing_outlines.get("volumes"):
         log_warning("分章大纲: 当前没有分卷大纲，先自动生成分卷大纲。")
-        existing_outlines = regenerate_volume_outline(project_path, config, user_request="")
+        _emit_progress(progress_callback, "chapter_outline_prepare", "缺少分卷大纲，正在补生成")
+        existing_outlines = regenerate_volume_outline(
+            project_path,
+            config,
+            user_request="",
+            progress_callback=progress_callback,
+        )
 
     project_data = load_project(project_path)
     written_remaining = int(project_data.get("project", {}).get("chapter_count", 0) or 0)
@@ -427,6 +452,11 @@ def regenerate_chapter_outline(
 
         should_regenerate = volume_number is None or _safe_int(volume.get("volume_number"), 0) == volume_number
         if should_regenerate:
+            _emit_progress(
+                progress_callback,
+                "chapter_outline_volume",
+                f"正在生成第 {volume.get('volume_number', '?')} 卷分章大纲",
+            )
             log_info(
                 f"分章大纲: 正在生成第 {volume.get('volume_number', '?')} 卷，"
                 f"计划 {planned_count} 章，已完成 {completed_count} 章。"
@@ -461,6 +491,11 @@ def regenerate_chapter_outline(
         volume_copy["chapters"] = volume_chapters[:planned_count]
         new_volumes.append(volume_copy)
         _save_partial_chapter_outlines(project_path, existing_outlines, new_volumes, user_request)
+        _emit_progress(
+            progress_callback,
+            "chapter_outline_saved",
+            f"第 {volume.get('volume_number', '?')} 卷分章大纲已保存",
+        )
         log_info(f"分章大纲: 第 {volume.get('volume_number', '?')} 卷进度已保存到 outlines.json。")
 
     updated_outlines["volumes"] = new_volumes
@@ -473,6 +508,7 @@ def regenerate_chapter_outline(
         log_warning("分章大纲: 已保存，但仍有卷缺少完整章纲。")
     else:
         log_success("分章大纲: 全部章纲已保存并同步到剧情状态。")
+    _emit_progress(progress_callback, "chapter_outline_done", "分章大纲生成完成")
     return updated_outlines
 
 
@@ -518,23 +554,44 @@ def find_next_chapter_context(outlines: dict, written_chapter_count: int) -> dic
     return None
 
 
-def ensure_project_outlines(project_path: str, config: dict, *, sync_progress: bool = True) -> dict:
+def ensure_project_outlines(
+    project_path: str,
+    config: dict,
+    *,
+    sync_progress: bool = True,
+    progress_callback=None,
+) -> dict:
     outlines = load_outlines(project_path)
     if not outlines.get("volumes"):
         log_warning("章纲检查: 未发现 outlines.json，准备自动补全分卷和分章大纲。")
-        regenerate_volume_outline(project_path, config, user_request="")
-        outlines = regenerate_chapter_outline(project_path, config, volume_number=None, user_request="")
+        _emit_progress(progress_callback, "outline_prepare", "未发现大纲，正在自动补生成")
+        regenerate_volume_outline(project_path, config, user_request="", progress_callback=progress_callback)
+        outlines = regenerate_chapter_outline(
+            project_path,
+            config,
+            volume_number=None,
+            user_request="",
+            progress_callback=progress_callback,
+        )
     elif outlines.get("meta", {}).get("chapter_outline_stale"):
         log_error("章纲检查: 分卷大纲已经更新，但分章大纲尚未同步。")
         raise ValueError("分卷大纲已经更新，但分章大纲尚未同步，请先重新生成分章大纲。")
     elif not _all_volumes_have_chapters(outlines):
         log_warning("章纲检查: 检测到章纲不完整，准备自动补全。")
-        outlines = regenerate_chapter_outline(project_path, config, volume_number=None, user_request="")
+        _emit_progress(progress_callback, "outline_repair", "检测到分章大纲不完整，正在补全")
+        outlines = regenerate_chapter_outline(
+            project_path,
+            config,
+            volume_number=None,
+            user_request="",
+            progress_callback=progress_callback,
+        )
     else:
         outlines = normalize_outlines(outlines)
         if sync_progress:
             outlines = sync_outline_progress(project_path, outlines)
         log_success("章纲检查: 分卷和分章大纲均可用。")
+    _emit_progress(progress_callback, "outline_ready", "大纲检查完成")
     return outlines
 
 
