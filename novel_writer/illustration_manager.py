@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 import json
 import os
@@ -10,6 +11,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib import error, parse, request
 
@@ -41,6 +43,8 @@ PREFERRED_CHECKPOINTS = (
     "illusious/prefectIllustriousXL_v70.safetensors",
 )
 
+PROJECT_STATS_LOCK = Lock()
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -58,6 +62,20 @@ def _safe_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _update_project_stats_threadsafe(project_path: str, phase: str, success: bool, usage: dict | None = None) -> None:
+    with PROJECT_STATS_LOCK:
+        update_project_stats(project_path, phase=phase, success=success, usage=usage)
+
+
+def _coerce_worker_count(requested_workers: Any, task_count: int) -> int:
+    if task_count <= 1:
+        return 1
+    workers = _safe_int(requested_workers, 0)
+    if workers <= 0:
+        workers = min(4, task_count)
+    return max(1, min(task_count, workers))
 
 
 def _normalize_checkpoint_name(name: str) -> str:
@@ -730,7 +748,7 @@ def _generate_prompt_payload(
         prompt = build_illustration_prompt(project_data, chapter_text, user_request=user_request)
         try:
             response_text, metadata = generate_text_with_metadata(prompt, llm_config)
-            update_project_stats(
+            _update_project_stats_threadsafe(
                 project_path,
                 phase="illustration_prompt",
                 success=True,
@@ -756,7 +774,7 @@ def _generate_prompt_payload(
                     "prompt_source": "llm",
                 }
         except Exception:
-            update_project_stats(project_path, phase="illustration_prompt", success=False, usage=None)
+            _update_project_stats_threadsafe(project_path, phase="illustration_prompt", success=False, usage=None)
 
     return _default_prompt_payload(project_data, chapter_text, runtime_config, user_request)
 
@@ -1198,6 +1216,7 @@ def illustrate_chapter(
     user_request: str = "",
     force: bool = False,
     runtime_config: dict | None = None,
+    persist_runtime_config: bool = True,
 ) -> dict:
     chapter_file = _resolve_chapter_file(project_path, chapter_ref)
     chapter_slug = chapter_file.stem
@@ -1210,7 +1229,8 @@ def illustrate_chapter(
             return existing
 
     resolved_runtime = dict(runtime_config or _build_runtime_config(project_path))
-    _persist_runtime_config(project_path, resolved_runtime)
+    if persist_runtime_config:
+        _persist_runtime_config(project_path, resolved_runtime)
 
     chapter_text = chapter_file.read_text(encoding="utf-8")
     prompt_payload = _generate_prompt_payload(
@@ -1266,12 +1286,14 @@ def illustrate_chapters(
     user_request: str = "",
     force: bool = False,
     overrides: dict | None = None,
+    max_workers: int | None = None,
 ) -> list[dict]:
     runtime_config = _build_runtime_config(project_path, overrides=overrides)
     refs = chapter_refs or ["latest"]
-    results = []
-    for chapter_ref in refs:
-        results.append(
+    _persist_runtime_config(project_path, runtime_config)
+    worker_count = _coerce_worker_count(max_workers, len(refs))
+    if worker_count == 1:
+        return [
             illustrate_chapter(
                 project_path,
                 chapter_ref,
@@ -1279,9 +1301,31 @@ def illustrate_chapters(
                 user_request=user_request,
                 force=force,
                 runtime_config=runtime_config,
+                persist_runtime_config=False,
             )
-        )
-    return results
+            for chapter_ref in refs
+        ]
+
+    results: list[dict | None] = [None] * len(refs)
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="illustrate") as executor:
+        futures = {
+            executor.submit(
+                illustrate_chapter,
+                project_path,
+                chapter_ref,
+                llm_config=llm_config,
+                user_request=user_request,
+                force=force,
+                runtime_config=runtime_config,
+                persist_runtime_config=False,
+            ): index
+            for index, chapter_ref in enumerate(refs)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            results[index] = future.result()
+
+    return [result for result in results if result is not None]
 
 
 def illustrate_cover(

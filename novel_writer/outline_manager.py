@@ -518,7 +518,7 @@ def find_next_chapter_context(outlines: dict, written_chapter_count: int) -> dic
     return None
 
 
-def ensure_project_outlines(project_path: str, config: dict) -> dict:
+def ensure_project_outlines(project_path: str, config: dict, *, sync_progress: bool = True) -> dict:
     outlines = load_outlines(project_path)
     if not outlines.get("volumes"):
         log_warning("章纲检查: 未发现 outlines.json，准备自动补全分卷和分章大纲。")
@@ -531,7 +531,9 @@ def ensure_project_outlines(project_path: str, config: dict) -> dict:
         log_warning("章纲检查: 检测到章纲不完整，准备自动补全。")
         outlines = regenerate_chapter_outline(project_path, config, volume_number=None, user_request="")
     else:
-        outlines = sync_outline_progress(project_path, outlines)
+        outlines = normalize_outlines(outlines)
+        if sync_progress:
+            outlines = sync_outline_progress(project_path, outlines)
         log_success("章纲检查: 分卷和分章大纲均可用。")
     return outlines
 

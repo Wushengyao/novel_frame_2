@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -38,29 +41,22 @@ from project_manager import (
 from state_updater import update_plot_state
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
 def _add_illustration_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--comfyui-api-base",
-        help="ComfyUI API base URL, default http://127.0.0.1:8188",
-    )
-    parser.add_argument(
-        "--comfyui-root",
-        help="Optional ComfyUI root directory used for auto-detecting checkpoints",
-    )
-    parser.add_argument(
-        "--checkpoint",
-        help="Checkpoint name for CheckpointLoaderSimple, e.g. illusious/illustrij_v21.safetensors",
-    )
-    parser.add_argument(
-        "--workflow-template",
-        help="Optional ComfyUI workflow template JSON path",
-    )
+    parser.add_argument("--workers", type=int, help="Max concurrent illustration jobs")
+    parser.add_argument("--comfyui-api-base", help="ComfyUI API base URL")
+    parser.add_argument("--comfyui-root", help="Optional ComfyUI root directory")
+    parser.add_argument("--checkpoint", help="Checkpoint name for CheckpointLoaderSimple")
+    parser.add_argument("--workflow-template", help="Optional ComfyUI workflow template JSON path")
     parser.add_argument("--width", type=int, help="Illustration width")
     parser.add_argument("--height", type=int, help="Illustration height")
     parser.add_argument("--steps", type=int, help="Sampling steps")
     parser.add_argument("--cfg", type=float, help="CFG scale")
-    parser.add_argument("--sampler-name", help="Sampler name, e.g. euler")
-    parser.add_argument("--scheduler", help="Scheduler name, e.g. normal")
+    parser.add_argument("--sampler-name", help="Sampler name")
+    parser.add_argument("--scheduler", help="Scheduler name")
     parser.add_argument("--seed", type=int, help="Optional fixed illustration seed")
 
 
@@ -81,9 +77,87 @@ def _extract_illustration_overrides(args: argparse.Namespace) -> dict:
     return {key: value for key, value in mapping.items() if value not in (None, "")}
 
 
-def run_next_chapter(project_path: str, config: dict, user_request: str = ""):
-    log_info(f"正文生成: 开始准备下一章，项目={project_path}")
-    outlines = ensure_project_outlines(project_path, config)
+def _extract_illustration_workers(args: argparse.Namespace) -> int | None:
+    workers = getattr(args, "workers", None)
+    if workers is None:
+        return None
+    return max(1, int(workers))
+
+
+def _launch_background_illustration_job(
+    project_path: str,
+    *,
+    chapter_refs: list[str],
+    config_path: str | None = None,
+    user_request: str = "",
+    force: bool = False,
+    overrides: dict | None = None,
+    max_workers: int | None = None,
+) -> dict:
+    jobs_dir = Path(project_path) / "illustrations" / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = jobs_dir / f"illustrate_{_utc_now()}.log"
+
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "illustrate",
+        "--project",
+        str(project_path),
+    ]
+    for chapter_ref in chapter_refs:
+        command.extend(["--chapter-ref", str(chapter_ref)])
+    if config_path:
+        command.extend(["--config", str(config_path)])
+    if user_request:
+        command.extend(["--user-request", user_request])
+    if force:
+        command.append("--force")
+    if max_workers:
+        command.extend(["--workers", str(max_workers)])
+
+    flag_map = {
+        "comfyui_api_base": "--comfyui-api-base",
+        "comfyui_root": "--comfyui-root",
+        "checkpoint": "--checkpoint",
+        "workflow_template": "--workflow-template",
+        "width": "--width",
+        "height": "--height",
+        "steps": "--steps",
+        "cfg": "--cfg",
+        "sampler_name": "--sampler-name",
+        "scheduler": "--scheduler",
+        "seed": "--seed",
+    }
+    for key, value in (overrides or {}).items():
+        flag = flag_map.get(key)
+        if flag:
+            command.extend([flag, str(value)])
+
+    with log_path.open("w", encoding="utf-8") as log_file:
+        popen_kwargs = {
+            "stdout": log_file,
+            "stderr": subprocess.STDOUT,
+            "cwd": str(Path(project_path).resolve()),
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            creationflags = 0
+            creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+            process = subprocess.Popen(command, creationflags=creationflags, **popen_kwargs)
+        else:
+            process = subprocess.Popen(command, start_new_session=True, **popen_kwargs)
+
+    return {
+        "pid": process.pid,
+        "log_path": str(log_path),
+    }
+
+
+def run_next_chapter(project_path: str, config: dict, user_request: str = "") -> str:
+    log_info(f"next_chapter: prepare project={project_path}")
+    outlines = ensure_project_outlines(project_path, config, sync_progress=False)
     project_data = load_project(project_path)
     current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
     ensure_state_snapshot(
@@ -91,18 +165,25 @@ def run_next_chapter(project_path: str, config: dict, user_request: str = ""):
         chapter_count=current_chapter_count,
         note="pre-write checkpoint",
     )
-    next_context = find_next_chapter_context(outlines, int(project_data["project"].get("chapter_count", 0) or 0))
-    if next_context is None:
-        log_error("正文生成: 未找到可用的下一章章纲。")
-        raise ValueError("当前没有可用的下一章分章大纲，请先重新生成分章大纲。")
-    log_info(
-        "正文生成: 本次将写作 "
-        f"第{next_context['volume'].get('volume_number', '?')}卷 / "
-        f"第{next_context['chapter'].get('chapter_number', '?')}章《{next_context['chapter'].get('title', '')}》"
-    )
-    last_chapter = get_last_chapter_text(project_path)
-    recent_text = last_chapter[-3000:] if last_chapter else "这是小说的开篇章节，请自然展开故事。"
 
+    next_context = find_next_chapter_context(outlines, current_chapter_count)
+    if next_context is None:
+        log_error("next_chapter: no outline found for the next chapter")
+        raise ValueError("No usable next chapter outline was found. Regenerate chapter outlines first.")
+
+    log_info(
+        "next_chapter: writing "
+        f"volume={next_context['volume'].get('volume_number', '?')} "
+        f"chapter={next_context['chapter'].get('chapter_number', '?')} "
+        f"title={next_context['chapter'].get('title', '')}"
+    )
+
+    last_chapter = get_last_chapter_text(project_path)
+    recent_text = (
+        last_chapter[-3000:]
+        if last_chapter
+        else "This is the opening chapter. Please begin the story naturally."
+    )
     prompt = build_writer_prompt(
         project_data,
         recent_text,
@@ -110,12 +191,13 @@ def run_next_chapter(project_path: str, config: dict, user_request: str = ""):
         current_volume_outline=next_context["volume"],
         chapter_outline=next_context["chapter"],
     )
+
     try:
-        log_info("正文生成: 正在请求模型生成章节正文。")
+        log_info("next_chapter: requesting model output")
         response_text, metadata = generate_text_with_metadata(prompt, config)
     except Exception:
         update_project_stats(project_path, phase="writer", success=False, usage=None)
-        log_error("正文生成: 模型写作失败。")
+        log_error("next_chapter: writer request failed")
         raise
 
     update_project_stats(
@@ -124,28 +206,24 @@ def run_next_chapter(project_path: str, config: dict, user_request: str = ""):
         success=True,
         usage=metadata.get("usage"),
     )
-    log_success("正文生成: 模型返回成功。")
     chapter_text = normalize_chapter_text(response_text)
     chapter_path = save_chapter(project_path, chapter_text)
-    log_success(f"正文生成: 章节已保存到 {chapter_path}")
-    log_info("正文生成: 开始更新剧情状态。")
+    log_success(f"next_chapter: saved to {chapter_path}")
+
+    log_info("next_chapter: updating plot_state")
     update_plot_state(project_path, chapter_text, config)
-    log_info("正文生成: 开始同步章纲进度。")
+    log_info("next_chapter: syncing outline progress")
     sync_outline_progress(project_path)
+
     snapshot_path = create_state_snapshot(project_path, note="post-write checkpoint")
-    log_success(f"正文生成: 已写入状态快照 {snapshot_path}")
-    log_success("正文生成: 本章流程已完成。")
+    log_success(f"next_chapter: snapshot saved to {snapshot_path}")
     return chapter_path
 
 
 def run_next_chapters(project_path: str, config: dict, count: int, user_request: str = "") -> list[str]:
     if count < 1:
         raise ValueError("count must be at least 1.")
-
-    chapter_paths = []
-    for _ in range(count):
-        chapter_paths.append(run_next_chapter(project_path, config, user_request=user_request))
-    return chapter_paths
+    return [run_next_chapter(project_path, config, user_request=user_request) for _ in range(count)]
 
 
 def _print_status(project_path: str) -> None:
@@ -155,59 +233,61 @@ def _print_status(project_path: str) -> None:
     llm_config = project.get("llm_config", {})
     stats = project.get("stats") or {}
     total_stats = stats.get("total") or {}
-    last_goal = plot_state.get("next_chapter_goal", "")
-    print(f"项目ID: {project.get('project_id', 'legacy_project')}")
-    print(f"项目名称: {project.get('name', '')}")
-    print(f"章节数量: {project.get('chapter_count', 0)}")
-    print(f"更新时间: {project.get('updated_at', '')}")
+
+    print(f"Project ID: {project.get('project_id', 'legacy_project')}")
+    print(f"Project Name: {project.get('name', '')}")
+    print(f"Chapter Count: {project.get('chapter_count', 0)}")
+    print(f"Updated At: {project.get('updated_at', '')}")
+
     latest_snapshot = get_latest_state_snapshot_chapter(project_path)
-    if latest_snapshot is None:
-        print("状态快照: 暂无")
-    else:
-        print(f"状态快照: 已保存到第 {latest_snapshot} 章")
-    print(f"模型后端: {llm_config.get('model_provider', '')}")
-    print(f"模型名称: {llm_config.get('model_name') or llm_config.get('model', '')}")
+    print(f"Latest Snapshot: {latest_snapshot if latest_snapshot is not None else 'none'}")
+    print(f"Provider: {llm_config.get('model_provider', '')}")
+    print(f"Model: {llm_config.get('model_name') or llm_config.get('model', '')}")
     print(
-        "请求统计: "
-        f"{total_stats.get('requests', 0)} 次"
-        f"（成功 {total_stats.get('successes', 0)} / 失败 {total_stats.get('failures', 0)}）"
+        "Requests: "
+        f"{total_stats.get('requests', 0)} "
+        f"(success={total_stats.get('successes', 0)}, failure={total_stats.get('failures', 0)})"
     )
     print(
-        "Token统计: "
+        "Tokens: "
         f"prompt={total_stats.get('prompt_tokens', 0)}, "
         f"completion={total_stats.get('completion_tokens', 0)}, "
         f"total={total_stats.get('total_tokens', 0)}"
     )
-    extra_usage = []
+
+    extras = []
     if total_stats.get("cached_tokens", 0):
-        extra_usage.append(f"cached={total_stats.get('cached_tokens', 0)}")
+        extras.append(f"cached={total_stats.get('cached_tokens', 0)}")
     if total_stats.get("reasoning_tokens", 0):
-        extra_usage.append(f"reasoning={total_stats.get('reasoning_tokens', 0)}")
+        extras.append(f"reasoning={total_stats.get('reasoning_tokens', 0)}")
     if total_stats.get("thought_tokens", 0):
-        extra_usage.append(f"thoughts={total_stats.get('thought_tokens', 0)}")
-    if extra_usage:
-        print("附加Token统计: " + ", ".join(extra_usage))
-    print(f"当前地点: {plot_state.get('current_location', '')}")
-    print(f"当前时间: {plot_state.get('current_time', '')}")
-    print(f"下章目标: {last_goal}")
+        extras.append(f"thoughts={total_stats.get('thought_tokens', 0)}")
+    if extras:
+        print("Extra Tokens: " + ", ".join(extras))
+
+    print(f"Current Location: {plot_state.get('current_location', '')}")
+    print(f"Current Time: {plot_state.get('current_time', '')}")
+    print(f"Next Goal: {plot_state.get('next_chapter_goal', '')}")
+
     outline_status = get_outline_status(project_path)
     if outline_status.get("has_outlines"):
-        print(f"分卷数量: {outline_status.get('volume_count', 0)}")
+        print(f"Volumes: {outline_status.get('volume_count', 0)}")
         if outline_status.get("chapter_outline_stale"):
-            print("分章大纲状态: 已过期，请先重新生成")
+            print("Chapter outlines are stale.")
         next_context = outline_status.get("next_context")
         if next_context:
             volume = next_context.get("volume") or {}
             chapter = next_context.get("chapter") or {}
             print(
-                "下一章对应大纲: "
-                f"第{volume.get('volume_number', '?')}卷《{volume.get('title', '')}》"
-                f" / 第{chapter.get('chapter_number', '?')}章《{chapter.get('title', '')}》"
+                "Next Outline: "
+                f"Vol.{volume.get('volume_number', '?')} {volume.get('title', '')} / "
+                f"Ch.{chapter.get('chapter_number', '?')} {chapter.get('title', '')}"
             )
-            print(f"下一章章纲摘要: {chapter.get('summary', '')}")
+            print(f"Next Summary: {chapter.get('summary', '')}")
+
     open_threads = plot_state.get("open_threads", [])
     if open_threads:
-        print("未解线索:")
+        print("Open Threads:")
         for item in open_threads:
             print(f"- {item}")
 
@@ -243,78 +323,45 @@ def main() -> None:
 
     next_parser = subparsers.add_parser("next", help="Generate the next chapter")
     next_parser.add_argument("--project", required=True, help="Path to novel_project")
-    next_parser.add_argument(
-        "--config",
-        help="Optional config.json to override the project's saved LLM settings",
-    )
-    next_parser.add_argument(
-        "--count",
-        type=int,
-        default=1,
-        help="Generate multiple chapters sequentially in one run",
-    )
-    next_parser.add_argument(
-        "--user-request",
-        default="",
-        help="Optional user preference for this batch of chapters, such as desired scenes or plot direction",
-    )
-    next_parser.add_argument(
-        "--illustrate",
-        action="store_true",
-        help="Generate ComfyUI illustrations for the newly written chapters",
-    )
-    next_parser.add_argument(
-        "--illustration-request",
-        default="",
-        help="Optional extra art direction for ComfyUI illustrations",
-    )
+    next_parser.add_argument("--config", help="Optional config.json to override saved LLM settings")
+    next_parser.add_argument("--count", type=int, default=1, help="Generate multiple chapters sequentially")
+    next_parser.add_argument("--user-request", default="", help="Optional user preference for this batch")
+    next_parser.add_argument("--illustrate", action="store_true", help="Generate chapter illustrations")
+    next_parser.add_argument("--illustration-request", default="", help="Optional extra art direction")
     next_parser.add_argument(
         "--force-illustration",
         action="store_true",
-        help="Regenerate illustrations even if the chapter already has images",
+        help="Regenerate illustrations even if metadata already exists",
+    )
+    next_parser.add_argument(
+        "--illustrate-blocking",
+        action="store_true",
+        help="Wait for illustrations instead of launching them in the background",
     )
     _add_illustration_arguments(next_parser)
 
-    illustrate_parser = subparsers.add_parser("illustrate", help="Generate ComfyUI illustrations for chapters")
+    illustrate_parser = subparsers.add_parser("illustrate", help="Generate illustrations for chapters")
     illustrate_parser.add_argument("--project", required=True, help="Path to novel_project")
     illustrate_parser.add_argument(
         "--chapter",
         default="latest",
-        help="Chapter slug/path to illustrate, default latest. Ignored when --all is set",
+        help="Chapter slug/path to illustrate, default latest. Ignored when --all or --chapter-ref is used",
     )
     illustrate_parser.add_argument(
-        "--all",
-        action="store_true",
-        help="Generate illustrations for all chapters in the project",
+        "--chapter-ref",
+        action="append",
+        help="Explicit chapter slug/path. Can be passed multiple times",
     )
-    illustrate_parser.add_argument(
-        "--config",
-        help="Optional config.json used to provide LLM credentials for prompt refinement",
-    )
-    illustrate_parser.add_argument(
-        "--user-request",
-        default="",
-        help="Optional extra art direction for the illustration prompt",
-    )
-    illustrate_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Regenerate illustrations even if metadata already exists",
-    )
+    illustrate_parser.add_argument("--all", action="store_true", help="Generate illustrations for all chapters")
+    illustrate_parser.add_argument("--config", help="Optional config.json for LLM prompt refinement")
+    illustrate_parser.add_argument("--user-request", default="", help="Optional extra art direction")
+    illustrate_parser.add_argument("--force", action="store_true", help="Regenerate existing illustrations")
     _add_illustration_arguments(illustrate_parser)
 
-    assets_parser = subparsers.add_parser("illustrate-assets", help="Generate ComfyUI cover and character portraits")
+    assets_parser = subparsers.add_parser("illustrate-assets", help="Generate cover and character portraits")
     assets_parser.add_argument("--project", required=True, help="Path to novel_project")
-    assets_parser.add_argument(
-        "--user-request",
-        default="",
-        help="Optional extra art direction for the cover and character portraits",
-    )
-    assets_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Regenerate cover and character portraits even if metadata already exists",
-    )
+    assets_parser.add_argument("--user-request", default="", help="Optional extra art direction")
+    assets_parser.add_argument("--force", action="store_true", help="Regenerate existing assets")
     _add_illustration_arguments(assets_parser)
 
     status_parser = subparsers.add_parser("status", help="Show project status")
@@ -322,82 +369,86 @@ def main() -> None:
 
     rollback_parser = subparsers.add_parser("rollback", help="Rollback project state to a previous chapter")
     rollback_parser.add_argument("--project", required=True, help="Path to novel_project")
-    rollback_parser.add_argument(
-        "--to-chapter",
-        required=True,
-        type=int,
-        help="Keep chapters up to this number and rollback state to the end of that chapter",
-    )
+    rollback_parser.add_argument("--to-chapter", required=True, type=int, help="Keep chapters up to this number")
 
-    outline_parser = subparsers.add_parser("outline", help="Generate or regenerate volume/chapter outlines")
+    outline_parser = subparsers.add_parser("outline", help="Generate or regenerate outlines")
     outline_parser.add_argument("--project", required=True, help="Path to novel_project")
-    outline_parser.add_argument(
-        "--config",
-        help="Optional config.json to override the project's saved LLM settings",
-    )
+    outline_parser.add_argument("--config", help="Optional config.json to override saved LLM settings")
     outline_parser.add_argument(
         "--stage",
         choices=("volumes", "chapters", "all"),
         default="all",
         help="Which outline stage to regenerate",
     )
-    outline_parser.add_argument(
-        "--volume",
-        type=int,
-        help="Optional volume number for chapter outline regeneration",
-    )
-    outline_parser.add_argument(
-        "--user-request",
-        default="",
-        help="Optional extra plot requirements for outline regeneration",
-    )
+    outline_parser.add_argument("--volume", type=int, help="Optional volume number for chapter outline generation")
+    outline_parser.add_argument("--user-request", default="", help="Optional extra plot requirements")
 
     args = parser.parse_args()
 
     if args.command == "init":
-        log_info("CLI: 收到 init 命令。")
+        log_info("cli: init")
         project_path = init_project(args.config)
-        print(f"项目已初始化: {project_path}")
-    elif args.command == "next":
-        log_info("CLI: 收到 next 命令。")
+        print(f"Project initialized: {project_path}")
+        return
+
+    if args.command == "next":
+        log_info("cli: next")
         if args.count < 1:
             parser.error("--count must be at least 1")
-        config = (
-            _extract_llm_config(args.config)
-            if args.config
-            else _load_runtime_config(args.project)
-        )
-        log_info(f"CLI: 本次计划连续生成 {args.count} 章。")
+
+        config = _extract_llm_config(args.config) if args.config else _load_runtime_config(args.project)
         chapter_paths = run_next_chapters(
             args.project,
             config,
             args.count,
             user_request=args.user_request,
         )
-        print(f"本次共生成章节数: {len(chapter_paths)}")
+        print(f"Generated chapters: {len(chapter_paths)}")
         for chapter_path in chapter_paths:
-            print(f"新章节已保存: {chapter_path}")
+            print(f"- {chapter_path}")
+
         if args.illustrate:
-            illustration_results = illustrate_chapters(
-                args.project,
-                chapter_refs=chapter_paths,
-                llm_config=config,
-                user_request=args.illustration_request,
-                force=args.force_illustration,
-                overrides=_extract_illustration_overrides(args),
-            )
-            for result in illustration_results:
-                state = "复用现有插图" if result.get("reused") else "已生成插图"
-                print(f"{state}: {result.get('chapter_slug', '')}")
-                for image in result.get("images", []):
-                    print(f"- {image.get('relative_path', '')}")
-    elif args.command == "illustrate":
-        log_info("CLI: 收到 illustrate 命令。")
+            illustration_workers = _extract_illustration_workers(args)
+            illustration_overrides = _extract_illustration_overrides(args)
+            if args.illustrate_blocking:
+                results = illustrate_chapters(
+                    args.project,
+                    chapter_refs=chapter_paths,
+                    llm_config=config,
+                    user_request=args.illustration_request,
+                    force=args.force_illustration,
+                    overrides=illustration_overrides,
+                    max_workers=illustration_workers,
+                )
+                for result in results:
+                    state = "reused" if result.get("reused") else "generated"
+                    print(f"{state}: {result.get('chapter_slug', '')}")
+                    for image in result.get("images", []):
+                        print(f"- {image.get('relative_path', '')}")
+            else:
+                job = _launch_background_illustration_job(
+                    args.project,
+                    chapter_refs=chapter_paths,
+                    config_path=args.config,
+                    user_request=args.illustration_request,
+                    force=args.force_illustration,
+                    overrides=illustration_overrides,
+                    max_workers=illustration_workers,
+                )
+                print(f"Illustration job started in background. pid={job.get('pid', '')}")
+                print(f"Illustration log: {job.get('log_path', '')}")
+        return
+
+    if args.command == "illustrate":
+        log_info("cli: illustrate")
         config = _extract_llm_config(args.config) if args.config else None
-        chapter_refs = [args.chapter]
+        chapter_refs = list(args.chapter_ref or [])
         if args.all:
             chapters_dir = Path(args.project) / "chapters"
             chapter_refs = [str(path) for path in sorted(chapters_dir.glob("chapter_*.md"))]
+        elif not chapter_refs:
+            chapter_refs = [args.chapter]
+
         results = illustrate_chapters(
             args.project,
             chapter_refs=chapter_refs,
@@ -405,15 +456,18 @@ def main() -> None:
             user_request=args.user_request,
             force=args.force,
             overrides=_extract_illustration_overrides(args),
+            max_workers=_extract_illustration_workers(args),
         )
-        print(f"本次处理插图章节数: {len(results)}")
+        print(f"Processed illustration chapters: {len(results)}")
         for result in results:
-            state = "复用现有插图" if result.get("reused") else "已生成插图"
+            state = "reused" if result.get("reused") else "generated"
             print(f"{state}: {result.get('chapter_slug', '')}")
             for image in result.get("images", []):
                 print(f"- {image.get('relative_path', '')}")
-    elif args.command == "illustrate-assets":
-        log_info("CLI: 收到 illustrate-assets 命令。")
+        return
+
+    if args.command == "illustrate-assets":
+        log_info("cli: illustrate-assets")
         result = illustrate_project_assets(
             args.project,
             user_request=args.user_request,
@@ -421,55 +475,55 @@ def main() -> None:
             overrides=_extract_illustration_overrides(args),
         )
         cover = result.get("cover") or {}
-        cover_state = "复用现有封面" if cover.get("reused") else "已生成封面"
-        print(f"{cover_state}: {cover.get('asset_slug', 'cover')}")
+        print(f"Cover: {'reused' if cover.get('reused') else 'generated'}")
         for image in cover.get("images", []):
             print(f"- {image.get('relative_path', '')}")
-
         portraits = result.get("portraits") or []
-        print(f"本次处理人物立绘数: {len(portraits)}")
+        print(f"Character portraits: {len(portraits)}")
         for portrait in portraits:
-            portrait_state = "复用现有人物立绘" if portrait.get("reused") else "已生成人物立绘"
-            print(f"{portrait_state}: {portrait.get('character_name', portrait.get('asset_slug', ''))}")
+            state = "reused" if portrait.get("reused") else "generated"
+            print(f"{state}: {portrait.get('character_name', portrait.get('asset_slug', ''))}")
             for image in portrait.get("images", []):
                 print(f"- {image.get('relative_path', '')}")
-    elif args.command == "status":
-        log_info("CLI: 收到 status 命令。")
+        return
+
+    if args.command == "status":
+        log_info("cli: status")
         _print_status(args.project)
-    elif args.command == "rollback":
-        log_info(f"CLI: 收到 rollback 命令，目标章节={args.to_chapter}。")
+        return
+
+    if args.command == "rollback":
+        log_info(f"cli: rollback target={args.to_chapter}")
         if args.to_chapter < 0:
             parser.error("--to-chapter must be at least 0")
         result = rollback_project(args.project, args.to_chapter)
         print(
-            f"项目已回滚: {result.get('current_chapter_count', 0)} -> "
+            f"Rollback complete: {result.get('current_chapter_count', 0)} -> "
             f"{result.get('target_chapter_count', 0)}"
         )
-        print(f"状态恢复来源: {result.get('restore_source', '')}")
-        print(f"最新快照: {result.get('snapshot_path', '')}")
+        print(f"Restore source: {result.get('restore_source', '')}")
+        print(f"Snapshot: {result.get('snapshot_path', '')}")
         removed = result.get("removed") or {}
         print(
-            "已清理内容: "
+            "Removed: "
             f"chapters={len(removed.get('chapters', []))}, "
             f"summaries={len(removed.get('summaries', []))}, "
             f"illustrations={len(removed.get('illustrations', []))}, "
             f"snapshots={len(removed.get('snapshots', []))}"
         )
         _print_status(args.project)
-    elif args.command == "outline":
-        log_info(f"CLI: 收到 outline 命令，stage={args.stage}。")
-        config = (
-            _extract_llm_config(args.config)
-            if args.config
-            else _load_runtime_config(args.project)
-        )
+        return
+
+    if args.command == "outline":
+        log_info(f"cli: outline stage={args.stage}")
+        config = _extract_llm_config(args.config) if args.config else _load_runtime_config(args.project)
         if args.stage in {"volumes", "all"}:
             outlines = regenerate_volume_outline(
                 args.project,
                 config,
                 user_request=args.user_request,
             )
-            print(f"已生成分卷大纲，卷数: {len(outlines.get('volumes', []))}")
+            print(f"Volume outlines generated: {len(outlines.get('volumes', []))}")
         if args.stage in {"chapters", "all"}:
             outlines = regenerate_chapter_outline(
                 args.project,
@@ -477,8 +531,8 @@ def main() -> None:
                 volume_number=args.volume if args.stage == "chapters" else None,
                 user_request=args.user_request,
             )
-            target = f"第 {args.volume} 卷" if args.volume else "全部卷"
-            print(f"已生成分章大纲，范围: {target}")
+            target = f"volume {args.volume}" if args.volume else "all volumes"
+            print(f"Chapter outlines generated for {target}")
             next_context = find_next_chapter_context(
                 outlines,
                 int(load_project(args.project)["project"].get("chapter_count", 0) or 0),
@@ -487,9 +541,13 @@ def main() -> None:
                 volume = next_context["volume"]
                 chapter = next_context["chapter"]
                 print(
-                    f"下一章已对齐到第{volume.get('volume_number', '?')}卷《{volume.get('title', '')}》"
-                    f" / 第{chapter.get('chapter_number', '?')}章《{chapter.get('title', '')}》"
+                    "Next chapter aligned to "
+                    f"Vol.{volume.get('volume_number', '?')} {volume.get('title', '')} / "
+                    f"Ch.{chapter.get('chapter_number', '?')} {chapter.get('title', '')}"
                 )
+        return
+
+    parser.error(f"Unsupported command: {args.command}")
 
 
 if __name__ == "__main__":
