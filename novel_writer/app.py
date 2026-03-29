@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,7 +15,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from console_logger import log_error, log_info, log_success
+from console_logger import log_error, log_info, log_success, log_warning
 from illustration_manager import illustrate_chapters, illustrate_project_assets
 from llm_client import generate_text_with_metadata
 from outline_manager import (
@@ -24,7 +26,7 @@ from outline_manager import (
     regenerate_volume_outline,
     sync_outline_progress,
 )
-from prompt_builder import build_writer_prompt
+from prompt_builder import build_batch_chapter_plan_prompt, build_writer_prompt
 from project_manager import (
     create_state_snapshot,
     ensure_state_snapshot,
@@ -54,6 +56,215 @@ def _emit_progress(progress_callback, stage: str, message: str, **extra) -> None
     }
     payload.update(extra)
     progress_callback(payload)
+
+
+def _extract_json_object(text: str) -> dict:
+    text = text.strip()
+    candidates = [text]
+
+    if "```json" in text:
+        start = text.find("```json") + len("```json")
+        end = text.find("```", start)
+        if end != -1:
+            candidates.append(text[start:end].strip())
+    elif "```" in text:
+        start = text.find("```") + len("```")
+        end = text.find("```", start)
+        if end != -1:
+            candidates.append(text[start:end].strip())
+
+    brace_start = text.find("{")
+    brace_end = text.rfind("}")
+    if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+        candidates.append(text[brace_start : brace_end + 1])
+
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            continue
+    raise ValueError("Could not parse JSON from batch chapter plan response.")
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _collect_upcoming_chapter_contexts(outlines: dict, written_chapter_count: int, count: int) -> list[dict]:
+    start_number = written_chapter_count + 1
+    end_number = written_chapter_count + count
+    contexts = []
+    for volume in outlines.get("volumes", []):
+        for chapter in volume.get("chapters", []):
+            chapter_number = _safe_int(chapter.get("chapter_number"), 0)
+            if start_number <= chapter_number <= end_number:
+                contexts.append(
+                    {
+                        "volume": deepcopy(volume),
+                        "chapter": deepcopy(chapter),
+                    }
+                )
+    return contexts
+
+
+def _fallback_batch_plan(upcoming_contexts: list[dict], user_request: str) -> dict[int, dict]:
+    request = user_request.strip()
+    total = len(upcoming_contexts)
+    if not request or total == 0:
+        return {}
+
+    plan_by_number = {}
+    for index, context in enumerate(upcoming_contexts):
+        chapter = deepcopy(context["chapter"])
+        if total == 1:
+            guidance = f"把“{request}”作为本章核心推进点，自然融入当前剧情，不要生硬跳转。"
+            role = "direct"
+            focus = request
+        elif index == 0:
+            guidance = f"本章先为“{request}”做铺垫与准备，让角色明确动机、条件、分工或障碍，避免直接把事情一次写完。"
+            role = "setup"
+            focus = f"{request}的铺垫与准备"
+        elif index == total - 1:
+            guidance = f"本章让“{request}”进入阶段性兑现、收束或形成新钩子，和前几章形成递进，不要重复前面的准备过程。"
+            role = "payoff"
+            focus = f"{request}的阶段性兑现"
+        else:
+            guidance = f"本章继续推进“{request}”，重点写实施过程中的新进展、阻碍、调整或人物互动，避免与前后章重复。"
+            role = "progress"
+            focus = f"{request}的推进过程"
+
+        chapter["request_focus"] = focus
+        chapter["request_role"] = role
+        chapter["writer_guidance"] = guidance
+        plan_by_number[_safe_int(chapter.get("chapter_number"), 0)] = {
+            "chapter_outline": chapter,
+            "user_request": guidance,
+        }
+    return plan_by_number
+
+
+def _normalize_batch_plan_response(data: dict, upcoming_contexts: list[dict]) -> dict[int, dict]:
+    raw_chapters = data.get("chapters")
+    if not isinstance(raw_chapters, list):
+        raise ValueError("batch plan response missing chapters list")
+
+    expected_numbers = {
+        _safe_int(context["chapter"].get("chapter_number"), 0): context
+        for context in upcoming_contexts
+    }
+    if len(raw_chapters) != len(expected_numbers):
+        raise ValueError("batch plan chapter count does not match requested count")
+
+    raw_by_number = {}
+    for item in raw_chapters:
+        if not isinstance(item, dict):
+            raise ValueError("batch plan item must be an object")
+        chapter_number = _safe_int(item.get("chapter_number"), 0)
+        if chapter_number not in expected_numbers:
+            raise ValueError(f"unexpected chapter_number in batch plan: {chapter_number}")
+        raw_by_number[chapter_number] = item
+
+    if len(raw_by_number) != len(expected_numbers):
+        raise ValueError("batch plan contains duplicate or missing chapter numbers")
+
+    normalized = {}
+    for chapter_number, context in expected_numbers.items():
+        raw = raw_by_number[chapter_number]
+        merged_outline = deepcopy(context["chapter"])
+        for key in ("title", "summary", "goal", "request_focus", "request_role", "writer_guidance"):
+            value = str(raw.get(key, "") or "").strip()
+            if value:
+                merged_outline[key] = value
+
+        key_events = raw.get("key_events") or []
+        if not isinstance(key_events, list):
+            key_events = [key_events]
+        normalized_events = [str(item).strip() for item in key_events if str(item).strip()]
+        if normalized_events:
+            merged_outline["key_events"] = normalized_events[:5]
+
+        user_request = str(raw.get("writer_guidance") or raw.get("request_focus") or "").strip()
+        normalized[chapter_number] = {
+            "chapter_outline": merged_outline,
+            "user_request": user_request,
+        }
+    return normalized
+
+
+def _plan_batch_chapters(
+    project_path: str,
+    config: dict,
+    count: int,
+    user_request: str,
+    progress_callback=None,
+) -> dict[int, dict]:
+    request = user_request.strip()
+    if count <= 1 or not request:
+        return {}
+
+    log_info(
+        f"next_chapters: planning batch request for next {count} chapters "
+        f"project={project_path}"
+    )
+    _emit_progress(progress_callback, "chapter_batch_plan", "正在规划接下来几章如何分配你想看的情节")
+
+    outlines = ensure_project_outlines(
+        project_path,
+        config,
+        sync_progress=False,
+        progress_callback=progress_callback,
+    )
+    project_data = load_project(project_path)
+    project_data["outlines"] = outlines
+    current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
+    upcoming_contexts = _collect_upcoming_chapter_contexts(outlines, current_chapter_count, count)
+    if len(upcoming_contexts) != count:
+        log_warning(
+            "next_chapters: could not collect enough upcoming chapter outlines, "
+            "falling back to heuristic request distribution"
+        )
+        return _fallback_batch_plan(upcoming_contexts, request)
+
+    compact_contexts = []
+    for context in upcoming_contexts:
+        volume = context["volume"]
+        chapter = context["chapter"]
+        compact_contexts.append(
+            {
+                "volume_number": volume.get("volume_number", 0),
+                "volume_title": volume.get("title", ""),
+                "volume_summary": volume.get("summary", ""),
+                "chapter_number": chapter.get("chapter_number", 0),
+                "chapter_in_volume": chapter.get("chapter_in_volume", 0),
+                "title": chapter.get("title", ""),
+                "summary": chapter.get("summary", ""),
+                "goal": chapter.get("goal", ""),
+                "key_events": chapter.get("key_events", []),
+            }
+        )
+
+    prompt = build_batch_chapter_plan_prompt(project_data, compact_contexts, request)
+
+    try:
+        response_text, metadata = generate_text_with_metadata(prompt, config)
+        update_project_stats(
+            project_path,
+            phase="outline",
+            success=True,
+            usage=metadata.get("usage"),
+        )
+        plan = _normalize_batch_plan_response(_extract_json_object(response_text), upcoming_contexts)
+        log_success(f"next_chapters: batch request planned for {len(plan)} chapters")
+        return plan
+    except Exception as exc:
+        update_project_stats(project_path, phase="outline", success=False, usage=None)
+        log_warning(f"next_chapters: batch planning failed, fallback to heuristic. reason: {exc}")
+        return _fallback_batch_plan(upcoming_contexts, request)
 
 
 def _add_illustration_arguments(parser: argparse.ArgumentParser) -> None:
@@ -166,7 +377,14 @@ def _launch_background_illustration_job(
     }
 
 
-def run_next_chapter(project_path: str, config: dict, user_request: str = "", progress_callback=None) -> str:
+def run_next_chapter(
+    project_path: str,
+    config: dict,
+    user_request: str = "",
+    *,
+    chapter_outline_override: dict | None = None,
+    progress_callback=None,
+) -> str:
     log_info(f"next_chapter: prepare project={project_path}")
     _emit_progress(progress_callback, "chapter_prepare", "正在检查并同步大纲")
     outlines = ensure_project_outlines(
@@ -188,6 +406,11 @@ def run_next_chapter(project_path: str, config: dict, user_request: str = "", pr
     if next_context is None:
         log_error("next_chapter: no outline found for the next chapter")
         raise ValueError("No usable next chapter outline was found. Regenerate chapter outlines first.")
+
+    if chapter_outline_override:
+        merged_chapter = deepcopy(next_context["chapter"])
+        merged_chapter.update(chapter_outline_override)
+        next_context["chapter"] = merged_chapter
 
     log_info(
         "next_chapter: writing "
@@ -253,8 +476,23 @@ def run_next_chapters(
 ) -> list[str]:
     if count < 1:
         raise ValueError("count must be at least 1.")
+    starting_chapter_count = int(load_project(project_path)["project"].get("chapter_count", 0) or 0)
+    batch_plan = _plan_batch_chapters(
+        project_path,
+        config,
+        count,
+        user_request,
+        progress_callback=progress_callback,
+    )
     chapter_paths = []
     for index in range(count):
+        target_chapter_number = starting_chapter_count + index + 1
+        plan_entry = batch_plan.get(target_chapter_number, {})
+        effective_request = (
+            str(plan_entry.get("user_request", "") or "").strip()
+            if plan_entry
+            else user_request
+        )
         _emit_progress(
             progress_callback,
             "chapter_batch",
@@ -266,7 +504,8 @@ def run_next_chapters(
             run_next_chapter(
                 project_path,
                 config,
-                user_request=user_request,
+                user_request=effective_request,
+                chapter_outline_override=plan_entry.get("chapter_outline") if plan_entry else None,
                 progress_callback=progress_callback,
             )
         )

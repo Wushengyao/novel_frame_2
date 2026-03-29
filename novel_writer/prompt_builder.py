@@ -258,6 +258,64 @@ def build_chapter_outline_prompt(
 """
 
 
+def build_batch_chapter_plan_prompt(
+    data: dict,
+    upcoming_chapters: list[dict],
+    user_request: str,
+) -> str:
+    project = _to_block(data.get("project", {}))
+    world = _to_block(data.get("world", {}))
+    characters = _to_block(data.get("characters", {}))
+    plot_state = _to_block(data.get("plot_state", {}))
+    style = _to_block(data.get("style", {}))
+    story_request = data.get("project", {}).get("story_request", "") or data.get("story_request", "")
+    chapters_block = _to_block(upcoming_chapters)
+
+    return f"""你是长篇连载小说的续写规划助手。请根据用户现在想看的情节，为接下来几章做一次“短期续写编排”。
+【项目】{project}
+
+【用户最初的故事需求】{story_request}
+
+【世界观】{world}
+
+【人物】{characters}
+
+【当前剧情状态】{plot_state}
+
+【文风】{style}
+
+【接下来待写的章节框架】{chapters_block}
+
+【用户这次想看的内容】{user_request.strip()}
+
+要求：
+1. 输出必须是合法 JSON
+2. 目标是把“用户这次想看的内容”合理分配到接下来这些章节里，而不是每一章都机械重复同一句要求
+3. 有些章节可以负责铺垫、准备、试探、受阻、推进、阶段性完成或余波，不要求每章都直接完成用户想看的核心场景
+4. 规划必须尊重现有章节顺序、当前剧情状态和原本分章目标，尽量做“细化与重心调整”，不要彻底推翻既有大纲
+5. 如果用户要求天然只适合其中一两章，请让其他章节承担前置准备或后续影响，避免重复
+6. 每章都要给出清晰且彼此不同的 `writer_guidance`
+7. `key_events` 请列出 2 到 5 个关键推进点
+8. 不要输出解释，不要输出 Markdown
+
+输出 JSON：
+{{
+  "chapters": [
+    {{
+      "chapter_number": 1,
+      "title": "",
+      "summary": "",
+      "goal": "",
+      "key_events": [],
+      "request_focus": "",
+      "request_role": "",
+      "writer_guidance": ""
+    }}
+  ]
+}}
+"""
+
+
 def build_writer_prompt(
     data: dict,
     recent_text: str,
