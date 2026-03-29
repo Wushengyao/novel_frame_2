@@ -3,6 +3,7 @@
 	[string]$StoryRequest = "",
 	[string]$ProjectName = "",
 	[string]$ProjectDescription = "",
+	[string]$PlanningMode = "volume",
 	[bool]$AutoCreateCoverAndPortraits = $true
 )
 
@@ -27,6 +28,7 @@ $DefaultTemperature = "1.0"
 $DefaultMaxTokens = "10240"
 $DefaultTimeout = ""
 $DefaultThinkingLevel = "medium"
+$DefaultPlanningMode = "volume"
 
 if (-not $PSBoundParameters.ContainsKey("Provider")) {
 	$Provider = Prompt-OptionalValue -PromptText "Provider (gemini/grok/deepseek/doubao/ollama)" -DefaultValue $Provider
@@ -53,6 +55,11 @@ if (-not $PSBoundParameters.ContainsKey("ProjectDescription")) {
 elseif ([string]::IsNullOrWhiteSpace($ProjectDescription)) {
 	$ProjectDescription = $DefaultProjectDescription
 }
+
+if (-not $PSBoundParameters.ContainsKey("PlanningMode")) {
+	$PlanningMode = Prompt-OptionalValue -PromptText "Planning mode (none/volume/chapter)" -DefaultValue $DefaultPlanningMode
+}
+$PlanningMode = Normalize-PlanningMode $PlanningMode
 
 if ([string]::IsNullOrWhiteSpace($StoryRequest)) {
 	throw "Usage: .\windows\quick_start.ps1 <provider> <story request> [project name] [project description]"
@@ -92,7 +99,8 @@ try {
 		-Temperature $temperature `
 		-MaxTokens $maxTokens `
 		-Timeout $timeout `
-		-ThinkingLevel $thinkingLevel
+		-ThinkingLevel $thinkingLevel `
+		-PlanningMode $PlanningMode
 
 	$initResult = Invoke-NativeCommandCapture -Executable $pythonExe -Arguments @(
 		(Join-Path $ProjectRoot "app.py"),

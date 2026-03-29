@@ -3,6 +3,7 @@
 	[int]$ChapterCount = 3,
 	[string]$UserRequest = "",
 	[string]$ProviderOverride = "",
+	[string]$PlanningModeOverride = "",
 	[bool]$AutoIllustrate = $true
 )
 
@@ -22,6 +23,7 @@ $DefaultTemperatureOverride = ""
 $DefaultMaxTokensOverride = ""
 $DefaultTimeoutOverride = ""
 $DefaultThinkingLevelOverride = ""
+$DefaultPlanningModeOverride = ""
 
 if (-not $PSBoundParameters.ContainsKey("ProjectPath")) {
 	$ProjectPath = Prompt-OptionalValue -PromptText "Project directory"
@@ -53,6 +55,12 @@ if (-not $PSBoundParameters.ContainsKey("UserRequest")) {
 if (-not $PSBoundParameters.ContainsKey("ProviderOverride")) {
 	$ProviderOverride = Prompt-OptionalValue -PromptText "Provider override (optional: gemini/grok/deepseek/doubao/ollama)"
 }
+if (-not $PSBoundParameters.ContainsKey("PlanningModeOverride")) {
+	$PlanningModeOverride = Prompt-OptionalValue -PromptText "Planning mode override (optional: none/volume/chapter)"
+}
+if ($PlanningModeOverride) {
+	$PlanningModeOverride = Normalize-PlanningMode $PlanningModeOverride
+}
 
 $savedProject = Get-Content -LiteralPath $projectFile -Raw -Encoding UTF8 | ConvertFrom-Json
 $saved = $savedProject.llm_config
@@ -73,6 +81,7 @@ $temperatureOverride = if ($env:NOVEL_TEMPERATURE_OVERRIDE) { $env:NOVEL_TEMPERA
 $maxTokensOverride = if ($env:NOVEL_MAX_TOKENS_OVERRIDE) { $env:NOVEL_MAX_TOKENS_OVERRIDE } else { $DefaultMaxTokensOverride }
 $timeoutOverride = if ($env:NOVEL_TIMEOUT_OVERRIDE) { $env:NOVEL_TIMEOUT_OVERRIDE } else { $DefaultTimeoutOverride }
 $thinkingLevelOverride = if ($env:NOVEL_THINKING_LEVEL_OVERRIDE) { $env:NOVEL_THINKING_LEVEL_OVERRIDE } else { $DefaultThinkingLevelOverride }
+$planningModeOverride = if ($env:NOVEL_PLANNING_MODE_OVERRIDE) { Normalize-PlanningMode $env:NOVEL_PLANNING_MODE_OVERRIDE } elseif ($PlanningModeOverride) { $PlanningModeOverride } else { $DefaultPlanningModeOverride }
 
 $chaptersDir = Join-Path $ProjectPath "chapters"
 $beforeChapterPaths = @()
@@ -93,7 +102,8 @@ try {
 		-TemperatureOverride $temperatureOverride `
 		-MaxTokensOverride $maxTokensOverride `
 		-TimeoutOverride $timeoutOverride `
-		-ThinkingLevelOverride $thinkingLevelOverride
+		-ThinkingLevelOverride $thinkingLevelOverride `
+		-PlanningModeOverride $planningModeOverride
 
 	$nextArgs = @(
 		(Join-Path $ProjectRoot "app.py"),

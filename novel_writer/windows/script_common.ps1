@@ -166,7 +166,7 @@ function Get-DefaultModelForProvider {
 
 	switch (Normalize-Provider $Provider) {
 		"gemini" { return "gemini-3.1-flash-lite-preview" }
-		"grok" { return "grok-4.20-beta-latest-reasoning" }
+		"grok" { return "grok-4.20-beta-latest-non-reasoning" }
 		"deepseek" { return "deepseek-reasoner" }
 		"doubao" { return "doubao-seed-2-0-pro-260215" }
 		"ollama" { return "llama3.2" }
@@ -198,6 +198,19 @@ function Get-DefaultTimeoutForProvider {
 	switch (Normalize-Provider $Provider) {
 		"ollama" { return 900 }
 		default { return 120 }
+	}
+}
+
+function Normalize-PlanningMode {
+	param([string]$Mode)
+
+	$normalizedMode = if ($null -eq $Mode) { "" } else { $Mode }
+	switch ($normalizedMode.Trim().ToLowerInvariant()) {
+		"none" { return "none" }
+		"volume" { return "volume" }
+		"chapter" { return "chapter" }
+		"" { return "volume" }
+		default { throw "Unsupported planning mode: $Mode (allowed: none / volume / chapter)" }
 	}
 }
 
@@ -357,7 +370,8 @@ function Write-InitConfig {
 		[double]$Temperature,
 		[int]$MaxTokens,
 		[int]$Timeout,
-		[string]$ThinkingLevel = ""
+		[string]$ThinkingLevel = "",
+		[string]$PlanningMode = "volume"
 	)
 
 	$outputRoot = Join-Path $ProjectRoot "output"
@@ -371,6 +385,7 @@ function Write-InitConfig {
 		project_path = (Join-Path $outputRoot "novel_project_{project_id}")
 		init_with_llm = $true
 		story_request = $StoryRequest
+		planning_mode = (Normalize-PlanningMode $PlanningMode)
 		model_provider = $Provider
 		model_name = $ModelName
 		api_base = $ApiBase
@@ -398,7 +413,8 @@ function Write-ContinueConfig {
 		[string]$TemperatureOverride = "",
 		[string]$MaxTokensOverride = "",
 		[string]$TimeoutOverride = "",
-		[string]$ThinkingLevelOverride = ""
+		[string]$ThinkingLevelOverride = "",
+		[string]$PlanningModeOverride = ""
 	)
 
 	$project = Get-ProjectJson -ProjectPath $ProjectPath
@@ -461,6 +477,16 @@ function Write-ContinueConfig {
 		Get-DefaultThinkingLevelForProvider $resolvedProvider
 	}
 
+	$planningMode = if ($PlanningModeOverride) {
+		Normalize-PlanningMode $PlanningModeOverride
+	}
+	elseif ($project.planning_mode) {
+		Normalize-PlanningMode "$($project.planning_mode)"
+	}
+	else {
+		"volume"
+	}
+
 	$config = [ordered]@{
 		model_provider = $resolvedProvider
 		model_name = $modelName
@@ -469,6 +495,7 @@ function Write-ContinueConfig {
 		temperature = $temperature
 		max_tokens = $maxTokens
 		timeout = $timeout
+		planning_mode = $planningMode
 	}
 
 	if (-not [string]::IsNullOrWhiteSpace($thinkingLevel)) {

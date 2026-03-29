@@ -22,12 +22,18 @@ from outline_manager import (
     ensure_project_outlines,
     find_next_chapter_context,
     get_outline_status,
+    load_outlines,
+    normalize_outlines,
     regenerate_chapter_outline,
     regenerate_volume_outline,
     sync_outline_progress,
 )
 from prompt_builder import build_batch_chapter_plan_prompt, build_writer_prompt
 from project_manager import (
+    DEFAULT_PLANNING_MODE,
+    PLANNING_MODE_CHAPTER,
+    PLANNING_MODE_NONE,
+    PLANNING_MODE_VOLUME,
     create_state_snapshot,
     ensure_state_snapshot,
     get_latest_state_snapshot_chapter,
@@ -36,6 +42,7 @@ from project_manager import (
     load_json,
     load_project,
     normalize_chapter_text,
+    normalize_planning_mode,
     rollback_project,
     save_chapter,
     update_project_stats,
@@ -95,6 +102,28 @@ def _safe_int(value: object, default: int = 0) -> int:
         return default
 
 
+def _resolve_planning_mode(config: dict, project_data: dict | None = None) -> str:
+    project = (project_data or {}).get("project") or {}
+    return normalize_planning_mode(
+        config.get("planning_mode") or project.get("planning_mode"),
+        default=DEFAULT_PLANNING_MODE,
+    )
+
+
+def _ensure_volume_outlines(project_path: str, config: dict, progress_callback=None) -> dict:
+    outlines = load_outlines(project_path)
+    if not outlines.get("volumes"):
+        log_warning("next_chapter: volume outlines missing, regenerating")
+        _emit_progress(progress_callback, "outline_prepare", "正在补生成分卷大纲")
+        return regenerate_volume_outline(
+            project_path,
+            config,
+            user_request="",
+            progress_callback=progress_callback,
+        )
+    return normalize_outlines(outlines)
+
+
 def _collect_upcoming_chapter_contexts(outlines: dict, written_chapter_count: int, count: int) -> list[dict]:
     start_number = written_chapter_count + 1
     end_number = written_chapter_count + count
@@ -112,7 +141,96 @@ def _collect_upcoming_chapter_contexts(outlines: dict, written_chapter_count: in
     return contexts
 
 
-def _fallback_batch_plan(upcoming_contexts: list[dict], user_request: str) -> dict[int, dict]:
+def _collect_upcoming_volume_contexts(outlines: dict, written_chapter_count: int, count: int) -> list[dict]:
+    start_number = written_chapter_count + 1
+    end_number = written_chapter_count + count
+    normalized = normalize_outlines(outlines)
+    contexts = []
+    chapter_number = 0
+    for volume in normalized.get("volumes", []):
+        planned_count = max(1, _safe_int(volume.get("planned_chapter_count"), 1))
+        for chapter_in_volume in range(1, planned_count + 1):
+            chapter_number += 1
+            if not (start_number <= chapter_number <= end_number):
+                continue
+            contexts.append(
+                {
+                    "volume": deepcopy(volume),
+                    "chapter": {
+                        "chapter_number": chapter_number,
+                        "chapter_in_volume": chapter_in_volume,
+                        "title": "",
+                        "summary": str(volume.get("summary", "") or "").strip(),
+                        "goal": str(volume.get("story_goal", "") or "").strip(),
+                        "key_events": [],
+                        "status": "planned",
+                    },
+                }
+            )
+    return contexts
+
+
+def _collect_upcoming_freeform_contexts(project_data: dict, count: int) -> list[dict]:
+    current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
+    next_goal = str(project_data.get("plot_state", {}).get("next_chapter_goal", "") or "").strip()
+    contexts = []
+    for offset in range(1, count + 1):
+        contexts.append(
+            {
+                "volume": {},
+                "chapter": {
+                    "chapter_number": current_chapter_count + offset,
+                    "chapter_in_volume": offset,
+                    "title": "",
+                    "summary": next_goal,
+                    "goal": next_goal,
+                    "key_events": [],
+                    "status": "planned",
+                },
+            }
+        )
+    return contexts
+
+
+def _get_next_context_for_mode(
+    project_path: str,
+    config: dict,
+    planning_mode: str,
+    progress_callback=None,
+) -> tuple[dict, dict]:
+    project_data = load_project(project_path)
+    current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
+
+    if planning_mode == PLANNING_MODE_CHAPTER:
+        outlines = ensure_project_outlines(
+            project_path,
+            config,
+            sync_progress=False,
+            progress_callback=progress_callback,
+        )
+        project_data["outlines"] = outlines
+        next_context = find_next_chapter_context(outlines, current_chapter_count)
+        if next_context is None:
+            raise ValueError("No usable next chapter outline was found. Regenerate chapter outlines first.")
+        return project_data, next_context
+
+    if planning_mode == PLANNING_MODE_VOLUME:
+        outlines = _ensure_volume_outlines(project_path, config, progress_callback=progress_callback)
+        project_data["outlines"] = outlines
+        upcoming_contexts = _collect_upcoming_volume_contexts(outlines, current_chapter_count, 1)
+        if not upcoming_contexts:
+            raise ValueError("No usable next volume outline was found. Regenerate volume outlines first.")
+        return project_data, upcoming_contexts[0]
+
+    return project_data, {"volume": {}, "chapter": {}}
+
+
+def _fallback_batch_plan(
+    upcoming_contexts: list[dict],
+    user_request: str,
+    *,
+    allow_outline_override: bool,
+) -> dict[int, dict]:
     request = user_request.strip()
     total = len(upcoming_contexts)
     if not request or total == 0:
@@ -122,33 +240,38 @@ def _fallback_batch_plan(upcoming_contexts: list[dict], user_request: str) -> di
     for index, context in enumerate(upcoming_contexts):
         chapter = deepcopy(context["chapter"])
         if total == 1:
-            guidance = f"把“{request}”作为本章核心推进点，自然融入当前剧情，不要生硬跳转。"
+            guidance = f'Use "{request}" as the core focus of this chapter and integrate it naturally.'
             role = "direct"
             focus = request
         elif index == 0:
-            guidance = f"本章先为“{request}”做铺垫与准备，让角色明确动机、条件、分工或障碍，避免直接把事情一次写完。"
+            guidance = f'This chapter should set up "{request}" through preparation, motivation, division of work, or obstacles.'
             role = "setup"
-            focus = f"{request}的铺垫与准备"
+            focus = f"setup for {request}"
         elif index == total - 1:
-            guidance = f"本章让“{request}”进入阶段性兑现、收束或形成新钩子，和前几章形成递进，不要重复前面的准备过程。"
+            guidance = f'This chapter should deliver a meaningful payoff for "{request}" without repeating earlier setup beats.'
             role = "payoff"
-            focus = f"{request}的阶段性兑现"
+            focus = f"payoff for {request}"
         else:
-            guidance = f"本章继续推进“{request}”，重点写实施过程中的新进展、阻碍、调整或人物互动，避免与前后章重复。"
+            guidance = f'This chapter should advance "{request}" with new progress, setbacks, adjustments, or character interaction.'
             role = "progress"
-            focus = f"{request}的推进过程"
+            focus = f"progress on {request}"
 
         chapter["request_focus"] = focus
         chapter["request_role"] = role
         chapter["writer_guidance"] = guidance
         plan_by_number[_safe_int(chapter.get("chapter_number"), 0)] = {
-            "chapter_outline": chapter,
+            "chapter_outline": chapter if allow_outline_override else None,
             "user_request": guidance,
         }
     return plan_by_number
 
 
-def _normalize_batch_plan_response(data: dict, upcoming_contexts: list[dict]) -> dict[int, dict]:
+def _normalize_batch_plan_response(
+    data: dict,
+    upcoming_contexts: list[dict],
+    *,
+    allow_outline_override: bool,
+) -> dict[int, dict]:
     raw_chapters = data.get("chapters")
     if not isinstance(raw_chapters, list):
         raise ValueError("batch plan response missing chapters list")
@@ -190,7 +313,7 @@ def _normalize_batch_plan_response(data: dict, upcoming_contexts: list[dict]) ->
 
         user_request = str(raw.get("writer_guidance") or raw.get("request_focus") or "").strip()
         normalized[chapter_number] = {
-            "chapter_outline": merged_outline,
+            "chapter_outline": merged_outline if allow_outline_override else None,
             "user_request": user_request,
         }
     return normalized
@@ -202,38 +325,55 @@ def _plan_batch_chapters(
     count: int,
     user_request: str,
     progress_callback=None,
-) -> dict[int, dict]:
+) -> tuple[str, dict[int, dict]]:
     request = user_request.strip()
+    project_data = load_project(project_path)
+    planning_mode = _resolve_planning_mode(config, project_data)
     if count <= 1 or not request:
-        return {}
+        return planning_mode, {}
 
     log_info(
         f"next_chapters: planning batch request for next {count} chapters "
-        f"project={project_path}"
+        f"project={project_path} mode={planning_mode}"
     )
     _emit_progress(progress_callback, "chapter_batch_plan", "正在规划接下来几章如何分配你想看的情节")
 
-    outlines = ensure_project_outlines(
-        project_path,
-        config,
-        sync_progress=False,
-        progress_callback=progress_callback,
-    )
-    project_data = load_project(project_path)
-    project_data["outlines"] = outlines
-    current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
-    upcoming_contexts = _collect_upcoming_chapter_contexts(outlines, current_chapter_count, count)
+    if planning_mode == PLANNING_MODE_CHAPTER:
+        outlines = ensure_project_outlines(
+            project_path,
+            config,
+            sync_progress=False,
+            progress_callback=progress_callback,
+        )
+        project_data["outlines"] = outlines
+        current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
+        upcoming_contexts = _collect_upcoming_chapter_contexts(outlines, current_chapter_count, count)
+        allow_outline_override = True
+    elif planning_mode == PLANNING_MODE_VOLUME:
+        outlines = _ensure_volume_outlines(project_path, config, progress_callback=progress_callback)
+        project_data["outlines"] = outlines
+        current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
+        upcoming_contexts = _collect_upcoming_volume_contexts(outlines, current_chapter_count, count)
+        allow_outline_override = False
+    else:
+        upcoming_contexts = _collect_upcoming_freeform_contexts(project_data, count)
+        allow_outline_override = False
+
     if len(upcoming_contexts) != count:
         log_warning(
-            "next_chapters: could not collect enough upcoming chapter outlines, "
+            "next_chapters: could not collect enough upcoming chapter contexts, "
             "falling back to heuristic request distribution"
         )
-        return _fallback_batch_plan(upcoming_contexts, request)
+        return planning_mode, _fallback_batch_plan(
+            upcoming_contexts,
+            request,
+            allow_outline_override=allow_outline_override,
+        )
 
     compact_contexts = []
     for context in upcoming_contexts:
-        volume = context["volume"]
-        chapter = context["chapter"]
+        volume = context.get("volume") or {}
+        chapter = context.get("chapter") or {}
         compact_contexts.append(
             {
                 "volume_number": volume.get("volume_number", 0),
@@ -258,13 +398,21 @@ def _plan_batch_chapters(
             success=True,
             usage=metadata.get("usage"),
         )
-        plan = _normalize_batch_plan_response(_extract_json_object(response_text), upcoming_contexts)
+        plan = _normalize_batch_plan_response(
+            _extract_json_object(response_text),
+            upcoming_contexts,
+            allow_outline_override=allow_outline_override,
+        )
         log_success(f"next_chapters: batch request planned for {len(plan)} chapters")
-        return plan
+        return planning_mode, plan
     except Exception as exc:
         update_project_stats(project_path, phase="outline", success=False, usage=None)
         log_warning(f"next_chapters: batch planning failed, fallback to heuristic. reason: {exc}")
-        return _fallback_batch_plan(upcoming_contexts, request)
+        return planning_mode, _fallback_batch_plan(
+            upcoming_contexts,
+            request,
+            allow_outline_override=allow_outline_override,
+        )
 
 
 def _add_illustration_arguments(parser: argparse.ArgumentParser) -> None:
@@ -383,39 +531,36 @@ def run_next_chapter(
     user_request: str = "",
     *,
     chapter_outline_override: dict | None = None,
+    planning_mode: str | None = None,
     progress_callback=None,
 ) -> str:
     log_info(f"next_chapter: prepare project={project_path}")
-    _emit_progress(progress_callback, "chapter_prepare", "正在检查并同步大纲")
-    outlines = ensure_project_outlines(
+    effective_mode = normalize_planning_mode(planning_mode or config.get("planning_mode"))
+    _emit_progress(progress_callback, "chapter_prepare", f"Preparing next chapter with planning mode: {effective_mode}")
+    project_data, next_context = _get_next_context_for_mode(
         project_path,
         config,
-        sync_progress=False,
+        effective_mode,
         progress_callback=progress_callback,
     )
-    project_data = load_project(project_path)
     current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
-    _emit_progress(progress_callback, "chapter_snapshot_prepare", "正在保存续写前快照")
+    _emit_progress(progress_callback, "chapter_snapshot_prepare", "Saving pre-write snapshot")
     ensure_state_snapshot(
         project_path,
         chapter_count=current_chapter_count,
         note="pre-write checkpoint",
     )
 
-    next_context = find_next_chapter_context(outlines, current_chapter_count)
-    if next_context is None:
-        log_error("next_chapter: no outline found for the next chapter")
-        raise ValueError("No usable next chapter outline was found. Regenerate chapter outlines first.")
-
-    if chapter_outline_override:
+    if effective_mode == PLANNING_MODE_CHAPTER and chapter_outline_override:
         merged_chapter = deepcopy(next_context["chapter"])
         merged_chapter.update(chapter_outline_override)
         next_context["chapter"] = merged_chapter
 
     log_info(
         "next_chapter: writing "
+        f"mode={effective_mode} "
         f"volume={next_context['volume'].get('volume_number', '?')} "
-        f"chapter={next_context['chapter'].get('chapter_number', '?')} "
+        f"chapter={next_context['chapter'].get('chapter_number', current_chapter_count + 1)} "
         f"title={next_context['chapter'].get('title', '')}"
     )
 
@@ -429,13 +574,13 @@ def run_next_chapter(
         project_data,
         recent_text,
         user_request=user_request,
-        current_volume_outline=next_context["volume"],
-        chapter_outline=next_context["chapter"],
+        current_volume_outline=next_context["volume"] if effective_mode != PLANNING_MODE_NONE else None,
+        chapter_outline=next_context["chapter"] if effective_mode == PLANNING_MODE_CHAPTER else None,
     )
 
     try:
         log_info("next_chapter: requesting model output")
-        _emit_progress(progress_callback, "chapter_write", "正在生成正文")
+        _emit_progress(progress_callback, "chapter_write", "Generating chapter text")
         response_text, metadata = generate_text_with_metadata(prompt, config)
     except Exception:
         update_project_stats(project_path, phase="writer", success=False, usage=None)
@@ -449,24 +594,23 @@ def run_next_chapter(
         usage=metadata.get("usage"),
     )
     chapter_text = normalize_chapter_text(response_text)
-    _emit_progress(progress_callback, "chapter_save", "正在保存正文章节")
+    _emit_progress(progress_callback, "chapter_save", "Saving chapter file")
     chapter_path = save_chapter(project_path, chapter_text)
     log_success(f"next_chapter: saved to {chapter_path}")
 
     log_info("next_chapter: updating plot_state")
-    _emit_progress(progress_callback, "chapter_summary", "正在更新剧情状态")
+    _emit_progress(progress_callback, "chapter_summary", "Updating plot state")
     update_plot_state(project_path, chapter_text, config, progress_callback=progress_callback)
-    log_info("next_chapter: syncing outline progress")
-    _emit_progress(progress_callback, "chapter_outline_sync", "正在同步大纲进度")
-    sync_outline_progress(project_path)
+    if effective_mode != PLANNING_MODE_NONE:
+        log_info("next_chapter: syncing outline progress")
+        _emit_progress(progress_callback, "chapter_outline_sync", "Syncing outline progress")
+        sync_outline_progress(project_path)
 
-    _emit_progress(progress_callback, "chapter_snapshot", "正在保存续写后快照")
+    _emit_progress(progress_callback, "chapter_snapshot", "Saving post-write snapshot")
     snapshot_path = create_state_snapshot(project_path, note="post-write checkpoint")
     log_success(f"next_chapter: snapshot saved to {snapshot_path}")
-    _emit_progress(progress_callback, "chapter_done", f"章节已完成：{Path(chapter_path).name}")
+    _emit_progress(progress_callback, "chapter_done", f"Chapter completed: {Path(chapter_path).name}")
     return chapter_path
-
-
 def run_next_chapters(
     project_path: str,
     config: dict,
@@ -477,7 +621,7 @@ def run_next_chapters(
     if count < 1:
         raise ValueError("count must be at least 1.")
     starting_chapter_count = int(load_project(project_path)["project"].get("chapter_count", 0) or 0)
-    batch_plan = _plan_batch_chapters(
+    planning_mode, batch_plan = _plan_batch_chapters(
         project_path,
         config,
         count,
@@ -496,7 +640,7 @@ def run_next_chapters(
         _emit_progress(
             progress_callback,
             "chapter_batch",
-            f"正在续写第 {index + 1}/{count} 章",
+            f"Writing chapter {index + 1}/{count}",
             current=index,
             total=count,
         )
@@ -506,13 +650,14 @@ def run_next_chapters(
                 config,
                 user_request=effective_request,
                 chapter_outline_override=plan_entry.get("chapter_outline") if plan_entry else None,
+                planning_mode=planning_mode,
                 progress_callback=progress_callback,
             )
         )
         _emit_progress(
             progress_callback,
             "chapter_batch_done",
-            f"第 {index + 1}/{count} 章已完成",
+            f"Chapter {index + 1}/{count} completed",
             current=index + 1,
             total=count,
         )
@@ -536,6 +681,7 @@ def _print_status(project_path: str) -> None:
     print(f"Latest Snapshot: {latest_snapshot if latest_snapshot is not None else 'none'}")
     print(f"Provider: {llm_config.get('model_provider', '')}")
     print(f"Model: {llm_config.get('model_name') or llm_config.get('model', '')}")
+    print(f"Planning Mode: {normalize_planning_mode(project.get('planning_mode'))}")
     print(
         "Requests: "
         f"{total_stats.get('requests', 0)} "
@@ -565,7 +711,10 @@ def _print_status(project_path: str) -> None:
     outline_status = get_outline_status(project_path)
     if outline_status.get("has_outlines"):
         print(f"Volumes: {outline_status.get('volume_count', 0)}")
-        if outline_status.get("chapter_outline_stale"):
+        if (
+            normalize_planning_mode(project.get("planning_mode")) == PLANNING_MODE_CHAPTER
+            and outline_status.get("chapter_outline_stale")
+        ):
             print("Chapter outlines are stale.")
         next_context = outline_status.get("next_context")
         if next_context:
@@ -587,7 +736,10 @@ def _print_status(project_path: str) -> None:
 
 def _load_runtime_config(project_path: str) -> dict:
     project = load_project(project_path)["project"]
-    return project.get("llm_config", {})
+    return {
+        **project.get("llm_config", {}),
+        "planning_mode": normalize_planning_mode(project.get("planning_mode")),
+    }
 
 
 def _extract_llm_config(config_path: str) -> dict:
@@ -604,6 +756,7 @@ def _extract_llm_config(config_path: str) -> dict:
         "timeout": raw.get("timeout", 120),
         "thinking_level": raw.get("thinking_level"),
         "thinking_budget": raw.get("thinking_budget"),
+        "planning_mode": normalize_planning_mode(raw.get("planning_mode")),
     }
 
 
@@ -619,6 +772,11 @@ def main() -> None:
     next_parser.add_argument("--config", help="Optional config.json to override saved LLM settings")
     next_parser.add_argument("--count", type=int, default=1, help="Generate multiple chapters sequentially")
     next_parser.add_argument("--user-request", default="", help="Optional user preference for this batch")
+    next_parser.add_argument(
+        "--planning-mode",
+        choices=(PLANNING_MODE_NONE, PLANNING_MODE_VOLUME, PLANNING_MODE_CHAPTER),
+        help="Override planning mode for this run",
+    )
     next_parser.add_argument("--illustrate", action="store_true", help="Generate chapter illustrations")
     next_parser.add_argument("--illustration-request", default="", help="Optional extra art direction")
     next_parser.add_argument(
@@ -690,6 +848,8 @@ def main() -> None:
             parser.error("--count must be at least 1")
 
         config = _extract_llm_config(args.config) if args.config else _load_runtime_config(args.project)
+        if args.planning_mode:
+            config["planning_mode"] = args.planning_mode
         chapter_paths = run_next_chapters(
             args.project,
             config,

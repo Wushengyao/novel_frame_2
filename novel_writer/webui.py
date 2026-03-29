@@ -21,10 +21,15 @@ from uuid import uuid4
 from app import run_next_chapters
 from illustration_manager import get_illustration_record, illustrate_chapters, list_illustration_records
 from project_manager import (
+    DEFAULT_PLANNING_MODE,
+    PLANNING_MODE_CHAPTER,
+    PLANNING_MODE_NONE,
+    PLANNING_MODE_VOLUME,
     get_latest_state_snapshot_chapter,
     init_project,
     load_json,
     load_project,
+    normalize_planning_mode,
     rollback_project,
 )
 
@@ -299,6 +304,36 @@ def _default_timeout_for_provider(provider: str) -> int:
     return 900 if provider == "ollama" else 120
 
 
+def _planning_mode_label(mode: str) -> str:
+    mapping = {
+        PLANNING_MODE_NONE: "无大纲模式",
+        PLANNING_MODE_VOLUME: "仅卷纲模式",
+        PLANNING_MODE_CHAPTER: "章纲模式",
+    }
+    return mapping.get(normalize_planning_mode(mode), "仅卷纲模式")
+
+
+def _planning_mode_help(mode: str) -> str:
+    mapping = {
+        PLANNING_MODE_NONE: "只参考正文与剧情状态，自由度最高。",
+        PLANNING_MODE_VOLUME: "保留长线方向，但不锁死每章任务。",
+        PLANNING_MODE_CHAPTER: "严格按分章大纲推进，控制力最强。",
+    }
+    return mapping.get(normalize_planning_mode(mode), mapping[DEFAULT_PLANNING_MODE])
+
+
+def _render_planning_mode_options(selected: str, *, include_project_default: bool = False) -> str:
+    normalized = normalize_planning_mode(selected)
+    options = []
+    if include_project_default:
+        selected_attr = ' selected' if not selected else ""
+        options.append(f'<option value=""{selected_attr}>沿用项目设置</option>')
+    for value in (PLANNING_MODE_NONE, PLANNING_MODE_VOLUME, PLANNING_MODE_CHAPTER):
+        selected_attr = ' selected' if normalized == value and not include_project_default else ""
+        options.append(f'<option value="{value}"{selected_attr}>{_planning_mode_label(value)}</option>')
+    return "".join(options)
+
+
 def _resolve_timeout_for_provider(provider: str, raw_value: object) -> int:
     default_timeout = _default_timeout_for_provider(provider)
     try:
@@ -354,6 +389,7 @@ def _find_project(project_id: str) -> Path | None:
 def _build_runtime_config(project_path: Path, overrides: dict[str, str], api_keys: dict[str, str]) -> dict:
     project = load_json(str(project_path / "project.json"))
     saved = project.get("llm_config", {})
+    saved_planning_mode = normalize_planning_mode(project.get("planning_mode"))
     saved_provider = (saved.get("model_provider") or "gemini").strip().lower()
     provider = (overrides.get("provider") or saved_provider or "gemini").strip().lower()
     if provider not in {"gemini", "grok", "deepseek", "doubao", "openai_compatible", "ollama"}:
@@ -401,18 +437,21 @@ def _build_runtime_config(project_path: Path, overrides: dict[str, str], api_key
         runtime["model"] = runtime["model_name"]
 
     if not runtime["api_key"] and _provider_requires_api_key(provider):
-        raise RuntimeError(f"provider={provider} 缺少 API key，请先填写 api_keys.sh")
+        raise RuntimeError(f"provider={provider} missing API key, please fill api_keys.sh")
+    runtime["planning_mode"] = normalize_planning_mode(
+        (overrides.get("planning_mode") or "").strip() or saved_planning_mode
+    )
     return runtime
 
 
 def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_callback=None) -> str:
     provider = (form.get("provider") or "gemini").strip().lower()
     if provider not in {"gemini", "grok", "deepseek", "doubao", "ollama"}:
-        raise RuntimeError(f"不支持的 provider: {provider}")
+        raise RuntimeError(f"unsupported provider: {provider}")
 
     api_key = _api_key_for_provider(provider, api_keys)
     if not api_key and _provider_requires_api_key(provider):
-        raise RuntimeError(f"provider={provider} 缺少 API key，请先填写 api_keys.sh")
+        raise RuntimeError(f"provider={provider} missing API key, please fill api_keys.sh")
 
     config = {
         "project_name": (form.get("project_name") or "Novel Project").strip(),
@@ -420,6 +459,7 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_cal
         "project_path": str(OUTPUT_DIR / "novel_project_{project_id}"),
         "init_with_llm": True,
         "story_request": (form.get("story_request") or "").strip(),
+        "planning_mode": normalize_planning_mode(form.get("planning_mode")),
         "model_provider": provider,
         "model_name": (form.get("model_name") or _default_model_for_provider(provider)).strip(),
         "api_base": (form.get("api_base") or _default_api_base_for_provider(provider)).strip(),
@@ -1205,6 +1245,12 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                   <input type="text" name="thinking_level" placeholder="Gemini 可填 medium/high">
                 </label>
               </div>
+              <label>Planning Mode
+                <select name="planning_mode">
+                  {_render_planning_mode_options(DEFAULT_PLANNING_MODE)}
+                </select>
+              </label>
+              <div class="muted">{escape(_planning_mode_help(DEFAULT_PLANNING_MODE))}</div>
               <label>API Base（可选）
                 <input type="text" name="api_base" placeholder="如需自定义接口地址可填写">
               </label>
@@ -1295,6 +1341,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <p><strong>当前时间：</strong>{escape(plot_state.get("current_time", "") or "未知")}</p>
               <p><strong>请求：</strong>{stats.get("requests", 0)} 次</p>
               <p><strong>Token：</strong>{stats.get("total_tokens", 0)}</p>
+              <p><strong>Planning:</strong>{escape(_planning_mode_label(project.get("planning_mode", DEFAULT_PLANNING_MODE)))}</p>
             </section>
             <section class="panel">
               <h3>后台任务</h3>
@@ -1331,6 +1378,12 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                     <input type="text" name="thinking_level" placeholder="如 medium / high">
                   </label>
                 </div>
+                <label>Planning Mode
+                  <select name="planning_mode">
+                    {_render_planning_mode_options("", include_project_default=True)}
+                  </select>
+                </label>
+                <div class="muted">Leave blank to use the project default. none is the freest, volume is balanced, chapter is the most controlled.</div>
                 <div class="two-col">
                   <label>Temperature
                     <input type="number" step="0.1" name="temperature" placeholder="沿用项目设置">
@@ -1869,6 +1922,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <p><strong>当前时间：</strong>{escape(plot_state.get("current_time", "") or "未知")}</p>
               <p><strong>请求：</strong>{stats.get("requests", 0)} 次</p>
               <p><strong>Token：</strong>{stats.get("total_tokens", 0)}</p>
+              <p><strong>Planning:</strong>{escape(_planning_mode_label(project.get("planning_mode", DEFAULT_PLANNING_MODE)))}</p>
             </section>
             <section class="panel">
               <h3>后台任务</h3>
@@ -1905,6 +1959,12 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                       <input type="text" name="thinking_level" placeholder="如 medium / high">
                     </label>
                   </div>
+                  <label>Planning Mode
+                    <select name="planning_mode">
+                      {_render_planning_mode_options("", include_project_default=True)}
+                    </select>
+                  </label>
+                  <div class="muted">Leave blank to use the project default. none is the freest, volume is balanced, chapter is the most controlled.</div>
                   <div class="two-col">
                     <label>Temperature
                       <input type="number" step="0.1" name="temperature" placeholder="沿用项目设置">

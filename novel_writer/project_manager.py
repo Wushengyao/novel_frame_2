@@ -58,6 +58,15 @@ DEFAULT_WORLD = deepcopy(EMPTY_WORLD)
 DEFAULT_CHARACTERS = deepcopy(EMPTY_CHARACTERS)
 DEFAULT_PLOT_STATE = deepcopy(EMPTY_PLOT_STATE)
 DEFAULT_STYLE = deepcopy(EMPTY_STYLE)
+PLANNING_MODE_NONE = "none"
+PLANNING_MODE_VOLUME = "volume"
+PLANNING_MODE_CHAPTER = "chapter"
+DEFAULT_PLANNING_MODE = PLANNING_MODE_VOLUME
+PLANNING_MODES = {
+    PLANNING_MODE_NONE,
+    PLANNING_MODE_VOLUME,
+    PLANNING_MODE_CHAPTER,
+}
 
 INIT_SECTION_KEYS = ("world", "characters", "plot_state", "style")
 CHAPTER_TITLE_PATTERN = re.compile(
@@ -95,6 +104,13 @@ def _emit_progress(progress_callback, stage: str, message: str) -> None:
             "message": message,
         }
     )
+
+
+def normalize_planning_mode(mode: object, default: str = DEFAULT_PLANNING_MODE) -> str:
+    normalized = str(mode or "").strip().lower()
+    if normalized in PLANNING_MODES:
+        return normalized
+    return default
 
 
 def normalize_chapter_text(text: str) -> str:
@@ -242,6 +258,7 @@ def _build_llm_config(config: dict) -> dict:
         "timeout": config.get("timeout", 120),
         "thinking_level": config.get("thinking_level"),
         "thinking_budget": config.get("thinking_budget"),
+        "planning_mode": normalize_planning_mode(config.get("planning_mode")),
     }
 
 
@@ -459,27 +476,27 @@ def load_json(path: str) -> dict:
 
 
 def init_project(config_path: str, progress_callback=None) -> str:
-    log_info(f"初始化项目: 开始读取配置 {config_path}")
-    _emit_progress(progress_callback, "init_config", "正在读取项目配置")
+    log_info(f"init_project: loading config {config_path}")
+    _emit_progress(progress_callback, "init_config", "Loading project config")
     config_file = Path(config_path).resolve()
     config = load_json(str(config_file))
     project_id = config.get("project_id") or _build_project_id()
     project_path = _resolve_project_path(config_file, config, project_id)
-    log_info(f"初始化项目: 准备创建项目目录 {project_path}")
-    _emit_progress(progress_callback, "init_dirs", "正在创建项目目录结构")
+    log_info(f"init_project: creating project directory {project_path}")
+    _emit_progress(progress_callback, "init_dirs", "Creating project directories")
     project_path.mkdir(parents=True, exist_ok=True)
     (project_path / "chapters").mkdir(exist_ok=True)
     (project_path / "summaries").mkdir(exist_ok=True)
     (project_path / "illustrations").mkdir(exist_ok=True)
-    log_success("初始化项目: 基础目录已创建。")
+    log_success("init_project: base directories ready")
 
-    _emit_progress(progress_callback, "init_story", "正在生成初始设定、角色与剧情状态")
+    _emit_progress(progress_callback, "init_story", "Generating initial story data")
     generated_data, init_meta = _generate_initial_story_data(config)
     world = generated_data["world"]
     characters = generated_data["characters"]
     plot_state = _normalize_initial_plot_state(generated_data["plot_state"])
     style = generated_data["style"]
-    log_info("初始化项目: 正在写入基础 JSON 文件。")
+    log_info("init_project: writing project json files")
 
     project_data = {
         "project_id": project_id,
@@ -487,6 +504,7 @@ def init_project(config_path: str, progress_callback=None) -> str:
         "description": config.get("project_description", "Structured-memory novel writing project."),
         "project_path": str(project_path),
         "story_request": config.get("story_request", ""),
+        "planning_mode": normalize_planning_mode(config.get("planning_mode")),
         "created_at": _utc_now(),
         "updated_at": _utc_now(),
         "chapter_count": 0,
@@ -495,41 +513,46 @@ def init_project(config_path: str, progress_callback=None) -> str:
         "llm_config": _build_persisted_llm_config(config),
     }
 
-    _emit_progress(progress_callback, "init_files", "正在写入项目基础文件")
+    _emit_progress(progress_callback, "init_files", "Writing project files")
     save_json(str(project_path / "project.json"), project_data)
     save_json(str(project_path / "world.json"), world)
     save_json(str(project_path / "characters.json"), characters)
     save_json(str(project_path / "plot_state.json"), plot_state)
     save_json(str(project_path / "style.json"), style)
-    log_success("初始化项目: 基础设定文件写入完成。")
+    log_success("init_project: project files written")
+
     from outline_manager import regenerate_chapter_outline, regenerate_volume_outline
 
     llm_config = _build_llm_config(config)
     outline_request = str(config.get("outline_request", "") or "").strip()
-    log_info("初始化项目: 开始生成分卷大纲。")
-    _emit_progress(progress_callback, "init_volume_outline", "正在生成分卷大纲")
-    regenerate_volume_outline(
-        str(project_path),
-        llm_config,
-        user_request=outline_request,
-        progress_callback=progress_callback,
-    )
-    log_success("初始化项目: 分卷大纲生成完成。")
-    log_info("初始化项目: 开始生成分章大纲。")
-    _emit_progress(progress_callback, "init_chapter_outline", "正在生成分章大纲")
-    regenerate_chapter_outline(
-        str(project_path),
-        llm_config,
-        volume_number=None,
-        user_request=outline_request,
-        progress_callback=progress_callback,
-    )
-    log_success("初始化项目: 分章大纲生成完成。")
-    _emit_progress(progress_callback, "init_snapshot", "正在保存初始状态快照")
+    planning_mode = normalize_planning_mode(project_data.get("planning_mode"))
+    if planning_mode in {PLANNING_MODE_VOLUME, PLANNING_MODE_CHAPTER}:
+        log_info("init_project: generating volume outlines")
+        _emit_progress(progress_callback, "init_volume_outline", "Generating volume outlines")
+        regenerate_volume_outline(
+            str(project_path),
+            llm_config,
+            user_request=outline_request,
+            progress_callback=progress_callback,
+        )
+        log_success("init_project: volume outlines ready")
+    if planning_mode == PLANNING_MODE_CHAPTER:
+        log_info("init_project: generating chapter outlines")
+        _emit_progress(progress_callback, "init_chapter_outline", "Generating chapter outlines")
+        regenerate_chapter_outline(
+            str(project_path),
+            llm_config,
+            volume_number=None,
+            user_request=outline_request,
+            progress_callback=progress_callback,
+        )
+        log_success("init_project: chapter outlines ready")
+
+    _emit_progress(progress_callback, "init_snapshot", "Saving initial snapshot")
     snapshot_path = create_state_snapshot(str(project_path), chapter_count=0, note="post-init checkpoint")
-    log_success(f"初始化项目: 已写入初始状态快照 {snapshot_path}")
-    log_success(f"初始化项目: 项目已完成初始化 {project_path}")
-    _emit_progress(progress_callback, "init_done", "项目初始化完成")
+    log_success(f"init_project: snapshot saved to {snapshot_path}")
+    log_success(f"init_project: project initialized at {project_path}")
+    _emit_progress(progress_callback, "init_done", "Project initialization completed")
     return str(project_path)
 
 
