@@ -92,6 +92,20 @@ normalize_provider() {
   esac
 }
 
+normalize_planning_mode() {
+  local mode="${1:-}"
+  case "${mode,,}" in
+    none|volume|chapter) printf '%s\n' "${mode,,}" ;;
+    "")
+      printf '%s\n' "volume"
+      ;;
+    *)
+      echo "Unsupported planning mode: $mode (allowed: none / volume / chapter)" >&2
+      exit 1
+      ;;
+  esac
+}
+
 default_model_for_provider() {
   local provider
   provider="$(normalize_provider "$1")"
@@ -206,6 +220,7 @@ data = {
     "project_path": str(output_root / "novel_project_{project_id}"),
     "init_with_llm": True,
     "story_request": os.environ["NOVEL_STORY_REQUEST"],
+    "planning_mode": os.environ.get("NOVEL_PLANNING_MODE", "volume").strip() or "volume",
     "model_provider": provider,
     "model_name": os.environ["NOVEL_MODEL_NAME"],
     "api_base": os.environ["NOVEL_API_BASE"],
@@ -244,6 +259,8 @@ project = json.loads((project_path / "project.json").read_text(encoding="utf-8")
 saved = project.get("llm_config", {})
 saved_provider = str(saved.get("model_provider", "gemini") or "gemini").strip().lower()
 resolved_provider = os.environ.get("NOVEL_PROVIDER_OVERRIDE", "").strip() or saved_provider
+saved_planning_mode = str(project.get("planning_mode", "volume") or "volume").strip().lower() or "volume"
+resolved_planning_mode = os.environ.get("NOVEL_PLANNING_MODE_OVERRIDE", "").strip() or saved_planning_mode
 default_models = {
   "gemini": "gemini-3.1-pro-preview",
   "grok": "grok-4.20-beta-latest-reasoning",
@@ -270,6 +287,7 @@ model_name_override = os.environ.get("NOVEL_MODEL_NAME_OVERRIDE", "").strip()
 api_base_override = os.environ.get("NOVEL_API_BASE_OVERRIDE", "").strip()
 
 data = {
+  "planning_mode": resolved_planning_mode,
   "model_provider": resolved_provider,
   "model_name": model_name_override
   or (

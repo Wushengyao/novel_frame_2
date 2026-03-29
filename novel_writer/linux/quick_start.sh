@@ -22,6 +22,7 @@ DEFAULT_STORY_REQUEST="""故事发生在一座高级奢华的校园中，3位主
 DEFAULT_PROJECT_NAME="雪封穹顶"
 DEFAULT_PROJECT_DESCRIPTION="由模型根据需求自动生成设定的长篇小说项目。"
 DEFAULT_OUTLINE_REQUEST=""
+DEFAULT_PLANNING_MODE="volume"
 
 # Optional runtime overrides
 DEFAULT_MODEL_NAME=""
@@ -68,8 +69,15 @@ else
   OUTLINE_REQUEST="${5:-$DEFAULT_OUTLINE_REQUEST}"
 fi
 
+if [[ $# -lt 6 ]]; then
+  PLANNING_MODE="$(prompt_optional_value "Planning mode (none/volume/chapter)" "$DEFAULT_PLANNING_MODE")"
+else
+  PLANNING_MODE="${6:-$DEFAULT_PLANNING_MODE}"
+fi
+PLANNING_MODE="$(normalize_planning_mode "$PLANNING_MODE")"
+
 if [[ -z "$STORY_REQUEST" ]]; then
-  echo "用法: ./linux/quick_start.sh <provider> <故事需求> [项目名] [项目简介] [大纲额外要求]" >&2
+  echo "用法: ./linux/quick_start.sh <provider> <故事需求> [项目名] [项目简介] [大纲额外要求] [planning mode]" >&2
   echo "也可以直接编辑脚本顶部的 Editable Parameters 区域，然后直接运行 ./linux/quick_start.sh" >&2
   echo "示例: ./linux/quick_start.sh gemini \"现代奢华校园中的极寒生存故事，男女主合作求生。\"" >&2
   exit 1
@@ -80,6 +88,7 @@ NOVEL_PROJECT_NAME="$PROJECT_NAME"
 NOVEL_PROJECT_DESCRIPTION="$PROJECT_DESCRIPTION"
 NOVEL_STORY_REQUEST="$STORY_REQUEST"
 NOVEL_OUTLINE_REQUEST="$OUTLINE_REQUEST"
+NOVEL_PLANNING_MODE="$PLANNING_MODE"
 NOVEL_MODEL_NAME="${NOVEL_MODEL_NAME:-${DEFAULT_MODEL_NAME:-$(default_model_for_provider "$PROVIDER")}}"
 NOVEL_API_BASE="${NOVEL_API_BASE:-${DEFAULT_API_BASE:-$(default_api_base_for_provider "$PROVIDER")}}"
 NOVEL_API_KEY="${NOVEL_API_KEY:-$(api_key_for_provider "$PROVIDER")}"
@@ -96,6 +105,7 @@ export NOVEL_PROJECT_NAME
 export NOVEL_PROJECT_DESCRIPTION
 export NOVEL_STORY_REQUEST
 export NOVEL_OUTLINE_REQUEST
+export NOVEL_PLANNING_MODE
 export NOVEL_MODEL_NAME
 export NOVEL_API_BASE
 export NOVEL_API_KEY

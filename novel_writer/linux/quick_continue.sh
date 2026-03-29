@@ -14,6 +14,7 @@ DEFAULT_PROJECT_PATH="/home/wsy/novel_frame_2/novel_writer/output/novel_project_
 DEFAULT_CHAPTER_COUNT="3"
 DEFAULT_USER_REQUEST=""
 DEFAULT_PROVIDER_OVERRIDE=""
+DEFAULT_PLANNING_MODE_OVERRIDE=""
 
 # Optional runtime overrides
 DEFAULT_MODEL_NAME_OVERRIDE=""
@@ -54,8 +55,17 @@ else
   PROVIDER_OVERRIDE="${4:-$DEFAULT_PROVIDER_OVERRIDE}"
 fi
 
+if [[ $# -lt 5 ]]; then
+  PLANNING_MODE_OVERRIDE="$(prompt_optional_value "Planning mode override (optional: none/volume/chapter)" "$DEFAULT_PLANNING_MODE_OVERRIDE")"
+else
+  PLANNING_MODE_OVERRIDE="${5:-$DEFAULT_PLANNING_MODE_OVERRIDE}"
+fi
+if [[ -n "$PLANNING_MODE_OVERRIDE" ]]; then
+  PLANNING_MODE_OVERRIDE="$(normalize_planning_mode "$PLANNING_MODE_OVERRIDE")"
+fi
+
 if [[ -z "$PROJECT_PATH" ]]; then
-  echo "用法: ./linux/quick_continue.sh <项目目录> [续写章节数] [用户额外要求] [provider覆盖]" >&2
+  echo "用法: ./linux/quick_continue.sh <项目目录> [续写章节数] [用户额外要求] [provider覆盖] [planning mode override]" >&2
   echo "也可以直接编辑脚本顶部的 Editable Parameters 区域，然后直接运行 ./linux/quick_continue.sh" >&2
   echo "示例: ./linux/quick_continue.sh ./novel_project_xxx 3 \"想先解决水源问题\"" >&2
   exit 1
@@ -95,6 +105,11 @@ NOVEL_TEMPERATURE_OVERRIDE="${NOVEL_TEMPERATURE_OVERRIDE:-$DEFAULT_TEMPERATURE_O
 NOVEL_MAX_TOKENS_OVERRIDE="${NOVEL_MAX_TOKENS_OVERRIDE:-$DEFAULT_MAX_TOKENS_OVERRIDE}"
 NOVEL_TIMEOUT_OVERRIDE="${NOVEL_TIMEOUT_OVERRIDE:-$DEFAULT_TIMEOUT_OVERRIDE}"
 NOVEL_THINKING_LEVEL_OVERRIDE="${NOVEL_THINKING_LEVEL_OVERRIDE:-$DEFAULT_THINKING_LEVEL_OVERRIDE}"
+if [[ -n "${NOVEL_PLANNING_MODE_OVERRIDE:-}" ]]; then
+  NOVEL_PLANNING_MODE_OVERRIDE="$(normalize_planning_mode "$NOVEL_PLANNING_MODE_OVERRIDE")"
+else
+  NOVEL_PLANNING_MODE_OVERRIDE="$PLANNING_MODE_OVERRIDE"
+fi
 NOVEL_API_KEY="${NOVEL_API_KEY:-$(api_key_for_provider "$RESOLVED_PROVIDER")}"
 
 ensure_api_key_present "$RESOLVED_PROVIDER" "$NOVEL_API_KEY"
@@ -107,6 +122,7 @@ export NOVEL_TEMPERATURE_OVERRIDE
 export NOVEL_MAX_TOKENS_OVERRIDE
 export NOVEL_TIMEOUT_OVERRIDE
 export NOVEL_THINKING_LEVEL_OVERRIDE
+export NOVEL_PLANNING_MODE_OVERRIDE
 export NOVEL_API_KEY
 
 TEMP_CONFIG="$(make_temp_config_path)"
