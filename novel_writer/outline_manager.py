@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from datetime import datetime, timezone
 from pathlib import Path
 
+from common_utils import emit_progress, extract_json_object, safe_int, utc_now
 from console_logger import log_error, log_info, log_success, log_warning
 from llm_client import generate_text_with_metadata
 from prompt_builder import build_chapter_outline_prompt, build_volume_outline_prompt
@@ -46,58 +46,6 @@ class OutlineGenerationError(RuntimeError):
     """Raised when outline generation does not produce a usable result."""
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def _emit_progress(progress_callback, stage: str, message: str) -> None:
-    if progress_callback is None:
-        return
-    progress_callback(
-        {
-            "stage": stage,
-            "message": message,
-        }
-    )
-
-
-def _extract_json_object(text: str) -> dict:
-    text = text.strip()
-    candidates = [text]
-
-    if "```json" in text:
-        start = text.find("```json") + len("```json")
-        end = text.find("```", start)
-        if end != -1:
-            candidates.append(text[start:end].strip())
-    elif "```" in text:
-        start = text.find("```") + len("```")
-        end = text.find("```", start)
-        if end != -1:
-            candidates.append(text[start:end].strip())
-
-    brace_start = text.find("{")
-    brace_end = text.rfind("}")
-    if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
-        candidates.append(text[brace_start : brace_end + 1])
-
-    for candidate in candidates:
-        try:
-            data = json.loads(candidate)
-            if isinstance(data, dict):
-                return data
-        except json.JSONDecodeError:
-            continue
-    raise ValueError("Could not parse JSON from outline response.")
-
-
-def _safe_int(value: object, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def load_outlines(project_path: str) -> dict:
     outlines_path = Path(project_path) / "outlines.json"
     if not outlines_path.exists():
@@ -111,7 +59,7 @@ def load_outlines(project_path: str) -> dict:
 
 def save_outlines(project_path: str, outlines: dict) -> None:
     normalized = normalize_outlines(outlines)
-    normalized["meta"]["updated_at"] = _utc_now()
+    normalized["meta"]["updated_at"] = utc_now()
     save_json(str(Path(project_path) / "outlines.json"), normalized)
 
 
@@ -126,18 +74,18 @@ def normalize_outlines(data: dict | None) -> dict:
         volume = deepcopy(EMPTY_VOLUME)
         if isinstance(raw_volume, dict):
             volume.update(raw_volume)
-        volume["volume_number"] = _safe_int(volume.get("volume_number"), index) or index
+        volume["volume_number"] = safe_int(volume.get("volume_number"), index) or index
         volume["title"] = str(volume.get("title", "") or "").strip()
         volume["summary"] = str(volume.get("summary", "") or "").strip()
         volume["story_goal"] = str(volume.get("story_goal", "") or "").strip()
-        volume["planned_chapter_count"] = max(1, _safe_int(volume.get("planned_chapter_count"), 1))
+        volume["planned_chapter_count"] = max(1, safe_int(volume.get("planned_chapter_count"), 1))
         chapters = []
         for chapter_index, raw_chapter in enumerate(volume.get("chapters") or [], start=1):
             chapter = deepcopy(EMPTY_CHAPTER_OUTLINE)
             if isinstance(raw_chapter, dict):
                 chapter.update(raw_chapter)
-            chapter["chapter_in_volume"] = _safe_int(chapter.get("chapter_in_volume"), chapter_index) or chapter_index
-            chapter["chapter_number"] = _safe_int(chapter.get("chapter_number"), 0)
+            chapter["chapter_in_volume"] = safe_int(chapter.get("chapter_in_volume"), chapter_index) or chapter_index
+            chapter["chapter_number"] = safe_int(chapter.get("chapter_number"), 0)
             chapter["title"] = str(chapter.get("title", "") or "").strip()
             chapter["summary"] = str(chapter.get("summary", "") or "").strip()
             chapter["goal"] = str(chapter.get("goal", "") or "").strip()
@@ -221,7 +169,7 @@ def _validate_volume_outline_response(data: dict) -> dict:
     for index, raw_volume in enumerate(raw_volumes, start=1):
         if not isinstance(raw_volume, dict):
             raise ValueError(f"第 {index} 卷数据格式非法。")
-        if _safe_int(raw_volume.get("planned_chapter_count"), 0) < 1:
+        if safe_int(raw_volume.get("planned_chapter_count"), 0) < 1:
             raise ValueError(f"第 {index} 卷 planned_chapter_count 非法。")
 
     normalized = normalize_outlines(data)
@@ -236,7 +184,7 @@ def _validate_volume_outline_response(data: dict) -> dict:
 
 
 def _validate_chapter_outline_response(data: dict, volume: dict) -> dict:
-    planned_count = max(1, _safe_int(volume.get("planned_chapter_count"), 1))
+    planned_count = max(1, safe_int(volume.get("planned_chapter_count"), 1))
     raw_chapters = data.get("chapters")
     if not isinstance(raw_chapters, list):
         raise ValueError("模型返回缺少 chapters 列表。")
@@ -298,7 +246,7 @@ def _generate_outline_json(
             continue
 
         try:
-            parsed = _extract_json_object(response_text)
+            parsed = extract_json_object(response_text, "Could not parse JSON from outline response.")
             validated = validator(parsed)
         except Exception as exc:  # pragma: no cover - resilience path
             update_project_stats(
@@ -332,7 +280,7 @@ def regenerate_volume_outline(
     progress_callback=None,
 ) -> dict:
     log_info(f"分卷大纲: 开始生成，项目={project_path}")
-    _emit_progress(progress_callback, "volume_outline", "正在生成分卷大纲")
+    emit_progress(progress_callback, "volume_outline", "正在生成分卷大纲")
     project_data = load_project(project_path)
     prompt = build_volume_outline_prompt(
         {
@@ -352,14 +300,14 @@ def regenerate_volume_outline(
     outlines["meta"]["chapter_outline_stale"] = True
     outlines["meta"]["last_volume_outline_request"] = user_request.strip()
     save_outlines(project_path, outlines)
-    _emit_progress(progress_callback, "volume_outline_done", "分卷大纲已写入")
+    emit_progress(progress_callback, "volume_outline_done", "分卷大纲已写入")
     log_success("分卷大纲: 已写入 outlines.json，并标记分章大纲需要同步。")
     return outlines
 
 
 def _find_volume(outlines: dict, volume_number: int) -> dict | None:
     for volume in outlines.get("volumes", []):
-        if _safe_int(volume.get("volume_number"), 0) == volume_number:
+        if safe_int(volume.get("volume_number"), 0) == volume_number:
             return deepcopy(volume)
     return None
 
@@ -369,7 +317,7 @@ def _all_volumes_have_chapters(outlines: dict) -> bool:
     if not volumes:
         return False
     for volume in volumes:
-        planned_count = max(1, _safe_int(volume.get("planned_chapter_count"), 1))
+        planned_count = max(1, safe_int(volume.get("planned_chapter_count"), 1))
         if len(volume.get("chapters") or []) < planned_count:
             return False
     return True
@@ -424,7 +372,7 @@ def regenerate_chapter_outline(
     existing_outlines = load_outlines(project_path)
     if not existing_outlines.get("volumes"):
         log_warning("分章大纲: 当前没有分卷大纲，先自动生成分卷大纲。")
-        _emit_progress(progress_callback, "chapter_outline_prepare", "缺少分卷大纲，正在补生成")
+        emit_progress(progress_callback, "chapter_outline_prepare", "缺少分卷大纲，正在补生成")
         existing_outlines = regenerate_volume_outline(
             project_path,
             config,
@@ -438,8 +386,8 @@ def regenerate_chapter_outline(
     new_volumes = []
 
     for volume in existing_outlines.get("volumes", []):
-        planned_count = max(1, _safe_int(volume.get("planned_chapter_count"), 1))
-        existing_volume = _find_volume(existing_outlines, _safe_int(volume.get("volume_number"), 0))
+        planned_count = max(1, safe_int(volume.get("planned_chapter_count"), 1))
+        existing_volume = _find_volume(existing_outlines, safe_int(volume.get("volume_number"), 0))
         existing_completed = []
         if existing_volume and existing_volume.get("chapters"):
             for chapter in existing_volume.get("chapters", []):
@@ -450,9 +398,9 @@ def regenerate_chapter_outline(
         written_remaining = max(0, written_remaining - completed_count)
         preserved_completed = existing_completed[:completed_count] or _build_placeholder_completed_chapters(completed_count)
 
-        should_regenerate = volume_number is None or _safe_int(volume.get("volume_number"), 0) == volume_number
+        should_regenerate = volume_number is None or safe_int(volume.get("volume_number"), 0) == volume_number
         if should_regenerate:
-            _emit_progress(
+            emit_progress(
                 progress_callback,
                 "chapter_outline_volume",
                 f"正在生成第 {volume.get('volume_number', '?')} 卷分章大纲",
@@ -491,7 +439,7 @@ def regenerate_chapter_outline(
         volume_copy["chapters"] = volume_chapters[:planned_count]
         new_volumes.append(volume_copy)
         _save_partial_chapter_outlines(project_path, existing_outlines, new_volumes, user_request)
-        _emit_progress(
+        emit_progress(
             progress_callback,
             "chapter_outline_saved",
             f"第 {volume.get('volume_number', '?')} 卷分章大纲已保存",
@@ -508,7 +456,7 @@ def regenerate_chapter_outline(
         log_warning("分章大纲: 已保存，但仍有卷缺少完整章纲。")
     else:
         log_success("分章大纲: 全部章纲已保存并同步到剧情状态。")
-    _emit_progress(progress_callback, "chapter_outline_done", "分章大纲生成完成")
+    emit_progress(progress_callback, "chapter_outline_done", "分章大纲生成完成")
     return updated_outlines
 
 
@@ -542,11 +490,47 @@ def _sync_plot_state_next_goal(project_path: str, outlines: dict) -> None:
     save_json(str(plot_state_path), plot_state)
 
 
+def apply_chapter_outline_override(project_path: str, chapter_number: int, chapter_outline: dict) -> dict:
+    outlines = load_outlines(project_path)
+    target_number = max(1, safe_int(chapter_number, 0))
+    raw_key_events = chapter_outline.get("key_events") or []
+    if not isinstance(raw_key_events, list):
+        raw_key_events = [raw_key_events]
+    updated = False
+    normalized_key_events = [
+        str(item).strip()
+        for item in raw_key_events
+        if str(item).strip()
+    ][:5]
+    for volume in outlines.get("volumes", []):
+        for chapter in volume.get("chapters", []):
+            if safe_int(chapter.get("chapter_number"), 0) != target_number:
+                continue
+            for key in ("title", "summary", "goal"):
+                value = str(chapter_outline.get(key, "") or "").strip()
+                if value:
+                    chapter[key] = value
+            if normalized_key_events:
+                chapter["key_events"] = normalized_key_events
+            updated = True
+            break
+        if updated:
+            break
+
+    if not updated:
+        raise ValueError(f"未找到第 {target_number} 章章纲，无法应用推进方案。")
+
+    outlines = normalize_outlines(outlines)
+    save_outlines(project_path, outlines)
+    _sync_plot_state_next_goal(project_path, outlines)
+    return outlines
+
+
 def find_next_chapter_context(outlines: dict, written_chapter_count: int) -> dict | None:
     normalized = normalize_outlines(outlines)
     for volume in normalized.get("volumes", []):
         for chapter in volume.get("chapters", []):
-            if _safe_int(chapter.get("chapter_number"), 0) == written_chapter_count + 1:
+            if safe_int(chapter.get("chapter_number"), 0) == written_chapter_count + 1:
                 return {
                     "volume": deepcopy(volume),
                     "chapter": deepcopy(chapter),
@@ -564,7 +548,7 @@ def ensure_project_outlines(
     outlines = load_outlines(project_path)
     if not outlines.get("volumes"):
         log_warning("章纲检查: 未发现 outlines.json，准备自动补全分卷和分章大纲。")
-        _emit_progress(progress_callback, "outline_prepare", "未发现大纲，正在自动补生成")
+        emit_progress(progress_callback, "outline_prepare", "未发现大纲，正在自动补生成")
         regenerate_volume_outline(project_path, config, user_request="", progress_callback=progress_callback)
         outlines = regenerate_chapter_outline(
             project_path,
@@ -578,7 +562,7 @@ def ensure_project_outlines(
         raise ValueError("分卷大纲已经更新，但分章大纲尚未同步，请先重新生成分章大纲。")
     elif not _all_volumes_have_chapters(outlines):
         log_warning("章纲检查: 检测到章纲不完整，准备自动补全。")
-        _emit_progress(progress_callback, "outline_repair", "检测到分章大纲不完整，正在补全")
+        emit_progress(progress_callback, "outline_repair", "检测到分章大纲不完整，正在补全")
         outlines = regenerate_chapter_outline(
             project_path,
             config,
@@ -591,7 +575,7 @@ def ensure_project_outlines(
         if sync_progress:
             outlines = sync_outline_progress(project_path, outlines)
         log_success("章纲检查: 分卷和分章大纲均可用。")
-    _emit_progress(progress_callback, "outline_ready", "大纲检查完成")
+    emit_progress(progress_callback, "outline_ready", "大纲检查完成")
     return outlines
 
 

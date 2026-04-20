@@ -15,6 +15,9 @@ DEFAULT_CHAPTER_COUNT="3"
 DEFAULT_USER_REQUEST=""
 DEFAULT_PROVIDER_OVERRIDE=""
 DEFAULT_PLANNING_MODE_OVERRIDE=""
+DEFAULT_CONTINUE_MODE="direct"
+DEFAULT_GUIDED_OPTION_COUNT="4"
+DEFAULT_GUIDED_FEEDBACK=""
 
 # Optional runtime overrides
 DEFAULT_MODEL_NAME_OVERRIDE=""
@@ -62,6 +65,17 @@ else
 fi
 if [[ -n "$PLANNING_MODE_OVERRIDE" ]]; then
   PLANNING_MODE_OVERRIDE="$(normalize_planning_mode "$PLANNING_MODE_OVERRIDE")"
+fi
+
+if [[ $# -lt 6 ]]; then
+  CONTINUE_MODE="$(prompt_optional_value "Continue mode (optional: direct/guided)" "$DEFAULT_CONTINUE_MODE")"
+else
+  CONTINUE_MODE="${6:-$DEFAULT_CONTINUE_MODE}"
+fi
+CONTINUE_MODE="${CONTINUE_MODE,,}"
+if [[ "$CONTINUE_MODE" != "direct" && "$CONTINUE_MODE" != "guided" ]]; then
+  echo "Unsupported continue mode: $CONTINUE_MODE (allowed: direct / guided)" >&2
+  exit 1
 fi
 
 if [[ -z "$PROJECT_PATH" ]]; then
@@ -115,6 +129,11 @@ NOVEL_API_KEY="${NOVEL_API_KEY:-$(api_key_for_provider "$RESOLVED_PROVIDER")}"
 ensure_api_key_present "$RESOLVED_PROVIDER" "$NOVEL_API_KEY"
 log_info "quick_continue: project=$PROJECT_PATH, provider=$RESOLVED_PROVIDER, count=$CHAPTER_COUNT"
 
+if [[ "$CONTINUE_MODE" == "guided" && "$CHAPTER_COUNT" != "1" ]]; then
+  log_warning "quick_continue: guided 模式固定只续写 1 章，已自动将 count 调整为 1。"
+  CHAPTER_COUNT="1"
+fi
+
 export NOVEL_PROVIDER_OVERRIDE
 export NOVEL_MODEL_NAME_OVERRIDE
 export NOVEL_API_BASE_OVERRIDE
@@ -130,15 +149,61 @@ trap 'rm -f "$TEMP_CONFIG"' EXIT
 log_info "quick_continue: 正在写入临时配置 $TEMP_CONFIG"
 write_continue_config "$TEMP_CONFIG" "$PROJECT_PATH"
 
-NEXT_ARGS=(
-  "$PYTHON_EXE" "$PROJECT_ROOT/app.py" next
-  --project "$PROJECT_PATH"
-  --config "$TEMP_CONFIG"
-  --count "$CHAPTER_COUNT"
-)
+if [[ "$CONTINUE_MODE" == "guided" ]]; then
+  OPTIONS_ARGS=(
+    "$PYTHON_EXE" "$PROJECT_ROOT/app.py" options
+    --project "$PROJECT_PATH"
+    --config "$TEMP_CONFIG"
+    --option-count "$DEFAULT_GUIDED_OPTION_COUNT"
+  )
+  if [[ -n "$USER_REQUEST" ]]; then
+    OPTIONS_ARGS+=(--user-request "$USER_REQUEST")
+  fi
 
-if [[ -n "$USER_REQUEST" ]]; then
-  NEXT_ARGS+=(--user-request "$USER_REQUEST")
+  set +e
+  log_info "quick_continue: 正在生成下一章推进选项。"
+  OPTIONS_OUTPUT="$("${OPTIONS_ARGS[@]}" 2>&1)"
+  OPTIONS_EXIT_CODE=$?
+  set -e
+  printf '%s\n' "$OPTIONS_OUTPUT"
+
+  if [[ $OPTIONS_EXIT_CODE -ne 0 ]]; then
+    log_error "quick_continue: 生成推进选项失败，退出码: $OPTIONS_EXIT_CODE"
+    exit "$OPTIONS_EXIT_CODE"
+  fi
+
+  SESSION_ID="$(printf '%s\n' "$OPTIONS_OUTPUT" | sed -n 's/^Session ID: //p' | head -n 1)"
+  RECOMMENDED_OPTION="$(printf '%s\n' "$OPTIONS_OUTPUT" | sed -n 's/^Recommended Option: //p' | head -n 1)"
+  if [[ -z "$SESSION_ID" ]]; then
+    log_error "quick_continue: 未能从 options 输出中解析出 Session ID。"
+    exit 1
+  fi
+
+  SELECTED_OPTION="$(prompt_optional_value "Progression option (number or option_id)" "$RECOMMENDED_OPTION")"
+  GUIDED_FEEDBACK="$(prompt_optional_value "Guided feedback (optional)" "$DEFAULT_GUIDED_FEEDBACK")"
+
+  NEXT_ARGS=(
+    "$PYTHON_EXE" "$PROJECT_ROOT/app.py" next
+    --project "$PROJECT_PATH"
+    --config "$TEMP_CONFIG"
+    --count "1"
+    --progression-session "$SESSION_ID"
+    --progression-option "$SELECTED_OPTION"
+  )
+  if [[ -n "$GUIDED_FEEDBACK" ]]; then
+    NEXT_ARGS+=(--progression-feedback "$GUIDED_FEEDBACK")
+  fi
+else
+  NEXT_ARGS=(
+    "$PYTHON_EXE" "$PROJECT_ROOT/app.py" next
+    --project "$PROJECT_PATH"
+    --config "$TEMP_CONFIG"
+    --count "$CHAPTER_COUNT"
+  )
+
+  if [[ -n "$USER_REQUEST" ]]; then
+    NEXT_ARGS+=(--user-request "$USER_REQUEST")
+  fi
 fi
 
 set +e

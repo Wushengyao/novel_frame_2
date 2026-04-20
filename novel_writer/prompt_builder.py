@@ -316,6 +316,97 @@ def build_batch_chapter_plan_prompt(
 """
 
 
+def build_progression_options_prompt(
+    data: dict,
+    recent_text: str,
+    next_context: dict,
+    *,
+    user_request: str = "",
+    option_count: int = 4,
+    planning_mode: str = "",
+) -> str:
+    project = _to_block(data.get("project", {}))
+    world = _to_block(data.get("world", {}))
+    characters = _to_block(data.get("characters", {}))
+    plot_state = _to_block(data.get("plot_state", {}))
+    style = _to_block(data.get("style", {}))
+    story_request = data.get("project", {}).get("story_request", "") or data.get("story_request", "")
+    current_volume = _to_block(next_context.get("volume", {}))
+    current_chapter = _to_block(next_context.get("chapter", {}))
+    user_request_block = user_request.strip() or "无额外要求。请仅基于当前状态给出下一章推进选项。"
+
+    return f"""你是长篇连载小说的剧情推进顾问。请为“下一章”设计若干互斥但都合理的推进方案，供用户二选一或多选一中的单选。
+
+【项目】{project}
+
+【用户最初的故事需求】{story_request}
+
+【世界观】{world}
+
+【人物】{characters}
+
+【当前剧情状态】{plot_state}
+
+【当前 planning mode】{planning_mode}
+
+【所属卷与待写章节上下文】
+{{
+  "volume": {current_volume},
+  "chapter": {current_chapter}
+}}
+
+【最近正文】
+{recent_text}
+
+【用户这次想看的方向】
+{user_request_block}
+
+【需要给出的选项数】
+{option_count}
+
+要求：
+1. 输出必须是合法 JSON
+2. 必须只针对“下一章”给方案，不要把两三章后的核心剧情提前塞进来
+3. 必须返回恰好 {option_count} 个互斥选项，每个选项都应代表这一章的不同重心或不同推进路径
+4. 方案要尊重既有设定、最近正文、当前剧情状态和下一章上下文，不要推翻已有章纲，只能细化和调整重心
+5. 每个选项都必须包含：
+   - `option_id`
+   - `title`
+   - `summary`
+   - `why_now`
+   - `key_events`
+   - `writer_guidance`
+   - `chapter_outline`
+   - `recommended`
+6. `chapter_outline` 必须包含 `title`、`summary`、`goal`、`key_events`
+7. `key_events` 和 `chapter_outline.key_events` 都要给出 2 到 5 个条目
+8. 只能有一个选项 `recommended=true`，并且 `recommended_option_id` 必须与该选项一致
+9. 不要输出解释，不要输出 Markdown
+
+输出 JSON：
+{{
+  "recommended_option_id": "option_1",
+  "options": [
+    {{
+      "option_id": "option_1",
+      "title": "",
+      "summary": "",
+      "why_now": "",
+      "key_events": [],
+      "writer_guidance": "",
+      "chapter_outline": {{
+        "title": "",
+        "summary": "",
+        "goal": "",
+        "key_events": []
+      }},
+      "recommended": true
+    }}
+  ]
+}}
+"""
+
+
 def build_writer_prompt(
     data: dict,
     recent_text: str,

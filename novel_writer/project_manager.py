@@ -8,10 +8,10 @@ import re
 import shutil
 import tempfile
 from copy import deepcopy
-from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from common_utils import emit_progress, extract_json_object, utc_now
 from console_logger import log_error, log_info, log_success, log_warning
 from llm_client import generate_text_with_metadata
 from prompt_builder import build_init_prompt
@@ -90,22 +90,6 @@ ROLLBACK_SUMMARY_KEYS = (
     "next_chapter_goal",
 )
 
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def _emit_progress(progress_callback, stage: str, message: str) -> None:
-    if progress_callback is None:
-        return
-    progress_callback(
-        {
-            "stage": stage,
-            "message": message,
-        }
-    )
-
-
 def normalize_planning_mode(mode: object, default: str = DEFAULT_PLANNING_MODE) -> str:
     normalized = str(mode or "").strip().lower()
     if normalized in PLANNING_MODES:
@@ -181,12 +165,12 @@ def update_project_stats(project_path: str, phase: str, success: bool, usage: di
     _merge_usage_stats(stats["by_phase"][phase], success=success, usage=usage)
 
     project_data["stats"] = stats
-    project_data["updated_at"] = _utc_now()
+    project_data["updated_at"] = utc_now()
     save_json(str(project_file), project_data)
 
 
 def _build_project_id() -> str:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = utc_now().replace("-", "").replace(":", "").replace("+00:00", "Z")
     return f"{timestamp}_{uuid4().hex[:8]}"
 
 
@@ -201,36 +185,6 @@ def _resolve_project_path(config_file: Path, config: dict, project_id: str) -> P
     if project_path.exists() and (project_path / "project.json").exists():
         project_path = project_path.parent / f"{project_path.name}_{project_id}"
     return project_path
-
-
-def _extract_json_object(text: str) -> dict:
-    text = text.strip()
-    candidates = [text]
-
-    if "```json" in text:
-        start = text.find("```json") + len("```json")
-        end = text.find("```", start)
-        if end != -1:
-            candidates.append(text[start:end].strip())
-    elif "```" in text:
-        start = text.find("```") + len("```")
-        end = text.find("```", start)
-        if end != -1:
-            candidates.append(text[start:end].strip())
-
-    brace_start = text.find("{")
-    brace_end = text.rfind("}")
-    if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
-        candidates.append(text[brace_start : brace_end + 1])
-
-    for candidate in candidates:
-        try:
-            data = json.loads(candidate)
-            if isinstance(data, dict):
-                return data
-        except json.JSONDecodeError:
-            continue
-    raise ValueError("Could not parse JSON from init response.")
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -420,7 +374,9 @@ def _generate_initial_story_data(config: dict) -> tuple[dict, dict]:
         try:
             _merge_usage_stats(init_stats["total"], success=True, usage=metadata.get("usage"))
             _merge_usage_stats(init_stats["by_phase"]["init"], success=True, usage=metadata.get("usage"))
-            generated_data = _normalize_init_result(_extract_json_object(response_text))
+            generated_data = _normalize_init_result(
+                extract_json_object(response_text, "Could not parse JSON from init response.")
+            )
             log_success("初始化设定: 模型返回成功，已解析初始化设定。")
             break
         except Exception as exc:  # pragma: no cover - resilience path
@@ -477,20 +433,20 @@ def load_json(path: str) -> dict:
 
 def init_project(config_path: str, progress_callback=None) -> str:
     log_info(f"init_project: loading config {config_path}")
-    _emit_progress(progress_callback, "init_config", "Loading project config")
+    emit_progress(progress_callback, "init_config", "Loading project config")
     config_file = Path(config_path).resolve()
     config = load_json(str(config_file))
     project_id = config.get("project_id") or _build_project_id()
     project_path = _resolve_project_path(config_file, config, project_id)
     log_info(f"init_project: creating project directory {project_path}")
-    _emit_progress(progress_callback, "init_dirs", "Creating project directories")
+    emit_progress(progress_callback, "init_dirs", "Creating project directories")
     project_path.mkdir(parents=True, exist_ok=True)
     (project_path / "chapters").mkdir(exist_ok=True)
     (project_path / "summaries").mkdir(exist_ok=True)
     (project_path / "illustrations").mkdir(exist_ok=True)
     log_success("init_project: base directories ready")
 
-    _emit_progress(progress_callback, "init_story", "Generating initial story data")
+    emit_progress(progress_callback, "init_story", "Generating initial story data")
     generated_data, init_meta = _generate_initial_story_data(config)
     world = generated_data["world"]
     characters = generated_data["characters"]
@@ -505,15 +461,15 @@ def init_project(config_path: str, progress_callback=None) -> str:
         "project_path": str(project_path),
         "story_request": config.get("story_request", ""),
         "planning_mode": normalize_planning_mode(config.get("planning_mode")),
-        "created_at": _utc_now(),
-        "updated_at": _utc_now(),
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
         "chapter_count": 0,
         "init": init_meta,
         "stats": init_meta.get("stats") or _build_project_stats(),
         "llm_config": _build_persisted_llm_config(config),
     }
 
-    _emit_progress(progress_callback, "init_files", "Writing project files")
+    emit_progress(progress_callback, "init_files", "Writing project files")
     save_json(str(project_path / "project.json"), project_data)
     save_json(str(project_path / "world.json"), world)
     save_json(str(project_path / "characters.json"), characters)
@@ -528,7 +484,7 @@ def init_project(config_path: str, progress_callback=None) -> str:
     planning_mode = normalize_planning_mode(project_data.get("planning_mode"))
     if planning_mode in {PLANNING_MODE_VOLUME, PLANNING_MODE_CHAPTER}:
         log_info("init_project: generating volume outlines")
-        _emit_progress(progress_callback, "init_volume_outline", "Generating volume outlines")
+        emit_progress(progress_callback, "init_volume_outline", "Generating volume outlines")
         regenerate_volume_outline(
             str(project_path),
             llm_config,
@@ -538,7 +494,7 @@ def init_project(config_path: str, progress_callback=None) -> str:
         log_success("init_project: volume outlines ready")
     if planning_mode == PLANNING_MODE_CHAPTER:
         log_info("init_project: generating chapter outlines")
-        _emit_progress(progress_callback, "init_chapter_outline", "Generating chapter outlines")
+        emit_progress(progress_callback, "init_chapter_outline", "Generating chapter outlines")
         regenerate_chapter_outline(
             str(project_path),
             llm_config,
@@ -548,11 +504,11 @@ def init_project(config_path: str, progress_callback=None) -> str:
         )
         log_success("init_project: chapter outlines ready")
 
-    _emit_progress(progress_callback, "init_snapshot", "Saving initial snapshot")
+    emit_progress(progress_callback, "init_snapshot", "Saving initial snapshot")
     snapshot_path = create_state_snapshot(str(project_path), chapter_count=0, note="post-init checkpoint")
     log_success(f"init_project: snapshot saved to {snapshot_path}")
     log_success(f"init_project: project initialized at {project_path}")
-    _emit_progress(progress_callback, "init_done", "Project initialization completed")
+    emit_progress(progress_callback, "init_done", "Project initialization completed")
     return str(project_path)
 
 
@@ -635,7 +591,7 @@ def create_state_snapshot(project_path: str, chapter_count: int | None = None, n
         str(snapshot_dir / "snapshot.json"),
         {
             "chapter_count": normalized_count,
-            "created_at": _utc_now(),
+            "created_at": utc_now(),
             "note": note.strip(),
             "files": copied_files,
         },
@@ -756,7 +712,7 @@ def _update_project_chapter_count(project_path: str, chapter_count: int) -> None
     project_file = Path(project_path) / "project.json"
     project_data = load_json(str(project_file))
     project_data["chapter_count"] = max(0, int(chapter_count))
-    project_data["updated_at"] = _utc_now()
+    project_data["updated_at"] = utc_now()
     save_json(str(project_file), project_data)
 
 
@@ -822,7 +778,7 @@ def save_chapter(project_path: str, text: str) -> str:
     project_file = base / "project.json"
     project_data = load_json(str(project_file))
     project_data["chapter_count"] = next_index
-    project_data["updated_at"] = _utc_now()
+    project_data["updated_at"] = utc_now()
     save_json(str(project_file), project_data)
     return str(chapter_path)
 

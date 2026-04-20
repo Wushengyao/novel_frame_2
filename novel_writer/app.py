@@ -3,34 +3,32 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
 from copy import deepcopy
-from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from chapter_context import get_next_context_for_mode
+from common_utils import emit_progress, utc_now
 from console_logger import log_error, log_info, log_success, log_warning
 from illustration_manager import illustrate_chapters, illustrate_project_assets
 from llm_client import generate_text_with_metadata
 from outline_manager import (
-    ensure_project_outlines,
     find_next_chapter_context,
     get_outline_status,
-    load_outlines,
-    normalize_outlines,
     regenerate_chapter_outline,
     regenerate_volume_outline,
     sync_outline_progress,
 )
-from prompt_builder import build_batch_chapter_plan_prompt, build_writer_prompt
+from planning_service import plan_batch_chapters
+from progression_manager import generate_progression_options, resolve_progression_selection
+from prompt_builder import build_writer_prompt
 from project_manager import (
-    DEFAULT_PLANNING_MODE,
     PLANNING_MODE_CHAPTER,
     PLANNING_MODE_NONE,
     PLANNING_MODE_VOLUME,
@@ -47,372 +45,8 @@ from project_manager import (
     save_chapter,
     update_project_stats,
 )
+from runtime_config import extract_llm_config, load_runtime_config
 from state_updater import update_plot_state
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _emit_progress(progress_callback, stage: str, message: str, **extra) -> None:
-    if progress_callback is None:
-        return
-    payload = {
-        "stage": stage,
-        "message": message,
-    }
-    payload.update(extra)
-    progress_callback(payload)
-
-
-def _extract_json_object(text: str) -> dict:
-    text = text.strip()
-    candidates = [text]
-
-    if "```json" in text:
-        start = text.find("```json") + len("```json")
-        end = text.find("```", start)
-        if end != -1:
-            candidates.append(text[start:end].strip())
-    elif "```" in text:
-        start = text.find("```") + len("```")
-        end = text.find("```", start)
-        if end != -1:
-            candidates.append(text[start:end].strip())
-
-    brace_start = text.find("{")
-    brace_end = text.rfind("}")
-    if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
-        candidates.append(text[brace_start : brace_end + 1])
-
-    for candidate in candidates:
-        try:
-            data = json.loads(candidate)
-            if isinstance(data, dict):
-                return data
-        except json.JSONDecodeError:
-            continue
-    raise ValueError("Could not parse JSON from batch chapter plan response.")
-
-
-def _safe_int(value: object, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _resolve_planning_mode(config: dict, project_data: dict | None = None) -> str:
-    project = (project_data or {}).get("project") or {}
-    return normalize_planning_mode(
-        config.get("planning_mode") or project.get("planning_mode"),
-        default=DEFAULT_PLANNING_MODE,
-    )
-
-
-def _ensure_volume_outlines(project_path: str, config: dict, progress_callback=None) -> dict:
-    outlines = load_outlines(project_path)
-    if not outlines.get("volumes"):
-        log_warning("next_chapter: volume outlines missing, regenerating")
-        _emit_progress(progress_callback, "outline_prepare", "正在补生成分卷大纲")
-        return regenerate_volume_outline(
-            project_path,
-            config,
-            user_request="",
-            progress_callback=progress_callback,
-        )
-    return normalize_outlines(outlines)
-
-
-def _collect_upcoming_chapter_contexts(outlines: dict, written_chapter_count: int, count: int) -> list[dict]:
-    start_number = written_chapter_count + 1
-    end_number = written_chapter_count + count
-    contexts = []
-    for volume in outlines.get("volumes", []):
-        for chapter in volume.get("chapters", []):
-            chapter_number = _safe_int(chapter.get("chapter_number"), 0)
-            if start_number <= chapter_number <= end_number:
-                contexts.append(
-                    {
-                        "volume": deepcopy(volume),
-                        "chapter": deepcopy(chapter),
-                    }
-                )
-    return contexts
-
-
-def _collect_upcoming_volume_contexts(outlines: dict, written_chapter_count: int, count: int) -> list[dict]:
-    start_number = written_chapter_count + 1
-    end_number = written_chapter_count + count
-    normalized = normalize_outlines(outlines)
-    contexts = []
-    chapter_number = 0
-    for volume in normalized.get("volumes", []):
-        planned_count = max(1, _safe_int(volume.get("planned_chapter_count"), 1))
-        for chapter_in_volume in range(1, planned_count + 1):
-            chapter_number += 1
-            if not (start_number <= chapter_number <= end_number):
-                continue
-            contexts.append(
-                {
-                    "volume": deepcopy(volume),
-                    "chapter": {
-                        "chapter_number": chapter_number,
-                        "chapter_in_volume": chapter_in_volume,
-                        "title": "",
-                        "summary": str(volume.get("summary", "") or "").strip(),
-                        "goal": str(volume.get("story_goal", "") or "").strip(),
-                        "key_events": [],
-                        "status": "planned",
-                    },
-                }
-            )
-    return contexts
-
-
-def _collect_upcoming_freeform_contexts(project_data: dict, count: int) -> list[dict]:
-    current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
-    next_goal = str(project_data.get("plot_state", {}).get("next_chapter_goal", "") or "").strip()
-    contexts = []
-    for offset in range(1, count + 1):
-        contexts.append(
-            {
-                "volume": {},
-                "chapter": {
-                    "chapter_number": current_chapter_count + offset,
-                    "chapter_in_volume": offset,
-                    "title": "",
-                    "summary": next_goal,
-                    "goal": next_goal,
-                    "key_events": [],
-                    "status": "planned",
-                },
-            }
-        )
-    return contexts
-
-
-def _get_next_context_for_mode(
-    project_path: str,
-    config: dict,
-    planning_mode: str,
-    progress_callback=None,
-) -> tuple[dict, dict]:
-    project_data = load_project(project_path)
-    current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
-
-    if planning_mode == PLANNING_MODE_CHAPTER:
-        outlines = ensure_project_outlines(
-            project_path,
-            config,
-            sync_progress=False,
-            progress_callback=progress_callback,
-        )
-        project_data["outlines"] = outlines
-        next_context = find_next_chapter_context(outlines, current_chapter_count)
-        if next_context is None:
-            raise ValueError("No usable next chapter outline was found. Regenerate chapter outlines first.")
-        return project_data, next_context
-
-    if planning_mode == PLANNING_MODE_VOLUME:
-        outlines = _ensure_volume_outlines(project_path, config, progress_callback=progress_callback)
-        project_data["outlines"] = outlines
-        upcoming_contexts = _collect_upcoming_volume_contexts(outlines, current_chapter_count, 1)
-        if not upcoming_contexts:
-            raise ValueError("No usable next volume outline was found. Regenerate volume outlines first.")
-        return project_data, upcoming_contexts[0]
-
-    return project_data, {"volume": {}, "chapter": {}}
-
-
-def _fallback_batch_plan(
-    upcoming_contexts: list[dict],
-    user_request: str,
-    *,
-    allow_outline_override: bool,
-) -> dict[int, dict]:
-    request = user_request.strip()
-    total = len(upcoming_contexts)
-    if not request or total == 0:
-        return {}
-
-    plan_by_number = {}
-    for index, context in enumerate(upcoming_contexts):
-        chapter = deepcopy(context["chapter"])
-        if total == 1:
-            guidance = f'Use "{request}" as the core focus of this chapter and integrate it naturally.'
-            role = "direct"
-            focus = request
-        elif index == 0:
-            guidance = f'This chapter should set up "{request}" through preparation, motivation, division of work, or obstacles.'
-            role = "setup"
-            focus = f"setup for {request}"
-        elif index == total - 1:
-            guidance = f'This chapter should deliver a meaningful payoff for "{request}" without repeating earlier setup beats.'
-            role = "payoff"
-            focus = f"payoff for {request}"
-        else:
-            guidance = f'This chapter should advance "{request}" with new progress, setbacks, adjustments, or character interaction.'
-            role = "progress"
-            focus = f"progress on {request}"
-
-        chapter["request_focus"] = focus
-        chapter["request_role"] = role
-        chapter["writer_guidance"] = guidance
-        plan_by_number[_safe_int(chapter.get("chapter_number"), 0)] = {
-            "chapter_outline": chapter if allow_outline_override else None,
-            "user_request": guidance,
-        }
-    return plan_by_number
-
-
-def _normalize_batch_plan_response(
-    data: dict,
-    upcoming_contexts: list[dict],
-    *,
-    allow_outline_override: bool,
-) -> dict[int, dict]:
-    raw_chapters = data.get("chapters")
-    if not isinstance(raw_chapters, list):
-        raise ValueError("batch plan response missing chapters list")
-
-    expected_numbers = {
-        _safe_int(context["chapter"].get("chapter_number"), 0): context
-        for context in upcoming_contexts
-    }
-    if len(raw_chapters) != len(expected_numbers):
-        raise ValueError("batch plan chapter count does not match requested count")
-
-    raw_by_number = {}
-    for item in raw_chapters:
-        if not isinstance(item, dict):
-            raise ValueError("batch plan item must be an object")
-        chapter_number = _safe_int(item.get("chapter_number"), 0)
-        if chapter_number not in expected_numbers:
-            raise ValueError(f"unexpected chapter_number in batch plan: {chapter_number}")
-        raw_by_number[chapter_number] = item
-
-    if len(raw_by_number) != len(expected_numbers):
-        raise ValueError("batch plan contains duplicate or missing chapter numbers")
-
-    normalized = {}
-    for chapter_number, context in expected_numbers.items():
-        raw = raw_by_number[chapter_number]
-        merged_outline = deepcopy(context["chapter"])
-        for key in ("title", "summary", "goal", "request_focus", "request_role", "writer_guidance"):
-            value = str(raw.get(key, "") or "").strip()
-            if value:
-                merged_outline[key] = value
-
-        key_events = raw.get("key_events") or []
-        if not isinstance(key_events, list):
-            key_events = [key_events]
-        normalized_events = [str(item).strip() for item in key_events if str(item).strip()]
-        if normalized_events:
-            merged_outline["key_events"] = normalized_events[:5]
-
-        user_request = str(raw.get("writer_guidance") or raw.get("request_focus") or "").strip()
-        normalized[chapter_number] = {
-            "chapter_outline": merged_outline if allow_outline_override else None,
-            "user_request": user_request,
-        }
-    return normalized
-
-
-def _plan_batch_chapters(
-    project_path: str,
-    config: dict,
-    count: int,
-    user_request: str,
-    progress_callback=None,
-) -> tuple[str, dict[int, dict]]:
-    request = user_request.strip()
-    project_data = load_project(project_path)
-    planning_mode = _resolve_planning_mode(config, project_data)
-    if count <= 1 or not request:
-        return planning_mode, {}
-
-    log_info(
-        f"next_chapters: planning batch request for next {count} chapters "
-        f"project={project_path} mode={planning_mode}"
-    )
-    _emit_progress(progress_callback, "chapter_batch_plan", "正在规划接下来几章如何分配你想看的情节")
-
-    if planning_mode == PLANNING_MODE_CHAPTER:
-        outlines = ensure_project_outlines(
-            project_path,
-            config,
-            sync_progress=False,
-            progress_callback=progress_callback,
-        )
-        project_data["outlines"] = outlines
-        current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
-        upcoming_contexts = _collect_upcoming_chapter_contexts(outlines, current_chapter_count, count)
-        allow_outline_override = True
-    elif planning_mode == PLANNING_MODE_VOLUME:
-        outlines = _ensure_volume_outlines(project_path, config, progress_callback=progress_callback)
-        project_data["outlines"] = outlines
-        current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
-        upcoming_contexts = _collect_upcoming_volume_contexts(outlines, current_chapter_count, count)
-        allow_outline_override = False
-    else:
-        upcoming_contexts = _collect_upcoming_freeform_contexts(project_data, count)
-        allow_outline_override = False
-
-    if len(upcoming_contexts) != count:
-        log_warning(
-            "next_chapters: could not collect enough upcoming chapter contexts, "
-            "falling back to heuristic request distribution"
-        )
-        return planning_mode, _fallback_batch_plan(
-            upcoming_contexts,
-            request,
-            allow_outline_override=allow_outline_override,
-        )
-
-    compact_contexts = []
-    for context in upcoming_contexts:
-        volume = context.get("volume") or {}
-        chapter = context.get("chapter") or {}
-        compact_contexts.append(
-            {
-                "volume_number": volume.get("volume_number", 0),
-                "volume_title": volume.get("title", ""),
-                "volume_summary": volume.get("summary", ""),
-                "chapter_number": chapter.get("chapter_number", 0),
-                "chapter_in_volume": chapter.get("chapter_in_volume", 0),
-                "title": chapter.get("title", ""),
-                "summary": chapter.get("summary", ""),
-                "goal": chapter.get("goal", ""),
-                "key_events": chapter.get("key_events", []),
-            }
-        )
-
-    prompt = build_batch_chapter_plan_prompt(project_data, compact_contexts, request)
-
-    try:
-        response_text, metadata = generate_text_with_metadata(prompt, config)
-        update_project_stats(
-            project_path,
-            phase="outline",
-            success=True,
-            usage=metadata.get("usage"),
-        )
-        plan = _normalize_batch_plan_response(
-            _extract_json_object(response_text),
-            upcoming_contexts,
-            allow_outline_override=allow_outline_override,
-        )
-        log_success(f"next_chapters: batch request planned for {len(plan)} chapters")
-        return planning_mode, plan
-    except Exception as exc:
-        update_project_stats(project_path, phase="outline", success=False, usage=None)
-        log_warning(f"next_chapters: batch planning failed, fallback to heuristic. reason: {exc}")
-        return planning_mode, _fallback_batch_plan(
-            upcoming_contexts,
-            request,
-            allow_outline_override=allow_outline_override,
-        )
 
 
 def _add_illustration_arguments(parser: argparse.ArgumentParser) -> None:
@@ -466,7 +100,7 @@ def _launch_background_illustration_job(
 ) -> dict:
     jobs_dir = Path(project_path) / "illustrations" / "jobs"
     jobs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = jobs_dir / f"illustrate_{_utc_now()}.log"
+    log_path = jobs_dir / f"illustrate_{utc_now().replace(':', '').replace('-', '').replace('+00:00', 'Z')}.log"
 
     command = [
         sys.executable,
@@ -536,15 +170,15 @@ def run_next_chapter(
 ) -> str:
     log_info(f"next_chapter: prepare project={project_path}")
     effective_mode = normalize_planning_mode(planning_mode or config.get("planning_mode"))
-    _emit_progress(progress_callback, "chapter_prepare", f"Preparing next chapter with planning mode: {effective_mode}")
-    project_data, next_context = _get_next_context_for_mode(
+    emit_progress(progress_callback, "chapter_prepare", f"Preparing next chapter with planning mode: {effective_mode}")
+    project_data, next_context = get_next_context_for_mode(
         project_path,
         config,
         effective_mode,
         progress_callback=progress_callback,
     )
     current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
-    _emit_progress(progress_callback, "chapter_snapshot_prepare", "Saving pre-write snapshot")
+    emit_progress(progress_callback, "chapter_snapshot_prepare", "Saving pre-write snapshot")
     ensure_state_snapshot(
         project_path,
         chapter_count=current_chapter_count,
@@ -580,7 +214,7 @@ def run_next_chapter(
 
     try:
         log_info("next_chapter: requesting model output")
-        _emit_progress(progress_callback, "chapter_write", "Generating chapter text")
+        emit_progress(progress_callback, "chapter_write", "Generating chapter text")
         response_text, metadata = generate_text_with_metadata(prompt, config)
     except Exception:
         update_project_stats(project_path, phase="writer", success=False, usage=None)
@@ -594,23 +228,50 @@ def run_next_chapter(
         usage=metadata.get("usage"),
     )
     chapter_text = normalize_chapter_text(response_text)
-    _emit_progress(progress_callback, "chapter_save", "Saving chapter file")
+    emit_progress(progress_callback, "chapter_save", "Saving chapter file")
     chapter_path = save_chapter(project_path, chapter_text)
     log_success(f"next_chapter: saved to {chapter_path}")
 
     log_info("next_chapter: updating plot_state")
-    _emit_progress(progress_callback, "chapter_summary", "Updating plot state")
+    emit_progress(progress_callback, "chapter_summary", "Updating plot state")
     update_plot_state(project_path, chapter_text, config, progress_callback=progress_callback)
     if effective_mode != PLANNING_MODE_NONE:
         log_info("next_chapter: syncing outline progress")
-        _emit_progress(progress_callback, "chapter_outline_sync", "Syncing outline progress")
+        emit_progress(progress_callback, "chapter_outline_sync", "Syncing outline progress")
         sync_outline_progress(project_path)
 
-    _emit_progress(progress_callback, "chapter_snapshot", "Saving post-write snapshot")
+    emit_progress(progress_callback, "chapter_snapshot", "Saving post-write snapshot")
     snapshot_path = create_state_snapshot(project_path, note="post-write checkpoint")
     log_success(f"next_chapter: snapshot saved to {snapshot_path}")
-    _emit_progress(progress_callback, "chapter_done", f"Chapter completed: {Path(chapter_path).name}")
+    emit_progress(progress_callback, "chapter_done", f"Chapter completed: {Path(chapter_path).name}")
     return chapter_path
+
+
+def run_next_chapter_from_progression(
+    project_path: str,
+    config: dict,
+    *,
+    progression_session: str,
+    progression_option: str,
+    progression_feedback: str = "",
+    progress_callback=None,
+) -> str:
+    selection = resolve_progression_selection(
+        project_path,
+        progression_session,
+        progression_option,
+        selection_feedback=progression_feedback,
+    )
+    return run_next_chapter(
+        project_path,
+        config,
+        user_request=selection["user_request"],
+        chapter_outline_override=selection.get("chapter_outline_override"),
+        planning_mode=selection.get("planning_mode"),
+        progress_callback=progress_callback,
+    )
+
+
 def run_next_chapters(
     project_path: str,
     config: dict,
@@ -621,7 +282,7 @@ def run_next_chapters(
     if count < 1:
         raise ValueError("count must be at least 1.")
     starting_chapter_count = int(load_project(project_path)["project"].get("chapter_count", 0) or 0)
-    planning_mode, batch_plan = _plan_batch_chapters(
+    planning_mode, batch_plan = plan_batch_chapters(
         project_path,
         config,
         count,
@@ -637,7 +298,7 @@ def run_next_chapters(
             if plan_entry
             else user_request
         )
-        _emit_progress(
+        emit_progress(
             progress_callback,
             "chapter_batch",
             f"Writing chapter {index + 1}/{count}",
@@ -654,7 +315,7 @@ def run_next_chapters(
                 progress_callback=progress_callback,
             )
         )
-        _emit_progress(
+        emit_progress(
             progress_callback,
             "chapter_batch_done",
             f"Chapter {index + 1}/{count} completed",
@@ -732,34 +393,6 @@ def _print_status(project_path: str) -> None:
         print("Open Threads:")
         for item in open_threads:
             print(f"- {item}")
-
-
-def _load_runtime_config(project_path: str) -> dict:
-    project = load_project(project_path)["project"]
-    return {
-        **project.get("llm_config", {}),
-        "planning_mode": normalize_planning_mode(project.get("planning_mode")),
-    }
-
-
-def _extract_llm_config(config_path: str) -> dict:
-    config_file = Path(config_path).resolve()
-    raw = load_json(str(config_file))
-    return {
-        "model_provider": raw.get("model_provider", "openai_compatible"),
-        "model": raw.get("model") or raw.get("model_name", ""),
-        "model_name": raw.get("model_name") or raw.get("model", ""),
-        "api_base": raw.get("api_base", ""),
-        "api_key": raw.get("api_key", ""),
-        "temperature": raw.get("temperature", 0.8),
-        "max_tokens": raw.get("max_tokens", 4000),
-        "timeout": raw.get("timeout", 120),
-        "thinking_level": raw.get("thinking_level"),
-        "thinking_budget": raw.get("thinking_budget"),
-        "planning_mode": normalize_planning_mode(raw.get("planning_mode")),
-    }
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Novel writer MVP")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -772,6 +405,9 @@ def main() -> None:
     next_parser.add_argument("--config", help="Optional config.json to override saved LLM settings")
     next_parser.add_argument("--count", type=int, default=1, help="Generate multiple chapters sequentially")
     next_parser.add_argument("--user-request", default="", help="Optional user preference for this batch")
+    next_parser.add_argument("--progression-session", default="", help="Guided progression session id")
+    next_parser.add_argument("--progression-option", default="", help="Guided progression option number or option_id")
+    next_parser.add_argument("--progression-feedback", default="", help="Optional refinement for the selected guided option")
     next_parser.add_argument(
         "--planning-mode",
         choices=(PLANNING_MODE_NONE, PLANNING_MODE_VOLUME, PLANNING_MODE_CHAPTER),
@@ -834,6 +470,17 @@ def main() -> None:
     outline_parser.add_argument("--volume", type=int, help="Optional volume number for chapter outline generation")
     outline_parser.add_argument("--user-request", default="", help="Optional extra plot requirements")
 
+    options_parser = subparsers.add_parser("options", help="Generate guided next-chapter progression options")
+    options_parser.add_argument("--project", required=True, help="Path to novel_project")
+    options_parser.add_argument("--config", help="Optional config.json to override saved LLM settings")
+    options_parser.add_argument("--user-request", default="", help="Optional preference for guided options")
+    options_parser.add_argument("--option-count", type=int, default=4, choices=(3, 4, 5), help="How many options to generate")
+    options_parser.add_argument(
+        "--planning-mode",
+        choices=(PLANNING_MODE_NONE, PLANNING_MODE_VOLUME, PLANNING_MODE_CHAPTER),
+        help="Override planning mode for this run",
+    )
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -847,15 +494,37 @@ def main() -> None:
         if args.count < 1:
             parser.error("--count must be at least 1")
 
-        config = _extract_llm_config(args.config) if args.config else _load_runtime_config(args.project)
+        has_progression = bool(
+            args.progression_session or args.progression_option or args.progression_feedback
+        )
+        if has_progression:
+            if args.count != 1:
+                parser.error("guided progression only supports --count 1; use direct next for batch writing")
+            if not args.progression_session or not args.progression_option:
+                parser.error("guided progression requires both --progression-session and --progression-option")
+            if args.user_request:
+                parser.error("--user-request cannot be combined with guided progression selection")
+
+        config = extract_llm_config(args.config) if args.config else load_runtime_config(args.project)
         if args.planning_mode:
             config["planning_mode"] = args.planning_mode
-        chapter_paths = run_next_chapters(
-            args.project,
-            config,
-            args.count,
-            user_request=args.user_request,
-        )
+        if has_progression:
+            chapter_paths = [
+                run_next_chapter_from_progression(
+                    args.project,
+                    config,
+                    progression_session=args.progression_session,
+                    progression_option=args.progression_option,
+                    progression_feedback=args.progression_feedback,
+                )
+            ]
+        else:
+            chapter_paths = run_next_chapters(
+                args.project,
+                config,
+                args.count,
+                user_request=args.user_request,
+            )
         print(f"Generated chapters: {len(chapter_paths)}")
         for chapter_path in chapter_paths:
             print(f"- {chapter_path}")
@@ -894,7 +563,7 @@ def main() -> None:
 
     if args.command == "illustrate":
         log_info("cli: illustrate")
-        config = _extract_llm_config(args.config) if args.config else None
+        config = extract_llm_config(args.config) if args.config else None
         chapter_refs = list(args.chapter_ref or [])
         if args.all:
             chapters_dir = Path(args.project) / "chapters"
@@ -969,7 +638,7 @@ def main() -> None:
 
     if args.command == "outline":
         log_info(f"cli: outline stage={args.stage}")
-        config = _extract_llm_config(args.config) if args.config else _load_runtime_config(args.project)
+        config = extract_llm_config(args.config) if args.config else load_runtime_config(args.project)
         if args.stage in {"volumes", "all"}:
             outlines = regenerate_volume_outline(
                 args.project,
@@ -998,6 +667,36 @@ def main() -> None:
                     f"Vol.{volume.get('volume_number', '?')} {volume.get('title', '')} / "
                     f"Ch.{chapter.get('chapter_number', '?')} {chapter.get('title', '')}"
                 )
+        return
+
+    if args.command == "options":
+        log_info("cli: options")
+        config = extract_llm_config(args.config) if args.config else load_runtime_config(args.project)
+        if args.planning_mode:
+            config["planning_mode"] = args.planning_mode
+        session = generate_progression_options(
+            args.project,
+            config,
+            user_request=args.user_request,
+            option_count=args.option_count,
+            runtime_overrides={"planning_mode": args.planning_mode} if args.planning_mode else None,
+        )
+        print(f"Session ID: {session.get('session_id', '')}")
+        print(f"Target Chapter: {session.get('target_chapter_number', '')}")
+        print(f"Recommended Option: {session.get('recommended_option_id', '')}")
+        for index, option in enumerate(session.get("options", []), start=1):
+            marker = " [recommended]" if option.get("recommended") else ""
+            print(f"Option {index} [{option.get('option_id', '')}]{marker}: {option.get('title', '')}")
+            print(f"  Summary: {option.get('summary', '')}")
+            print(f"  Why Now: {option.get('why_now', '')}")
+            print(f"  Key Events: {'; '.join(option.get('key_events', []))}")
+            print(f"  Writer Guidance: {option.get('writer_guidance', '')}")
+            outline = option.get("chapter_outline") or {}
+            print(
+                "  Chapter Outline: "
+                f"title={outline.get('title', '')}; "
+                f"goal={outline.get('goal', '')}"
+            )
         return
 
     parser.error(f"Unsupported command: {args.command}")

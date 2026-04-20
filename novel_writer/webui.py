@@ -11,15 +11,21 @@ import tempfile
 import threading
 import traceback
 import urllib.parse
-from datetime import datetime, timezone
 from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import uuid4
 
-from app import run_next_chapters
+from app import run_next_chapter_from_progression, run_next_chapters
+from common_utils import utc_now
 from illustration_manager import get_illustration_record, illustrate_chapters, list_illustration_records
+from progression_manager import (
+    ensure_fresh_progression_session,
+    generate_progression_options,
+    get_latest_active_progression_session,
+    load_progression_session,
+)
 from project_manager import (
     DEFAULT_PLANNING_MODE,
     PLANNING_MODE_CHAPTER,
@@ -32,6 +38,20 @@ from project_manager import (
     normalize_planning_mode,
     rollback_project,
 )
+from runtime_config import (
+    WEB_SELECTABLE_PROVIDERS,
+    api_key_for_provider as shared_api_key_for_provider,
+    build_runtime_config as shared_build_runtime_config,
+    default_api_base_for_provider as shared_default_api_base_for_provider,
+    default_model_for_provider as shared_default_model_for_provider,
+    default_thinking_level as shared_default_thinking_level,
+    default_timeout_for_provider as shared_default_timeout_for_provider,
+    load_model_presets as shared_load_model_presets,
+    normalize_provider as shared_normalize_provider,
+    provider_requires_api_key as shared_provider_requires_api_key,
+    resolve_timeout_for_provider as shared_resolve_timeout_for_provider,
+    sanitize_runtime_overrides,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -39,11 +59,6 @@ OUTPUT_DIR = BASE_DIR / "output"
 API_KEYS_PATH = BASE_DIR / "api_keys.sh"
 PROJECT_DIR_PATTERN = re.compile(r"^novel_project_")
 MOJIBAKE_HINT_CHARS = set("闆皝绌归《鍙鍦鏄鐨勪簡鍚庡墠闂閿璇浠绗锛銆鈥€")
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
 
 JOB_ACTIVE_STATUSES = {"queued", "running"}
 JOB_FINISHED_STATUSES = {"succeeded", "failed"}
@@ -81,8 +96,8 @@ class BackgroundJobRegistry:
                 "message": "任务已加入队列，等待后台线程启动",
                 "project_id": project_id,
                 "project_path": project_path,
-                "created_at": _utc_now(),
-                "updated_at": _utc_now(),
+                "created_at": utc_now(),
+                "updated_at": utc_now(),
                 "current": 0,
                 "total": 0,
                 "result_url": "",
@@ -108,7 +123,7 @@ class BackgroundJobRegistry:
         events = job.setdefault("events", [])
         events.append(
             {
-                "time": _utc_now(),
+                "time": utc_now(),
                 "stage": stage,
                 "message": message,
             }
@@ -136,7 +151,7 @@ class BackgroundJobRegistry:
             for key, value in fields.items():
                 if value is not None:
                     job[key] = value
-            job["updated_at"] = _utc_now()
+            job["updated_at"] = utc_now()
             if event and (stage is not None or message is not None):
                 self._append_event_locked(job, job.get("stage", ""), job.get("message", ""))
 
@@ -252,6 +267,7 @@ def _load_api_keys() -> dict[str, str]:
         "GROK_API_KEY": os.environ.get("GROK_API_KEY", ""),
         "DEEPSEEK_API_KEY": os.environ.get("DEEPSEEK_API_KEY", ""),
         "DOUBAO_API_KEY": os.environ.get("DOUBAO_API_KEY", ""),
+        "OLLAMA_API_KEY": os.environ.get("OLLAMA_API_KEY", ""),
     }
     if all(env_keys.values()) or not API_KEYS_PATH.exists():
         return env_keys
@@ -267,41 +283,70 @@ def _load_api_keys() -> dict[str, str]:
 
 
 def _api_key_for_provider(provider: str, api_keys: dict[str, str]) -> str:
-    mapping = {
-        "gemini": api_keys.get("GEMINI_API_KEY", ""),
-        "grok": api_keys.get("GROK_API_KEY", ""),
-        "deepseek": api_keys.get("DEEPSEEK_API_KEY", ""),
-        "doubao": api_keys.get("DOUBAO_API_KEY", ""),
-        "ollama": os.environ.get("OLLAMA_API_KEY", ""),
-    }
-    return mapping.get(provider, "")
+    return shared_api_key_for_provider(provider, api_keys)
 
 
 def _default_model_for_provider(provider: str) -> str:
-    defaults = {
-        "gemini": "gemini-3.1-flash-lite-preview",
-        "grok": "grok-4.20-beta-latest-non-reasoning",
-        "deepseek": "deepseek-chat",
-        "doubao": "doubao-seed-1-8-251228",
-        "ollama": "llama3.2",
-    }
-    return defaults.get(provider, "")
+    return shared_default_model_for_provider(provider)
 
 
 def _default_api_base_for_provider(provider: str) -> str:
-    defaults = {
-        "doubao": "https://ark.cn-beijing.volces.com/api/v3",
-        "ollama": "http://127.0.0.1:11434/v1",
-    }
-    return defaults.get(provider, "")
+    return shared_default_api_base_for_provider(provider)
 
 
 def _default_thinking_level(provider: str) -> str:
-    return "medium" if provider == "gemini" else ""
+    return shared_default_thinking_level(provider)
 
 
 def _default_timeout_for_provider(provider: str) -> int:
-    return 900 if provider == "ollama" else 120
+    return shared_default_timeout_for_provider(provider)
+
+
+def _load_model_presets() -> dict[str, list[dict[str, str]]]:
+    return shared_load_model_presets()
+
+
+def _normalize_provider_for_ui(provider: object, default: str = "gemini") -> str:
+    return shared_normalize_provider(provider, default=default)
+
+
+def _resolve_model_name_from_form(form: dict[str, str]) -> str:
+    custom_model = (form.get("model_name_custom") or "").strip()
+    if custom_model:
+        return custom_model
+    preset_model = (form.get("model_preset") or "").strip()
+    if preset_model:
+        return preset_model
+    return (form.get("model_name") or "").strip()
+
+
+def _model_blank_label(provider: str, *, base_model: str, provider_explicit: bool) -> str:
+    effective_provider = _normalize_provider_for_ui(provider, default="gemini")
+    default_model = _default_model_for_provider(effective_provider)
+    if provider_explicit:
+        if default_model:
+            return f"使用 {effective_provider} 默认模型（{default_model}）"
+        return f"使用 {effective_provider} 默认模型"
+    if base_model:
+        return f"沿用项目当前模型（{base_model}）"
+    return "沿用项目当前模型"
+
+
+def _render_model_preset_options(provider: str, *, blank_label: str) -> str:
+    presets = _load_model_presets().get(
+        _normalize_provider_for_ui(provider, default="gemini"),
+        [],
+    )
+    options = [f'<option value="" selected>{escape(blank_label)}</option>']
+    seen_values: set[str] = set()
+    for item in presets:
+        value = str(item.get("value") or "").strip()
+        if not value or value in seen_values:
+            continue
+        seen_values.add(value)
+        label = str(item.get("label") or value).strip() or value
+        options.append(f'<option value="{escape(value)}">{escape(label)}</option>')
+    return "".join(options)
 
 
 def _planning_mode_label(mode: str) -> str:
@@ -335,20 +380,11 @@ def _render_planning_mode_options(selected: str, *, include_project_default: boo
 
 
 def _resolve_timeout_for_provider(provider: str, raw_value: object) -> int:
-    default_timeout = _default_timeout_for_provider(provider)
-    try:
-        timeout = int(raw_value)
-    except (TypeError, ValueError):
-        timeout = default_timeout
-    if timeout <= 0:
-        timeout = default_timeout
-    if provider == "ollama":
-        return max(timeout, default_timeout)
-    return timeout
+    return shared_resolve_timeout_for_provider(provider, raw_value)
 
 
 def _provider_requires_api_key(provider: str) -> bool:
-    return provider in {"gemini", "grok", "deepseek", "doubao"}
+    return shared_provider_requires_api_key(provider)
 
 
 def _list_projects() -> list[dict]:
@@ -387,61 +423,93 @@ def _find_project(project_id: str) -> Path | None:
 
 
 def _build_runtime_config(project_path: Path, overrides: dict[str, str], api_keys: dict[str, str]) -> dict:
-    project = load_json(str(project_path / "project.json"))
-    saved = project.get("llm_config", {})
-    saved_planning_mode = normalize_planning_mode(project.get("planning_mode"))
-    saved_provider = (saved.get("model_provider") or "gemini").strip().lower()
-    provider = (overrides.get("provider") or saved_provider or "gemini").strip().lower()
-    if provider not in {"gemini", "grok", "deepseek", "doubao", "openai_compatible", "ollama"}:
-        provider = "gemini"
+    return shared_build_runtime_config(str(project_path), overrides, api_keys)
 
-    override_model_name = (overrides.get("model_name") or "").strip()
-    saved_model_name = (saved.get("model_name") or saved.get("model") or "").strip()
-    override_api_base = (overrides.get("api_base") or "").strip()
-    saved_api_base = (saved.get("api_base") or "").strip()
 
-    runtime = {
-        "model_provider": provider,
-        "model_name": override_model_name
-        or (_default_model_for_provider(provider) if provider != saved_provider else saved_model_name)
-        or _default_model_for_provider(provider),
-        "model": override_model_name
-        or (_default_model_for_provider(provider) if provider != saved_provider else saved_model_name)
-        or _default_model_for_provider(provider),
-        "api_base": override_api_base
-        or (
-            _default_api_base_for_provider(provider)
-            if provider != saved_provider
-            else (saved_api_base or _default_api_base_for_provider(provider))
-        ),
-        "api_key": _api_key_for_provider(provider, api_keys) or overrides.get("api_key", ""),
-        "temperature": float(overrides.get("temperature") or saved.get("temperature", 0.8)),
-        "max_tokens": int(overrides.get("max_tokens") or saved.get("max_tokens", 4000)),
-        "timeout": _resolve_timeout_for_provider(
-            provider,
-            overrides.get("timeout")
-            or saved.get("timeout", _default_timeout_for_provider(provider)),
-        ),
-    }
-
-    thinking_level = (overrides.get("thinking_level") or "").strip()
-    if not thinking_level and provider == saved_provider:
-        thinking_level = (saved.get("thinking_level") or "").strip()
-    if thinking_level:
-        runtime["thinking_level"] = thinking_level
-    elif provider == "gemini":
-        runtime["thinking_level"] = _default_thinking_level(provider)
-
-    if not runtime["model_name"]:
-        runtime["model_name"] = _default_model_for_provider(provider)
-        runtime["model"] = runtime["model_name"]
-
-    if not runtime["api_key"] and _provider_requires_api_key(provider):
-        raise RuntimeError(f"provider={provider} missing API key, please fill api_keys.sh")
-    runtime["planning_mode"] = normalize_planning_mode(
-        (overrides.get("planning_mode") or "").strip() or saved_planning_mode
+def _runtime_overrides_from_form(form: dict[str, str]) -> dict[str, str]:
+    return sanitize_runtime_overrides(
+        {
+            "provider": form.get("provider"),
+            "model_name": _resolve_model_name_from_form(form),
+            "thinking_level": form.get("thinking_level"),
+            "planning_mode": form.get("planning_mode"),
+            "temperature": form.get("temperature"),
+            "max_tokens": form.get("max_tokens"),
+            "timeout": form.get("timeout"),
+            "api_base": form.get("api_base"),
+        }
     )
-    return runtime
+
+
+def _render_provider_options(selected: str = "") -> str:
+    options = ['<option value="">沿用项目设置</option>']
+    for provider in sorted(WEB_SELECTABLE_PROVIDERS):
+        selected_attr = ' selected' if selected == provider else ""
+        options.append(f'<option value="{provider}"{selected_attr}>{provider}</option>')
+    return "".join(options)
+
+
+def _render_runtime_override_fields(base_provider: str = "gemini", base_model: str = "") -> str:
+    effective_provider = _normalize_provider_for_ui(base_provider, default="gemini")
+    initial_blank_label = _model_blank_label(
+        effective_provider,
+        base_model=base_model,
+        provider_explicit=False,
+    )
+    return f"""
+    <div class="two-col">
+      <label>临时后端覆盖
+        <select name="provider" data-model-provider-select data-base-provider="{escape(effective_provider)}">
+          {_render_provider_options()}
+        </select>
+      </label>
+      <label>Planning Mode
+        <select name="planning_mode">
+          {_render_planning_mode_options("", include_project_default=True)}
+        </select>
+      </label>
+    </div>
+    <div class="muted">留空则沿用项目设置。none 最自由，volume 更平衡，chapter 控制最强。</div>
+    <div class="two-col">
+      <label>模型预设
+        <select
+          name="model_preset"
+          data-model-preset-select
+          data-base-model="{escape(base_model)}"
+        >
+          {_render_model_preset_options(effective_provider, blank_label=initial_blank_label)}
+        </select>
+      </label>
+      <label>自定义模型名（可选）
+        <input
+          type="text"
+          name="model_name_custom"
+          data-model-custom-input
+          placeholder="如需未预设的 Model ID，可在这里手填覆盖"
+        >
+      </label>
+    </div>
+    <div class="muted">优先用预设下拉；只有模型不在预设里时，才需要手填自定义 Model ID。</div>
+    <div class="two-col">
+      <label>Thinking Level（可选）
+        <input type="text" name="thinking_level" placeholder="如 medium / high">
+      </label>
+      <label>API Base（可选）
+        <input type="text" name="api_base" placeholder="留空则沿用项目设置">
+      </label>
+    </div>
+    <div class="two-col">
+      <label>Temperature
+        <input type="number" step="0.1" name="temperature" placeholder="沿用项目设置">
+      </label>
+      <label>Max Tokens
+        <input type="number" name="max_tokens" placeholder="沿用项目设置">
+      </label>
+    </div>
+    <label>Timeout
+      <input type="number" name="timeout" placeholder="沿用项目设置">
+    </label>
+    """
 
 
 def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_callback=None) -> str:
@@ -453,6 +521,7 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_cal
     if not api_key and _provider_requires_api_key(provider):
         raise RuntimeError(f"provider={provider} missing API key, please fill api_keys.sh")
 
+    resolved_model_name = _resolve_model_name_from_form(form)
     config = {
         "project_name": (form.get("project_name") or "Novel Project").strip(),
         "project_description": (form.get("project_description") or "").strip(),
@@ -461,7 +530,7 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_cal
         "story_request": (form.get("story_request") or "").strip(),
         "planning_mode": normalize_planning_mode(form.get("planning_mode")),
         "model_provider": provider,
-        "model_name": (form.get("model_name") or _default_model_for_provider(provider)).strip(),
+        "model_name": (resolved_model_name or _default_model_for_provider(provider)).strip(),
         "api_base": (form.get("api_base") or _default_api_base_for_provider(provider)).strip(),
         "api_key": api_key,
         "temperature": float(form.get("temperature") or 0.9),
@@ -576,6 +645,52 @@ def _render_job_cards(jobs: list[dict], empty_text: str) -> str:
     return "".join(cards)
 
 
+def _render_progression_session(project_id: str, session: dict | None, *, disabled: bool) -> str:
+    if not session:
+        return '<p class="muted">还没有已生成的下一章推进选项。先填写偏好并生成 3-5 个候选方案。</p>'
+
+    options_html = []
+    recommended_option_id = str(session.get("recommended_option_id", "") or "").strip()
+    for index, option in enumerate(session.get("options", []), start=1):
+        option_id = str(option.get("option_id", "") or "").strip()
+        checked_attr = ' checked' if option_id == recommended_option_id else ""
+        badge = '<span class="option-badge">推荐</span>' if option.get("recommended") else ""
+        key_events = "".join(f"<li>{escape(item)}</li>" for item in option.get("key_events", []))
+        chapter_outline = option.get("chapter_outline") or {}
+        options_html.append(
+            f"""
+            <label class="option-card">
+              <input type="radio" name="progression_option" value="{escape(option_id)}"{checked_attr}>
+              <div class="option-card-head">
+                <strong>{index}. {escape(option.get('title', ''))}</strong>
+                {badge}
+              </div>
+              <div class="muted">{escape(option.get('summary', ''))}</div>
+              <div class="muted">为什么现在：{escape(option.get('why_now', ''))}</div>
+              <div class="muted">本章纲要：{escape(chapter_outline.get('goal', '') or chapter_outline.get('summary', ''))}</div>
+              <ul class="option-list">{key_events}</ul>
+            </label>
+            """
+        )
+
+    disabled_attr = " disabled" if disabled else ""
+    return f"""
+    <div class="muted">当前会话：{escape(session.get('session_id', ''))}，目标第 {escape(str(session.get('target_chapter_number', '')))} 章</div>
+    <form method="post" action="/project/{escape(project_id)}/continue-guided">
+      <fieldset{disabled_attr}>
+        <input type="hidden" name="progression_session" value="{escape(session.get('session_id', ''))}">
+        <div class="option-grid">
+          {''.join(options_html)}
+        </div>
+        <label>补充修改 / 建议
+          <textarea name="progression_feedback" placeholder="例如：保留该方案的核心走向，但把人物互动写得更轻松一点。"></textarea>
+        </label>
+        <button type="submit">按所选方案续写下一章</button>
+      </fieldset>
+    </form>
+    """
+
+
 def _start_background_job(job_id: str, runner) -> None:
     def _target() -> None:
         JOB_REGISTRY.mark_running(job_id)
@@ -605,6 +720,11 @@ def _render_page(title: str, body: str, notice: str = "", error: str = "") -> st
         flash += f'<div class="flash notice">{escape(notice)}</div>'
     if error:
         flash += f'<div class="flash error">{escape(error)}</div>'
+    model_presets = _load_model_presets()
+    default_models = {
+        provider: _default_model_for_provider(provider)
+        for provider in sorted(model_presets)
+    }
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -911,6 +1031,44 @@ def _render_page(title: str, body: str, notice: str = "", error: str = "") -> st
     .job-link {{
       font-size: 14px;
     }}
+    .option-grid {{
+      display: grid;
+      gap: 12px;
+    }}
+    .option-card {{
+      display: grid;
+      gap: 8px;
+      padding: 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(124, 91, 62, 0.16);
+      background: rgba(255,255,255,0.62);
+    }}
+    .option-card input[type="radio"] {{
+      width: auto;
+      margin: 0;
+    }}
+    .option-card-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }}
+    .option-badge {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px;
+      color: #35643b;
+      background: rgba(170, 214, 176, 0.42);
+      border: 1px solid rgba(120, 164, 112, 0.28);
+    }}
+    .option-list {{
+      margin: 0;
+      padding-left: 20px;
+      color: var(--muted);
+    }}
     .status-shell {{
       display: grid;
       gap: 18px;
@@ -973,6 +1131,83 @@ def _render_page(title: str, body: str, notice: str = "", error: str = "") -> st
     {flash}
     {body}
   </div>
+  <script>
+    (() => {{
+      const modelPresets = {json.dumps(model_presets, ensure_ascii=False)};
+      const defaultModels = {json.dumps(default_models, ensure_ascii=False)};
+      const normalizeProvider = (provider, fallback = "gemini") => {{
+        const value = String(provider || "").trim().toLowerCase();
+        return Object.prototype.hasOwnProperty.call(modelPresets, value) ? value : fallback;
+      }};
+      const buildBlankLabel = (providerSelect, presetSelect) => {{
+        const baseProvider = normalizeProvider(providerSelect.dataset.baseProvider || "gemini", "gemini");
+        const explicitProvider = String(providerSelect.value || "").trim().toLowerCase();
+        const effectiveProvider = normalizeProvider(explicitProvider || baseProvider, baseProvider);
+        const baseModel = String(presetSelect.dataset.baseModel || "").trim();
+        const defaultModel = String(defaultModels[effectiveProvider] || "").trim();
+        if (explicitProvider) {{
+          return defaultModel
+            ? `使用 ${{effectiveProvider}} 默认模型（${{defaultModel}}）`
+            : `使用 ${{effectiveProvider}} 默认模型`;
+        }}
+        return baseModel ? `沿用项目当前模型（${{baseModel}}）` : "沿用项目当前模型";
+      }};
+      const bindPresetForm = (providerSelect) => {{
+        const form = providerSelect.form || providerSelect.closest("form");
+        if (!form) return;
+        const presetSelect = form.querySelector("[data-model-preset-select]");
+        const customInput = form.querySelector("[data-model-custom-input]");
+        if (!presetSelect || !customInput) return;
+
+        const rebuildOptions = () => {{
+          const baseProvider = normalizeProvider(providerSelect.dataset.baseProvider || "gemini", "gemini");
+          const explicitProvider = String(providerSelect.value || "").trim().toLowerCase();
+          const effectiveProvider = normalizeProvider(explicitProvider || baseProvider, baseProvider);
+          const entries = Array.isArray(modelPresets[effectiveProvider]) ? modelPresets[effectiveProvider] : [];
+          const previousValue = String(presetSelect.value || "");
+          const hasCustomValue = Boolean(String(customInput.value || "").trim());
+          const seenValues = new Set();
+
+          presetSelect.innerHTML = "";
+          const blankOption = document.createElement("option");
+          blankOption.value = "";
+          blankOption.textContent = buildBlankLabel(providerSelect, presetSelect);
+          presetSelect.appendChild(blankOption);
+
+          for (const entry of entries) {{
+            const value = String((entry && entry.value) || "").trim();
+            if (!value || seenValues.has(value)) continue;
+            seenValues.add(value);
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = String((entry && entry.label) || value).trim() || value;
+            presetSelect.appendChild(option);
+          }}
+
+          if (hasCustomValue) {{
+            presetSelect.value = "";
+            return;
+          }}
+          presetSelect.value = seenValues.has(previousValue) ? previousValue : "";
+        }};
+
+        providerSelect.addEventListener("change", rebuildOptions);
+        presetSelect.addEventListener("change", () => {{
+          if (presetSelect.value) {{
+            customInput.value = "";
+          }}
+        }});
+        customInput.addEventListener("input", () => {{
+          if (String(customInput.value || "").trim()) {{
+            presetSelect.value = "";
+          }}
+        }});
+        rebuildOptions();
+      }};
+
+      document.querySelectorAll("[data-model-provider-select]").forEach(bindPresetForm);
+    }})();
+  </script>
 </body>
 </html>
 """
@@ -1021,6 +1256,12 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         parts = [part for part in parsed.path.split("/") if part]
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "continue":
             self._handle_continue_async(parts[1], form)
+            return
+        if len(parts) == 3 and parts[0] == "project" and parts[2] == "progression-options":
+            self._handle_progression_options(parts[1], form)
+            return
+        if len(parts) == 3 and parts[0] == "project" and parts[2] == "continue-guided":
+            self._handle_continue_guided_async(parts[1], form)
             return
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "rollback":
             self._handle_rollback(parts[1], form)
@@ -1208,18 +1449,24 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <form method="post" action="/projects/create">
               <div class="two-col">
                 <label>模型后端
-                  <select name="provider">
-                    <option value="gemini">gemini</option>
+                  <select name="provider" data-model-provider-select data-base-provider="gemini">
+                    <option value="gemini" selected>gemini</option>
                     <option value="grok">grok</option>
                     <option value="deepseek">deepseek</option>
                     <option value="doubao">doubao</option>
                     <option value="ollama">ollama</option>
                   </select>
                 </label>
-                <label>模型名（可选）
-                  <input type="text" name="model_name" placeholder="留空则使用对应后端默认模型 / Model ID">
+                <label>模型预设
+                  <select name="model_preset" data-model-preset-select data-base-model="">
+                    {_render_model_preset_options("gemini", blank_label=_model_blank_label("gemini", base_model="", provider_explicit=True))}
+                  </select>
                 </label>
               </div>
+              <label>自定义模型名（可选）
+                <input type="text" name="model_name_custom" data-model-custom-input placeholder="如需未预设的 Model ID，可在这里手填覆盖">
+              </label>
+              <div class="muted">默认可直接使用预设下拉，不需要每次手填 Model ID。</div>
               <label>项目名
                 <input type="text" name="project_name" value="雪封穹顶">
               </label>
@@ -1669,7 +1916,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             count = int(form.get("count") or "1")
             if count < 1:
                 raise RuntimeError("续写章节数必须至少为 1。")
-            runtime_config = _build_runtime_config(project_path, form, api_keys)
+            runtime_config = _build_runtime_config(project_path, _runtime_overrides_from_form(form), api_keys)
             chapter_paths = run_next_chapters(
                 str(project_path),
                 runtime_config,
@@ -1866,6 +2113,13 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         active_jobs = JOB_REGISTRY.list_jobs(project_id=project_id, active_only=True, limit=6)
         active_jobs_html = _render_job_cards(active_jobs, "当前没有运行中的后台任务。")
         project_busy = bool(active_jobs)
+        progression_session = get_latest_active_progression_session(str(project_path))
+        project_llm_config = project.get("llm_config") or {}
+        runtime_override_fields_html = _render_runtime_override_fields(
+            str(project_llm_config.get("model_provider") or ""),
+            str(project_llm_config.get("model_name") or project_llm_config.get("model") or ""),
+        )
+        guided_session_html = _render_progression_session(project_id, progression_session, disabled=project_busy)
         busy_attr = " disabled" if project_busy else ""
         busy_notice = (
             '<div class="warning-box">当前项目有后台任务正在运行。为避免并发写入冲突，续写、回滚和插图表单已暂时禁用。你可以打开上方任务卡片查看实时进度。</div>'
@@ -1930,6 +2184,36 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             </section>
             {busy_notice}
             <section class="panel">
+              <h3>剧情推进选项</h3>
+              <form method="post" action="/project/{escape(project_id)}/progression-options">
+                <fieldset{busy_attr}>
+                  <div class="two-col">
+                    <label>选项数量
+                      <select name="option_count">
+                        <option value="3">3 个</option>
+                        <option value="4" selected>4 个</option>
+                        <option value="5">5 个</option>
+                      </select>
+                    </label>
+                    <label>作用范围
+                      <input type="text" value="固定为下一章" disabled>
+                    </label>
+                  </div>
+                  <label>想看的方向 / 倾向
+                    <textarea name="user_request" placeholder="例如：我想看一次更主动的外出搜集，但不要一下把大事件写完。"></textarea>
+                  </label>
+                  {runtime_override_fields_html}
+                  <button type="submit">生成下一章推进选项</button>
+                </fieldset>
+              </form>
+              <div class="warning-box">
+                这组推进选项只对应当前“下一章”。如果你先直接续写、回滚，或项目章节数发生变化，这组候选方案会自动失效，需要重新生成。
+              </div>
+              <div class="stack">
+                {guided_session_html}
+              </div>
+            </section>
+            <section class="panel">
               <h3>续写</h3>
               <form method="post" action="/project/{escape(project_id)}/continue">
                 <fieldset{busy_attr}>
@@ -1937,50 +2221,14 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                     <label>续写章节数
                       <input type="number" name="count" value="1" min="1" max="20">
                     </label>
-                    <label>临时后端覆盖
-                      <select name="provider">
-                        <option value="">沿用项目设置</option>
-                        <option value="gemini">gemini</option>
-                        <option value="grok">grok</option>
-                        <option value="deepseek">deepseek</option>
-                        <option value="doubao">doubao</option>
-                        <option value="ollama">ollama</option>
-                      </select>
+                    <label>模式
+                      <input type="text" value="直接续写，可一次写多章" disabled>
                     </label>
                   </div>
                   <label>想看的内容 / 情节走向
                     <textarea name="user_request" placeholder="例如：先推进食堂据点建设，再增加一点轻松互怼的互动。"></textarea>
                   </label>
-                  <div class="two-col">
-                    <label>模型名（可选）
-                      <input type="text" name="model_name" placeholder="留空则沿用项目设置；切换后端时自动改为该后端默认模型 / Model ID">
-                    </label>
-                    <label>Thinking Level（可选）
-                      <input type="text" name="thinking_level" placeholder="如 medium / high">
-                    </label>
-                  </div>
-                  <label>Planning Mode
-                    <select name="planning_mode">
-                      {_render_planning_mode_options("", include_project_default=True)}
-                    </select>
-                  </label>
-                  <div class="muted">Leave blank to use the project default. none is the freest, volume is balanced, chapter is the most controlled.</div>
-                  <div class="two-col">
-                    <label>Temperature
-                      <input type="number" step="0.1" name="temperature" placeholder="沿用项目设置">
-                    </label>
-                    <label>Max Tokens
-                      <input type="number" name="max_tokens" placeholder="沿用项目设置">
-                    </label>
-                  </div>
-                  <div class="two-col">
-                    <label>Timeout
-                      <input type="number" name="timeout" placeholder="沿用项目设置">
-                    </label>
-                    <label>API Base（可选）
-                      <input type="text" name="api_base" placeholder="留空则沿用项目设置">
-                    </label>
-                  </div>
+                  {runtime_override_fields_html}
                   <label><input type="checkbox" name="illustrate_generated" value="1"> 续写完成后立即调用 ComfyUI 生成插图</label>
                   <label>插图额外要求（可选）
                     <input type="text" name="illustration_request" placeholder="例如：突出雪夜窗景与室内暖光反差。">
@@ -2103,7 +2351,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             count = int(form.get("count") or "1")
             if count < 1:
                 raise RuntimeError("续写章节数必须至少为 1。")
-            runtime_config = _build_runtime_config(project_path, form, api_keys)
+            runtime_config = _build_runtime_config(project_path, _runtime_overrides_from_form(form), api_keys)
             job = JOB_REGISTRY.create_job(
                 kind="continue",
                 title=f"续写《{project_id}》",
@@ -2142,6 +2390,106 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 message += f" 插图处理完成，新生成 {new_count} 张。"
             return {
                 "message": message,
+                "result_url": "/project/" + urllib.parse.quote(project_id),
+                "result_label": "返回项目页",
+                "project_id": project_id,
+                "project_path": str(project_path.resolve()),
+            }
+
+        _start_background_job(job["id"], runner)
+        self._redirect("/job/" + urllib.parse.quote(job["id"]))
+
+    def _handle_progression_options(self, project_id: str, form: dict[str, str]) -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+
+        api_keys = _load_api_keys()
+        if JOB_REGISTRY.has_active_project_job(project_path):
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote("当前项目有后台任务正在运行，请稍后再生成推进选项。")
+            )
+            return
+
+        try:
+            runtime_overrides = _runtime_overrides_from_form(form)
+            runtime_config = _build_runtime_config(project_path, runtime_overrides, api_keys)
+            session = generate_progression_options(
+                str(project_path),
+                runtime_config,
+                user_request=(form.get("user_request") or "").strip(),
+                option_count=int(form.get("option_count") or "4"),
+                runtime_overrides=runtime_overrides,
+            )
+            notice = f"已生成 {len(session.get('options', []))} 个下一章推进选项。"
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?notice="
+                + urllib.parse.quote(notice)
+            )
+        except Exception as exc:
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote(str(exc))
+            )
+
+    def _handle_continue_guided_async(self, project_id: str, form: dict[str, str]) -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+
+        api_keys = _load_api_keys()
+        session_id = (form.get("progression_session") or "").strip()
+        option_ref = (form.get("progression_option") or "").strip()
+        feedback = (form.get("progression_feedback") or "").strip()
+        try:
+            if not session_id or not option_ref:
+                raise RuntimeError("请选择一个推进选项后再继续写。")
+            session = ensure_fresh_progression_session(
+                str(project_path),
+                load_progression_session(str(project_path), session_id),
+            )
+            if session.get("status") == "stale":
+                raise RuntimeError("当前推进选项已过期，请重新生成推进选项。")
+            runtime_config = _build_runtime_config(
+                project_path,
+                session.get("runtime_overrides") or {},
+                api_keys,
+            )
+            job = JOB_REGISTRY.create_job(
+                kind="continue_guided",
+                title=f"按推进选项续写《{project_id}》",
+                project_id=project_id,
+                project_path=str(project_path.resolve()),
+            )
+        except Exception as exc:
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote(str(exc))
+            )
+            return
+
+        def runner(progress_callback):
+            chapter_path = run_next_chapter_from_progression(
+                str(project_path),
+                runtime_config,
+                progression_session=session_id,
+                progression_option=option_ref,
+                progression_feedback=feedback,
+                progress_callback=progress_callback,
+            )
+            return {
+                "message": "已按所选推进方案生成下一章。",
                 "result_url": "/project/" + urllib.parse.quote(project_id),
                 "result_label": "返回项目页",
                 "project_id": project_id,
@@ -2215,11 +2563,11 @@ def main() -> None:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((args.host, args.port), NovelWriterHandler)
-    print(f"[{_utc_now()}] Web UI listening on http://{args.host}:{args.port}")
+    print(f"[{utc_now()}] Web UI listening on http://{args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print(f"\n[{_utc_now()}] Web UI stopped.")
+        print(f"\n[{utc_now()}] Web UI stopped.")
     finally:
         server.server_close()
 

@@ -1,0 +1,58 @@
+{
+  "_note": "按 provider 维护模型预设。每项可以直接写字符串，或写成 {\"value\": \"模型ID\", \"label\": \"显示名称\"}。",
+  "gemini": [
+    {
+      "value": "gemini-3.1-flash-lite-preview",
+      "label": "gemini-3.1-flash-lite-preview"
+    },
+    {
+      "value": "gemini-2.5-flash",
+      "label": "gemini-2.5-flash"
+    },
+    {
+      "value": "gemini-2.5-pro",
+      "label": "gemini-2.5-pro"
+    }
+  ],
+  "grok": [
+    {
+      "value": "grok-4.20-beta-latest-non-reasoning",
+      "label": "grok-4.20-beta-latest-non-reasoning"
+    }
+  ],
+  "deepseek": [
+    {
+      "value": "deepseek-chat",
+      "label": "deepseek-chat"
+    },
+    {
+      "value": "deepseek-reasoner",
+      "label": "deepseek-reasoner"
+    }
+  ],
+  "doubao": [
+    {
+      "value": "doubao-seed-1-8-251228",
+      "label": "doubao-seed-1-8-251228"
+    }
+  ],
+  "openai_compatible": [],
+  "ollama": [
+    {
+      "value": "llama3.2",
+      "label": "llama3.2"
+    },
+    {
+      "value": "qwen2.5:7b",
+      "label": "qwen2.5:7b"
+    },
+    {
+      "value": "qwen2.5:14b",
+      "label": "qwen2.5:14b"
+    },
+    {
+      "value": "mistral:7b",
+      "label": "mistral:7b"
+    }
+  ]
+}

@@ -9,12 +9,12 @@ import os
 import random
 import re
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
 from urllib import error, parse, request
 
+from common_utils import emit_progress, extract_json_object, safe_int, utc_now
 from llm_client import generate_text_with_metadata
 from project_manager import load_json, load_project, save_json, update_project_stats
 from prompt_builder import build_illustration_prompt
@@ -45,29 +45,6 @@ PREFERRED_CHECKPOINTS = (
 
 PROJECT_STATS_LOCK = Lock()
 
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def _emit_progress(progress_callback, stage: str, message: str, **extra) -> None:
-    if progress_callback is None:
-        return
-    payload = {
-        "stage": stage,
-        "message": message,
-    }
-    payload.update(extra)
-    progress_callback(payload)
-
-
-def _safe_int(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def _safe_float(value: Any, default: float) -> float:
     try:
         return float(value)
@@ -83,7 +60,7 @@ def _update_project_stats_threadsafe(project_path: str, phase: str, success: boo
 def _coerce_worker_count(requested_workers: Any, task_count: int) -> int:
     if task_count <= 1:
         return 1
-    workers = _safe_int(requested_workers, 0)
+    workers = safe_int(requested_workers, 0)
     if workers <= 0:
         workers = min(4, task_count)
     return max(1, min(task_count, workers))
@@ -95,36 +72,6 @@ def _normalize_checkpoint_name(name: str) -> str:
         return ""
     separator = "\\" if os.name == "nt" else "/"
     return normalized.replace("/", separator)
-
-
-def _extract_json_object(text: str) -> dict:
-    text = (text or "").strip()
-    candidates = [text]
-
-    if "```json" in text:
-        start = text.find("```json") + len("```json")
-        end = text.find("```", start)
-        if end != -1:
-            candidates.append(text[start:end].strip())
-    elif "```" in text:
-        start = text.find("```") + len("```")
-        end = text.find("```", start)
-        if end != -1:
-            candidates.append(text[start:end].strip())
-
-    brace_start = text.find("{")
-    brace_end = text.rfind("}")
-    if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
-        candidates.append(text[brace_start : brace_end + 1])
-
-    for candidate in candidates:
-        try:
-            data = json.loads(candidate)
-            if isinstance(data, dict):
-                return data
-        except json.JSONDecodeError:
-            continue
-    raise ValueError("Could not parse JSON from illustration prompt response.")
 
 
 def _trim_text(text: str, limit: int = 2600) -> str:
@@ -568,19 +515,19 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
         "comfyui_root": str(comfyui_root) if comfyui_root else "",
         "workflow_template": workflow_template,
         "checkpoint": checkpoint,
-        "width": _safe_int(
+        "width": safe_int(
             merged_overrides.get("width")
             or os.environ.get("NOVEL_COMFYUI_WIDTH")
             or (saved.get("width") if saved_matches_template else workflow_defaults.get("width")),
             1280,
         ),
-        "height": _safe_int(
+        "height": safe_int(
             merged_overrides.get("height")
             or os.environ.get("NOVEL_COMFYUI_HEIGHT")
             or (saved.get("height") if saved_matches_template else workflow_defaults.get("height")),
             1280,
         ),
-        "steps": _safe_int(
+        "steps": safe_int(
             merged_overrides.get("steps")
             or os.environ.get("NOVEL_COMFYUI_STEPS")
             or (saved.get("steps") if saved_matches_template else workflow_defaults.get("steps")),
@@ -604,7 +551,7 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
             or (saved.get("scheduler") if saved_matches_template else workflow_defaults.get("scheduler"))
             or "simple"
         ).strip(),
-        "timeout": _safe_int(
+        "timeout": safe_int(
             merged_overrides.get("timeout") or os.environ.get("NOVEL_COMFYUI_TIMEOUT") or saved.get("timeout"),
             600,
         ),
@@ -626,7 +573,7 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
             or saved_style_preset
             or DEFAULT_STYLE_PRESET
         ).strip(),
-        "seed": _safe_int(
+        "seed": safe_int(
             merged_overrides.get("seed") or os.environ.get("NOVEL_COMFYUI_SEED") or saved.get("seed"),
             0,
         ),
@@ -658,7 +605,7 @@ def _persist_runtime_config(project_path: str, runtime_config: dict) -> None:
         "negative_prompt": runtime_config.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT),
         "style_preset": runtime_config.get("style_preset", DEFAULT_STYLE_PRESET),
     }
-    project_data["updated_at"] = _utc_now()
+    project_data["updated_at"] = utc_now()
     save_json(str(project_file), project_data)
 
 
@@ -759,7 +706,7 @@ def _generate_prompt_payload(
     if llm_config and llm_config.get("model_provider") and (has_remote_credentials or has_local_ollama):
         prompt = build_illustration_prompt(project_data, chapter_text, user_request=user_request)
         try:
-            _emit_progress(progress_callback, "illustration_prompt", "正在生成插图提示词")
+            emit_progress(progress_callback, "illustration_prompt", "正在生成插图提示词")
             response_text, metadata = generate_text_with_metadata(prompt, llm_config)
             _update_project_stats_threadsafe(
                 project_path,
@@ -767,7 +714,7 @@ def _generate_prompt_payload(
                 success=True,
                 usage=metadata.get("usage"),
             )
-            payload = _extract_json_object(response_text)
+            payload = extract_json_object(response_text, "Could not parse JSON from illustration prompt response.")
             llm_positive_prompt = _normalize_prompt_text(str(payload.get("positive_prompt", "") or ""), limit=1200)
             positive_prompt = _compose_structured_positive_prompt(
                 runtime_config=runtime_config,
@@ -789,7 +736,7 @@ def _generate_prompt_payload(
         except Exception:
             _update_project_stats_threadsafe(project_path, phase="illustration_prompt", success=False, usage=None)
 
-    _emit_progress(progress_callback, "illustration_prompt_fallback", "插图提示词回退到本地规则生成")
+    emit_progress(progress_callback, "illustration_prompt_fallback", "插图提示词回退到本地规则生成")
     return _default_prompt_payload(project_data, chapter_text, runtime_config, user_request)
 
 
@@ -1054,9 +1001,9 @@ def _render_illustration_images(
             filename_prefix=filename_prefix,
         )
 
-    _emit_progress(progress_callback, "illustration_queue", "正在提交到 ComfyUI")
+    emit_progress(progress_callback, "illustration_queue", "正在提交到 ComfyUI")
     prompt_id = _queue_prompt(runtime_config["comfyui_api_base"], workflow)
-    _emit_progress(progress_callback, "illustration_wait", "ComfyUI 正在生成图片")
+    emit_progress(progress_callback, "illustration_wait", "ComfyUI 正在生成图片")
     history_item = _wait_for_prompt(
         runtime_config["comfyui_api_base"],
         prompt_id,
@@ -1067,7 +1014,7 @@ def _render_illustration_images(
     if not output_images:
         raise RuntimeError("ComfyUI 已完成执行，但没有返回图片输出。")
 
-    _emit_progress(progress_callback, "illustration_download", "正在下载并保存插图结果")
+    emit_progress(progress_callback, "illustration_download", "正在下载并保存插图结果")
     record_dir.mkdir(parents=True, exist_ok=True)
     for old_file in record_dir.glob("image_*"):
         old_file.unlink(missing_ok=True)
@@ -1096,7 +1043,7 @@ def _render_illustration_images(
             }
         )
 
-    _emit_progress(progress_callback, "illustration_saved", "插图文件已保存")
+    emit_progress(progress_callback, "illustration_saved", "插图文件已保存")
     return prompt_id, seed, saved_images
 
 
@@ -1242,12 +1189,12 @@ def illustrate_chapter(
     chapter_slug = chapter_file.stem
     record_dir = _chapter_record_dir(project_path, chapter_slug)
     metadata_path = record_dir / "metadata.json"
-    _emit_progress(progress_callback, "illustration_prepare", f"正在处理 {chapter_slug} 的插图")
+    emit_progress(progress_callback, "illustration_prepare", f"正在处理 {chapter_slug} 的插图")
 
     if not force:
         existing = _load_existing_record(project_path, metadata_path)
         if existing:
-            _emit_progress(progress_callback, "illustration_reused", f"{chapter_slug} 已复用已有插图")
+            emit_progress(progress_callback, "illustration_reused", f"{chapter_slug} 已复用已有插图")
             return existing
 
     resolved_runtime = dict(runtime_config or _build_runtime_config(project_path))
@@ -1276,7 +1223,7 @@ def illustrate_chapter(
     record = {
         "chapter_slug": chapter_slug,
         "chapter_file": str(chapter_file.relative_to(Path(project_path))).replace("\\", "/"),
-        "generated_at": _utc_now(),
+        "generated_at": utc_now(),
         "prompt_id": prompt_id,
         "seed": seed,
         "scene_summary": prompt_payload.get("scene_summary", ""),
@@ -1299,7 +1246,7 @@ def illustrate_chapter(
         "reused": False,
     }
     save_json(str(metadata_path), record)
-    _emit_progress(progress_callback, "illustration_done", f"{chapter_slug} 的插图已完成")
+    emit_progress(progress_callback, "illustration_done", f"{chapter_slug} 的插图已完成")
     return record
 
 
@@ -1323,7 +1270,7 @@ def illustrate_chapters(
     if worker_count == 1:
         results = []
         for index, chapter_ref in enumerate(refs):
-            _emit_progress(
+            emit_progress(
                 progress_callback,
                 "illustration_batch",
                 f"正在生成第 {index + 1}/{len(refs)} 个章节插图",
@@ -1342,7 +1289,7 @@ def illustrate_chapters(
                     progress_callback=progress_callback,
                 )
             )
-            _emit_progress(
+            emit_progress(
                 progress_callback,
                 "illustration_batch_done",
                 f"第 {index + 1}/{len(refs)} 个章节插图已完成",
@@ -1403,7 +1350,7 @@ def illustrate_cover(
     record = {
         "asset_kind": "cover",
         "asset_slug": "cover",
-        "generated_at": _utc_now(),
+        "generated_at": utc_now(),
         "prompt_id": prompt_id,
         "seed": seed,
         "scene_summary": prompt_payload.get("scene_summary", ""),
@@ -1469,7 +1416,7 @@ def illustrate_character_portraits(
             "character_index": index,
             "character_name": name,
             "character_role": str(character.get("role", "")).strip(),
-            "generated_at": _utc_now(),
+            "generated_at": utc_now(),
             "prompt_id": prompt_id,
             "seed": seed,
             "scene_summary": prompt_payload.get("scene_summary", ""),

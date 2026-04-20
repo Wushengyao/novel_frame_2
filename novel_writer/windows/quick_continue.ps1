@@ -4,6 +4,7 @@
 	[string]$UserRequest = "",
 	[string]$ProviderOverride = "",
 	[string]$PlanningModeOverride = "",
+	[string]$ContinueMode = "",
 	[bool]$AutoIllustrate = $true
 )
 
@@ -24,6 +25,9 @@ $DefaultMaxTokensOverride = ""
 $DefaultTimeoutOverride = ""
 $DefaultThinkingLevelOverride = ""
 $DefaultPlanningModeOverride = ""
+$DefaultContinueMode = "direct"
+$DefaultGuidedOptionCount = 4
+$DefaultGuidedFeedback = ""
 
 if (-not $PSBoundParameters.ContainsKey("ProjectPath")) {
 	$ProjectPath = Prompt-OptionalValue -PromptText "Project directory"
@@ -61,6 +65,13 @@ if (-not $PSBoundParameters.ContainsKey("PlanningModeOverride")) {
 if ($PlanningModeOverride) {
 	$PlanningModeOverride = Normalize-PlanningMode $PlanningModeOverride
 }
+if (-not $PSBoundParameters.ContainsKey("ContinueMode")) {
+	$ContinueMode = Prompt-OptionalValue -PromptText "Continue mode (optional: direct/guided)" -DefaultValue $DefaultContinueMode
+}
+$ContinueMode = $ContinueMode.Trim().ToLowerInvariant()
+if ($ContinueMode -notin @("direct", "guided")) {
+	throw "Unsupported continue mode: $ContinueMode (allowed: direct / guided)"
+}
 
 $savedProject = Get-Content -LiteralPath $projectFile -Raw -Encoding UTF8 | ConvertFrom-Json
 $saved = $savedProject.llm_config
@@ -82,6 +93,11 @@ $maxTokensOverride = if ($env:NOVEL_MAX_TOKENS_OVERRIDE) { $env:NOVEL_MAX_TOKENS
 $timeoutOverride = if ($env:NOVEL_TIMEOUT_OVERRIDE) { $env:NOVEL_TIMEOUT_OVERRIDE } else { $DefaultTimeoutOverride }
 $thinkingLevelOverride = if ($env:NOVEL_THINKING_LEVEL_OVERRIDE) { $env:NOVEL_THINKING_LEVEL_OVERRIDE } else { $DefaultThinkingLevelOverride }
 $planningModeOverride = if ($env:NOVEL_PLANNING_MODE_OVERRIDE) { Normalize-PlanningMode $env:NOVEL_PLANNING_MODE_OVERRIDE } elseif ($PlanningModeOverride) { $PlanningModeOverride } else { $DefaultPlanningModeOverride }
+
+if ($ContinueMode -eq "guided" -and $ChapterCount -ne 1) {
+	Write-Warning "Guided mode only writes 1 chapter. ChapterCount has been forced to 1."
+	$ChapterCount = 1
+}
 
 $chaptersDir = Join-Path $ProjectPath "chapters"
 $beforeChapterPaths = @()
@@ -105,15 +121,58 @@ try {
 		-ThinkingLevelOverride $thinkingLevelOverride `
 		-PlanningModeOverride $planningModeOverride
 
-	$nextArgs = @(
-		(Join-Path $ProjectRoot "app.py"),
-		"next",
-		"--project", $ProjectPath,
-		"--config", $tempConfig,
-		"--count", "$ChapterCount"
-	)
-	if ($UserRequest) {
-		$nextArgs += @("--user-request", $UserRequest)
+	if ($ContinueMode -eq "guided") {
+		$optionsArgs = @(
+			(Join-Path $ProjectRoot "app.py"),
+			"options",
+			"--project", $ProjectPath,
+			"--config", $tempConfig,
+			"--option-count", "$DefaultGuidedOptionCount"
+		)
+		if ($UserRequest) {
+			$optionsArgs += @("--user-request", $UserRequest)
+		}
+
+		$optionsResult = Invoke-NativeCommandCapture -Executable $pythonExe -Arguments $optionsArgs -StreamOutput
+		if ($optionsResult.ExitCode -ne 0) {
+			throw "Guided options generation failed with exit code $($optionsResult.ExitCode)."
+		}
+
+		$sessionIdLine = $optionsResult.Output | Where-Object { "$_" -like "Session ID:*" } | Select-Object -First 1
+		$recommendedOptionLine = $optionsResult.Output | Where-Object { "$_" -like "Recommended Option:*" } | Select-Object -First 1
+		$sessionId = ("$sessionIdLine" -replace "^Session ID:\s*", "").Trim()
+		$recommendedOption = ("$recommendedOptionLine" -replace "^Recommended Option:\s*", "").Trim()
+		if ([string]::IsNullOrWhiteSpace($sessionId)) {
+			throw "Failed to parse Session ID from guided options output."
+		}
+
+		$selectedOption = Prompt-OptionalValue -PromptText "Progression option (number or option_id)" -DefaultValue $recommendedOption
+		$guidedFeedback = Prompt-OptionalValue -PromptText "Guided feedback (optional)" -DefaultValue $DefaultGuidedFeedback
+
+		$nextArgs = @(
+			(Join-Path $ProjectRoot "app.py"),
+			"next",
+			"--project", $ProjectPath,
+			"--config", $tempConfig,
+			"--count", "1",
+			"--progression-session", $sessionId,
+			"--progression-option", $selectedOption
+		)
+		if ($guidedFeedback) {
+			$nextArgs += @("--progression-feedback", $guidedFeedback)
+		}
+	}
+	else {
+		$nextArgs = @(
+			(Join-Path $ProjectRoot "app.py"),
+			"next",
+			"--project", $ProjectPath,
+			"--config", $tempConfig,
+			"--count", "$ChapterCount"
+		)
+		if ($UserRequest) {
+			$nextArgs += @("--user-request", $UserRequest)
+		}
 	}
 
 	$nextResult = Invoke-NativeCommandCapture -Executable $pythonExe -Arguments $nextArgs -StreamOutput

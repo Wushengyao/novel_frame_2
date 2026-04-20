@@ -6,6 +6,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
+from common_utils import emit_progress, extract_json_object
 from console_logger import log_info, log_success, log_warning
 from llm_client import generate_text_with_metadata
 from prompt_builder import build_summary_prompt
@@ -19,48 +20,6 @@ SUMMARY_KEYS = (
     "character_updates",
     "next_chapter_goal",
 )
-
-
-def _emit_progress(progress_callback, stage: str, message: str) -> None:
-    if progress_callback is None:
-        return
-    progress_callback(
-        {
-            "stage": stage,
-            "message": message,
-        }
-    )
-
-
-def _extract_json_object(text: str) -> dict:
-    text = text.strip()
-    candidates = [text]
-
-    if "```json" in text:
-        start = text.find("```json") + len("```json")
-        end = text.find("```", start)
-        if end != -1:
-            candidates.append(text[start:end].strip())
-    elif "```" in text:
-        start = text.find("```") + len("```")
-        end = text.find("```", start)
-        if end != -1:
-            candidates.append(text[start:end].strip())
-
-    brace_start = text.find("{")
-    brace_end = text.rfind("}")
-    if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
-        candidates.append(text[brace_start : brace_end + 1])
-
-    for candidate in candidates:
-        try:
-            data = json.loads(candidate)
-            if isinstance(data, dict):
-                return data
-        except json.JSONDecodeError:
-            continue
-    raise ValueError("Could not parse JSON from summary response.")
-
 
 def _normalize_summary(summary: dict) -> dict:
     normalized = {}
@@ -88,7 +47,7 @@ def _fallback_summary(new_text: str, current_state: dict) -> dict:
 
 def update_plot_state(project_path: str, new_text: str, config: dict, progress_callback=None) -> None:
     log_info(f"剧情状态更新: 开始处理项目 {project_path}")
-    _emit_progress(progress_callback, "summary_prepare", "正在总结新章节并刷新剧情状态")
+    emit_progress(progress_callback, "summary_prepare", "正在总结新章节并刷新剧情状态")
     base = Path(project_path)
     plot_state_path = base / "plot_state.json"
     characters_path = base / "characters.json"
@@ -108,7 +67,7 @@ def update_plot_state(project_path: str, new_text: str, config: dict, progress_c
     for attempt in range(2):
         try:
             log_info(f"剧情状态更新: 第 {attempt + 1} 次请求模型总结本章。")
-            _emit_progress(progress_callback, "summary_request", f"正在请求剧情状态总结（第 {attempt + 1}/2 次）")
+            emit_progress(progress_callback, "summary_request", f"正在请求剧情状态总结（第 {attempt + 1}/2 次）")
             response_text, metadata = generate_text_with_metadata(prompt, config)
         except Exception as exc:  # pragma: no cover - intentional resilience path
             update_project_stats(project_path, phase="summary", success=False, usage=None)
@@ -123,7 +82,9 @@ def update_plot_state(project_path: str, new_text: str, config: dict, progress_c
                 success=True,
                 usage=metadata.get("usage"),
             )
-            summary = _normalize_summary(_extract_json_object(response_text))
+            summary = _normalize_summary(
+                extract_json_object(response_text, "Could not parse JSON from summary response.")
+            )
             log_success("剧情状态更新: 模型总结成功，已解析状态 JSON。")
             break
         except Exception as exc:  # pragma: no cover - intentional resilience path
@@ -144,5 +105,5 @@ def update_plot_state(project_path: str, new_text: str, config: dict, progress_c
     chapter_count = load_json(str(base / "project.json")).get("chapter_count", 0)
     summary_path = summaries_dir / f"summary_{chapter_count:04d}.json"
     save_json(str(summary_path), summary)
-    _emit_progress(progress_callback, "summary_done", "剧情状态已更新并保存")
+    emit_progress(progress_callback, "summary_done", "剧情状态已更新并保存")
     log_success(f"剧情状态更新: 已写入 plot_state.json 和 {summary_path.name}")

@@ -1,0 +1,321 @@
+"""Guided next-chapter progression option generation and session storage."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from pathlib import Path
+from uuid import uuid4
+
+from chapter_context import get_next_context_for_mode, resolve_planning_mode
+from common_utils import emit_progress, extract_json_object, safe_int, utc_now
+from console_logger import log_success, log_warning
+from llm_client import generate_text_with_metadata
+from outline_manager import apply_chapter_outline_override
+from project_manager import (
+    PLANNING_MODE_CHAPTER,
+    get_last_chapter_text,
+    load_json,
+    load_project,
+    save_json,
+    update_project_stats,
+)
+from prompt_builder import build_progression_options_prompt
+from runtime_config import sanitize_runtime_overrides
+
+
+DEFAULT_OPTION_COUNT = 4
+ALLOWED_OPTION_COUNTS = {3, 4, 5}
+SESSION_DIR_NAME = "progression_sessions"
+OPTION_OUTLINE_KEYS = ("title", "summary", "goal", "key_events")
+
+
+def validate_option_count(option_count: object) -> int:
+    count = safe_int(option_count, DEFAULT_OPTION_COUNT)
+    if count not in ALLOWED_OPTION_COUNTS:
+        raise ValueError("option_count must be one of: 3, 4, 5.")
+    return count
+
+
+def _session_dir(project_path: str) -> Path:
+    return Path(project_path) / SESSION_DIR_NAME
+
+
+def _session_path(project_path: str, session_id: str) -> Path:
+    return _session_dir(project_path) / f"progression_{session_id}.json"
+
+
+def _normalize_key_events(raw_key_events: object) -> list[str]:
+    key_events = raw_key_events or []
+    if not isinstance(key_events, list):
+        key_events = [key_events]
+    return [str(item).strip() for item in key_events if str(item).strip()][:5]
+
+
+def _normalize_option(option: dict, fallback_id: str) -> dict:
+    option_id = str(option.get("option_id") or fallback_id).strip() or fallback_id
+    chapter_outline = option.get("chapter_outline") or {}
+    if not isinstance(chapter_outline, dict):
+        chapter_outline = {}
+    normalized_outline = {
+        "title": str(chapter_outline.get("title", "") or "").strip(),
+        "summary": str(chapter_outline.get("summary", "") or "").strip(),
+        "goal": str(chapter_outline.get("goal", "") or "").strip(),
+        "key_events": _normalize_key_events(chapter_outline.get("key_events", [])),
+    }
+    return {
+        "option_id": option_id,
+        "title": str(option.get("title", "") or "").strip(),
+        "summary": str(option.get("summary", "") or "").strip(),
+        "why_now": str(option.get("why_now", "") or "").strip(),
+        "key_events": _normalize_key_events(option.get("key_events", [])),
+        "writer_guidance": str(option.get("writer_guidance", "") or "").strip(),
+        "chapter_outline": normalized_outline,
+        "recommended": bool(option.get("recommended")),
+    }
+
+
+def normalize_progression_options_response(data: dict, option_count: int) -> dict:
+    count = validate_option_count(option_count)
+    raw_options = data.get("options")
+    if not isinstance(raw_options, list):
+        raise ValueError("progression response missing options list")
+    if len(raw_options) != count:
+        raise ValueError("progression option count does not match requested count")
+
+    normalized = []
+    option_ids = set()
+    for index, raw_option in enumerate(raw_options, start=1):
+        if not isinstance(raw_option, dict):
+            raise ValueError("progression option item must be an object")
+        option = _normalize_option(raw_option, fallback_id=f"option_{index}")
+        if not option["title"] or not option["summary"] or not option["why_now"] or not option["writer_guidance"]:
+            raise ValueError(f"progression option {option['option_id']} is missing required fields")
+        if len(option["key_events"]) < 2:
+            raise ValueError(f"progression option {option['option_id']} must include at least 2 key_events")
+        outline = option["chapter_outline"]
+        if not outline["title"] or not outline["summary"] or not outline["goal"] or len(outline["key_events"]) < 2:
+            raise ValueError(f"progression option {option['option_id']} has invalid chapter_outline")
+        if option["option_id"] in option_ids:
+            raise ValueError("progression options contain duplicate option_id values")
+        option_ids.add(option["option_id"])
+        normalized.append(option)
+
+    recommended_option_id = str(data.get("recommended_option_id", "") or "").strip()
+    if recommended_option_id:
+        found = False
+        for option in normalized:
+            option["recommended"] = option["option_id"] == recommended_option_id
+            found = found or option["recommended"]
+        if not found:
+            raise ValueError("recommended_option_id does not match any option_id")
+
+    recommended = [option for option in normalized if option.get("recommended")]
+    if len(recommended) != 1:
+        raise ValueError("progression options must contain exactly one recommended option")
+
+    return {
+        "recommended_option_id": recommended[0]["option_id"],
+        "options": normalized,
+    }
+
+
+def _build_selection_request(option: dict, selection_feedback: str) -> str:
+    feedback = selection_feedback.strip()
+    base = str(option.get("writer_guidance", "") or "").strip()
+    if not feedback:
+        return base
+    return (
+        f"{base}\n\n"
+        f"用户补充细化：{feedback}\n"
+        "这些补充只能作为已选推进方案的细化与微调，不能推翻本章核心任务。"
+    )
+
+
+def save_progression_session(project_path: str, session: dict) -> str:
+    session_id = str(session.get("session_id", "") or "").strip()
+    if not session_id:
+        raise ValueError("progression session missing session_id")
+    path = _session_path(project_path, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_json(str(path), session)
+    return str(path)
+
+
+def load_progression_session(project_path: str, session_id: str) -> dict:
+    return load_json(str(_session_path(project_path, session_id)))
+
+
+def _project_chapter_count(project_path: str) -> int:
+    project = load_json(str(Path(project_path) / "project.json"))
+    return max(0, int(project.get("chapter_count", 0) or 0))
+
+
+def _update_session_status(project_path: str, session: dict, *, status: str) -> dict:
+    updated = deepcopy(session)
+    updated["status"] = status
+    save_progression_session(project_path, updated)
+    return updated
+
+
+def is_progression_session_stale(project_path: str, session: dict) -> bool:
+    current_chapter_count = _project_chapter_count(project_path)
+    session_chapter_count = safe_int(session.get("project_chapter_count"), -1)
+    target_chapter_number = safe_int(session.get("target_chapter_number"), 0)
+    return (
+        current_chapter_count != session_chapter_count
+        or target_chapter_number != current_chapter_count + 1
+    )
+
+
+def ensure_fresh_progression_session(project_path: str, session: dict) -> dict:
+    if is_progression_session_stale(project_path, session):
+        return _update_session_status(project_path, session, status="stale")
+    return session
+
+
+def list_progression_sessions(project_path: str, *, include_stale: bool = False) -> list[dict]:
+    sessions_dir = _session_dir(project_path)
+    if not sessions_dir.exists():
+        return []
+    sessions = []
+    for path in sorted(sessions_dir.glob("progression_*.json"), reverse=True):
+        try:
+            session = load_json(str(path))
+        except Exception:
+            continue
+        session = ensure_fresh_progression_session(project_path, session)
+        if not include_stale and session.get("status") == "stale":
+            continue
+        sessions.append(session)
+    sessions.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
+    return sessions
+
+
+def get_latest_active_progression_session(project_path: str) -> dict | None:
+    for session in list_progression_sessions(project_path):
+        if session.get("status") in {"pending", "selected"}:
+            return session
+    return None
+
+
+def generate_progression_options(
+    project_path: str,
+    config: dict,
+    *,
+    user_request: str = "",
+    option_count: int = DEFAULT_OPTION_COUNT,
+    runtime_overrides: dict | None = None,
+    progress_callback=None,
+) -> dict:
+    count = validate_option_count(option_count)
+    project_data = load_project(project_path)
+    planning_mode = resolve_planning_mode(config, project_data)
+    emit_progress(progress_callback, "progression_options_prepare", "正在生成下一章剧情推进选项")
+    project_data, next_context = get_next_context_for_mode(
+        project_path,
+        config,
+        planning_mode,
+        progress_callback=progress_callback,
+    )
+    recent_text = get_last_chapter_text(project_path)
+    if not recent_text:
+        recent_text = "这是开篇前状态。请围绕第一章如何自然开场来给出推进选项。"
+    prompt = build_progression_options_prompt(
+        project_data,
+        recent_text,
+        next_context,
+        user_request=user_request,
+        option_count=count,
+        planning_mode=planning_mode,
+    )
+    try:
+        response_text, metadata = generate_text_with_metadata(prompt, config)
+        update_project_stats(
+            project_path,
+            phase="outline",
+            success=True,
+            usage=metadata.get("usage"),
+        )
+        normalized = normalize_progression_options_response(
+            extract_json_object(response_text, "Could not parse JSON from progression options response."),
+            count,
+        )
+    except Exception:
+        update_project_stats(project_path, phase="outline", success=False, usage=None)
+        raise
+
+    current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
+    session_id = f"{utc_now().replace('-', '').replace(':', '').replace('+00:00', 'Z')}_{uuid4().hex[:8]}"
+    session = {
+        "session_id": session_id,
+        "created_at": utc_now(),
+        "project_chapter_count": current_chapter_count,
+        "target_chapter_number": current_chapter_count + 1,
+        "planning_mode": planning_mode,
+        "source_user_request": user_request.strip(),
+        "runtime_overrides": sanitize_runtime_overrides(runtime_overrides),
+        "recommended_option_id": normalized["recommended_option_id"],
+        "options": normalized["options"],
+        "status": "pending",
+        "selected_option_id": "",
+        "selection_feedback": "",
+    }
+    save_progression_session(project_path, session)
+    log_success(
+        f"progression_options: generated {len(session['options'])} options for chapter {session['target_chapter_number']}"
+    )
+    return session
+
+
+def resolve_progression_selection(
+    project_path: str,
+    session_id: str,
+    option_ref: str,
+    *,
+    selection_feedback: str = "",
+) -> dict:
+    session = ensure_fresh_progression_session(project_path, load_progression_session(project_path, session_id))
+    if session.get("status") == "stale":
+        raise ValueError("当前推进选项已过期，请重新生成推进选项。")
+
+    option_ref = str(option_ref or "").strip()
+    if not option_ref:
+        raise ValueError("请选择一个推进选项。")
+
+    options = session.get("options") or []
+    selected = None
+    if option_ref.isdigit():
+        index = int(option_ref) - 1
+        if 0 <= index < len(options):
+            selected = options[index]
+    if selected is None:
+        for option in options:
+            if str(option.get("option_id", "")).strip() == option_ref:
+                selected = option
+                break
+    if selected is None:
+        raise ValueError("未找到对应的推进选项，请重新生成推进选项。")
+
+    session["selected_option_id"] = selected["option_id"]
+    session["selection_feedback"] = selection_feedback.strip()
+    session["status"] = "selected"
+    save_progression_session(project_path, session)
+
+    chapter_outline_override = deepcopy(selected.get("chapter_outline") or {})
+    if session.get("planning_mode") == PLANNING_MODE_CHAPTER and chapter_outline_override:
+        apply_chapter_outline_override(
+            project_path,
+            safe_int(session.get("target_chapter_number"), 0),
+            chapter_outline_override,
+        )
+        log_success("progression_options: applied selected chapter outline override")
+    elif chapter_outline_override:
+        log_warning("progression_options: selected option carries display-only chapter outline in non-chapter mode")
+
+    return {
+        "session": session,
+        "planning_mode": session.get("planning_mode", ""),
+        "user_request": _build_selection_request(selected, selection_feedback),
+        "chapter_outline_override": chapter_outline_override if session.get("planning_mode") == PLANNING_MODE_CHAPTER else None,
+        "selected_option": selected,
+    }
