@@ -467,7 +467,6 @@ python3 app.py next --project ./output/novel_project_xxx --config ./runtime_conf
 - `NOVEL_TEMPERATURE`
 - `NOVEL_MAX_TOKENS`
 - `NOVEL_TIMEOUT`
-- `NOVEL_THINKING_LEVEL`
 - `NOVEL_OUTLINE_REQUEST`
 
 续写时可用：
@@ -477,14 +476,7 @@ python3 app.py next --project ./output/novel_project_xxx --config ./runtime_conf
 - `NOVEL_TEMPERATURE_OVERRIDE`
 - `NOVEL_MAX_TOKENS_OVERRIDE`
 - `NOVEL_TIMEOUT_OVERRIDE`
-- `NOVEL_THINKING_LEVEL_OVERRIDE`
 - `NOVEL_API_KEY`
-
-例如：
-
-```bash
-NOVEL_THINKING_LEVEL=high ./linux/quick_start.sh gemini "现代校园极寒生存故事"
-```
 
 ## 9. 用户想看的内容
 

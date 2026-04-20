@@ -2,47 +2,104 @@
 
 from __future__ import annotations
 
-import json
 from copy import deepcopy
 from pathlib import Path
 
-from common_utils import emit_progress, extract_json_object
+from common_utils import emit_progress, extract_json_object, safe_int
 from console_logger import log_info, log_success, log_warning
+from context_builder import (
+    SUMMARY_LIST_LIMITS,
+    build_retrieval_tags,
+    build_summary_context,
+    normalize_live_plot_state,
+    write_arc_summary,
+)
 from llm_client import generate_text_with_metadata
 from prompt_builder import build_summary_prompt
-from project_manager import load_json, save_json, update_project_stats
-
-
-SUMMARY_KEYS = (
-    "recent_events",
-    "open_threads",
-    "foreshadowing",
-    "character_updates",
-    "next_chapter_goal",
+from project_manager import (
+    load_json,
+    load_project,
+    record_context_telemetry,
+    save_json,
+    update_project_stats,
 )
 
-def _normalize_summary(summary: dict) -> dict:
-    normalized = {}
-    for key in SUMMARY_KEYS:
-        value = summary.get(key, [] if key != "next_chapter_goal" else "")
-        if key == "next_chapter_goal":
-            normalized[key] = value if isinstance(value, str) else str(value)
-        elif isinstance(value, list):
-            normalized[key] = value
-        elif value is None:
-            normalized[key] = []
-        else:
-            normalized[key] = [str(value)]
+
+def _normalize_list(value: object, *, max_items: int) -> list[str]:
+    items = value or []
+    if not isinstance(items, list):
+        items = [items]
+    normalized = []
+    seen = set()
+    for item in items:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        normalized.append(text)
+        seen.add(text)
+        if len(normalized) >= max_items:
+            break
+    return normalized
+
+
+def _normalize_summary(summary: dict, current_state: dict) -> dict:
+    live_state = normalize_live_plot_state({**current_state, **(summary if isinstance(summary, dict) else {})})
+    normalized = {
+        "chapter_summary": str((summary or {}).get("chapter_summary", "") or "").strip(),
+        "current_location": live_state.get("current_location", ""),
+        "current_time": live_state.get("current_time", ""),
+        "current_arc": live_state.get("current_arc", ""),
+        "recent_events": live_state.get("recent_events", []),
+        "open_threads": live_state.get("open_threads", []),
+        "resolved_threads": live_state.get("resolved_threads", []),
+        "foreshadowing": live_state.get("foreshadowing", []),
+        "character_updates": live_state.get("character_updates", []),
+        "active_characters": live_state.get("active_characters", []),
+        "retrieval_tags": _normalize_list((summary or {}).get("retrieval_tags"), max_items=SUMMARY_LIST_LIMITS["retrieval_tags"]),
+        "next_chapter_goal": str((summary or {}).get("next_chapter_goal", "") or "").strip(),
+    }
+    if not normalized["chapter_summary"]:
+        normalized["chapter_summary"] = "；".join(normalized["recent_events"][:2])[:280]
+    if not normalized["retrieval_tags"]:
+        normalized["retrieval_tags"] = build_retrieval_tags(normalized)
     return normalized
 
 
 def _fallback_summary(new_text: str, current_state: dict) -> dict:
-    fallback = _normalize_summary(current_state)
+    fallback = _normalize_summary(current_state, current_state)
     excerpt = new_text.strip().replace("\n", " ")
-    fallback["recent_events"] = current_state.get("recent_events", []) + [excerpt[:200]]
+    fallback["chapter_summary"] = excerpt[:220]
+    fallback["recent_events"] = _normalize_list(
+        list(current_state.get("recent_events", [])) + [excerpt[:200]],
+        max_items=SUMMARY_LIST_LIMITS["recent_events"],
+    )
     if not fallback["next_chapter_goal"]:
         fallback["next_chapter_goal"] = current_state.get("next_chapter_goal", "")
+    if not fallback["current_arc"]:
+        fallback["current_arc"] = current_state.get("current_arc", "")
+    fallback["retrieval_tags"] = build_retrieval_tags(fallback)
     return fallback
+
+
+def _merge_state(current_state: dict, summary: dict) -> dict:
+    updated = normalize_live_plot_state(deepcopy(current_state))
+
+    for key in ("current_location", "current_time", "current_arc", "next_chapter_goal"):
+        value = str(summary.get(key, "") or "").strip()
+        if value:
+            updated[key] = value
+
+    for key in ("recent_events", "foreshadowing", "character_updates", "active_characters", "resolved_threads"):
+        updated[key] = _normalize_list(summary.get(key), max_items=SUMMARY_LIST_LIMITS[key])
+
+    resolved = set(updated.get("resolved_threads", []))
+    open_threads = [
+        item
+        for item in _normalize_list(summary.get("open_threads"), max_items=SUMMARY_LIST_LIMITS["open_threads"])
+        if item not in resolved
+    ]
+    updated["open_threads"] = open_threads[: SUMMARY_LIST_LIMITS["open_threads"]]
+    return updated
 
 
 def update_plot_state(project_path: str, new_text: str, config: dict, progress_callback=None) -> None:
@@ -50,17 +107,21 @@ def update_plot_state(project_path: str, new_text: str, config: dict, progress_c
     emit_progress(progress_callback, "summary_prepare", "正在总结新章节并刷新剧情状态")
     base = Path(project_path)
     plot_state_path = base / "plot_state.json"
-    characters_path = base / "characters.json"
     summaries_dir = base / "summaries"
     summaries_dir.mkdir(parents=True, exist_ok=True)
 
-    current_state = load_json(str(plot_state_path))
-    characters = load_json(str(characters_path))
-    prompt_data = {
-        "plot_state": current_state,
-        "characters": characters,
-    }
-    prompt = build_summary_prompt(prompt_data, new_text)
+    project_data = load_project(project_path)
+    current_state = normalize_live_plot_state(load_json(str(plot_state_path)))
+    prompt_context = build_summary_context(project_path, project_data, new_text)
+    prompt = build_summary_prompt(prompt_context, new_text)
+    record_context_telemetry(
+        project_path,
+        "summary",
+        prompt_chars=len(prompt),
+        section_chars=prompt_context.get("section_chars"),
+        planning_mode=config.get("planning_mode", ""),
+        extra={"target_chapter_number": safe_int(project_data.get("project", {}).get("chapter_count"), 0)},
+    )
 
     summary = None
     last_error = None
@@ -83,7 +144,8 @@ def update_plot_state(project_path: str, new_text: str, config: dict, progress_c
                 usage=metadata.get("usage"),
             )
             summary = _normalize_summary(
-                extract_json_object(response_text, "Could not parse JSON from summary response.")
+                extract_json_object(response_text, "Could not parse JSON from summary response."),
+                current_state,
             )
             log_success("剧情状态更新: 模型总结成功，已解析状态 JSON。")
             break
@@ -97,13 +159,12 @@ def update_plot_state(project_path: str, new_text: str, config: dict, progress_c
         if last_error is not None:
             summary["last_summary_error"] = str(last_error)
 
-    updated_state = deepcopy(current_state)
-    for key in SUMMARY_KEYS:
-        updated_state[key] = summary[key]
+    updated_state = _merge_state(current_state, summary)
     save_json(str(plot_state_path), updated_state)
 
     chapter_count = load_json(str(base / "project.json")).get("chapter_count", 0)
     summary_path = summaries_dir / f"summary_{chapter_count:04d}.json"
     save_json(str(summary_path), summary)
+    write_arc_summary(project_path, safe_int(chapter_count, 0))
     emit_progress(progress_callback, "summary_done", "剧情状态已更新并保存")
     log_success(f"剧情状态更新: 已写入 plot_state.json 和 {summary_path.name}")

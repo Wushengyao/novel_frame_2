@@ -214,8 +214,6 @@ def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[st
         temperature = config.get("temperature", 1.0)
         max_tokens = config.get("max_tokens", 4000)
         timeout = _resolve_timeout(config, "gemini")
-        thinking_level = config.get("thinking_level")
-        thinking_budget = config.get("thinking_budget")
         api_base = (
             config.get("api_base", "").strip()
             or "https://generativelanguage.googleapis.com/v1beta"
@@ -250,14 +248,6 @@ def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[st
                 "responseMimeType": response_mime_type,
             },
         }
-        if thinking_level is not None:
-            body["generationConfig"]["thinkingConfig"] = {
-                "thinkingLevel": str(thinking_level)
-            }
-        elif thinking_budget is not None:
-            body["generationConfig"]["thinkingConfig"] = {
-                "thinkingBudget": int(thinking_budget)
-            }
         payload = _request_json(endpoint, headers, body, timeout)
         return _extract_gemini_text(payload), {
             "provider": provider,

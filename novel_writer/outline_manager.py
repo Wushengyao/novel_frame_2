@@ -8,9 +8,16 @@ from pathlib import Path
 
 from common_utils import emit_progress, extract_json_object, safe_int, utc_now
 from console_logger import log_error, log_info, log_success, log_warning
+from context_builder import build_chapter_outline_context, build_volume_outline_context
 from llm_client import generate_text_with_metadata
 from prompt_builder import build_chapter_outline_prompt, build_volume_outline_prompt
-from project_manager import load_json, load_project, save_json, update_project_stats
+from project_manager import (
+    load_json,
+    load_project,
+    record_context_telemetry,
+    save_json,
+    update_project_stats,
+)
 
 
 EMPTY_OUTLINE_META = {
@@ -282,12 +289,23 @@ def regenerate_volume_outline(
     log_info(f"分卷大纲: 开始生成，项目={project_path}")
     emit_progress(progress_callback, "volume_outline", "正在生成分卷大纲")
     project_data = load_project(project_path)
+    prompt_context = build_volume_outline_context(
+        project_path,
+        project_data,
+        _build_completed_chapter_context(project_data),
+        user_request,
+    )
     prompt = build_volume_outline_prompt(
-        {
-            **project_data,
-            "completed_chapters": _build_completed_chapter_context(project_data),
-        },
+        prompt_context,
         user_request=user_request,
+    )
+    record_context_telemetry(
+        project_path,
+        "outline",
+        prompt_chars=len(prompt),
+        section_chars=prompt_context.get("section_chars"),
+        planning_mode=config.get("planning_mode", ""),
+        extra={"prompt_type": "volume_outline"},
     )
     outlines = _generate_outline_json(
         prompt,
@@ -409,12 +427,31 @@ def regenerate_chapter_outline(
                 f"分章大纲: 正在生成第 {volume.get('volume_number', '?')} 卷，"
                 f"计划 {planned_count} 章，已完成 {completed_count} 章。"
             )
-            prompt = build_chapter_outline_prompt(
+            prompt_context = build_chapter_outline_context(
+                project_path,
                 project_data,
+                volume,
+                new_volumes,
+                preserved_completed,
+                user_request,
+            )
+            prompt = build_chapter_outline_prompt(
+                prompt_context,
                 volume=volume,
                 previous_volumes=new_volumes,
                 completed_chapters=preserved_completed,
                 user_request=user_request,
+            )
+            record_context_telemetry(
+                project_path,
+                "outline",
+                prompt_chars=len(prompt),
+                section_chars=prompt_context.get("section_chars"),
+                planning_mode=config.get("planning_mode", ""),
+                extra={
+                    "prompt_type": "chapter_outline",
+                    "target_volume_number": safe_int(volume.get("volume_number"), 0),
+                },
             )
             try:
                 generated = _generate_outline_json(

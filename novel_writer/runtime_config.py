@@ -36,9 +36,6 @@ DEFAULT_API_BASES = {
     "doubao": "https://ark.cn-beijing.volces.com/api/v3",
     "ollama": "http://127.0.0.1:11434/v1",
 }
-DEFAULT_THINKING_LEVELS = {
-    "gemini": "medium",
-}
 DEFAULT_TIMEOUTS = {
     "ollama": 900,
 }
@@ -74,7 +71,6 @@ RUNTIME_OVERRIDE_KEYS = (
     "temperature",
     "max_tokens",
     "timeout",
-    "thinking_level",
     "planning_mode",
 )
 
@@ -96,10 +92,6 @@ def default_model_for_provider(provider: str) -> str:
 
 def default_api_base_for_provider(provider: str) -> str:
     return DEFAULT_API_BASES.get(normalize_provider(provider, default="openai_compatible"), "")
-
-
-def default_thinking_level(provider: str) -> str:
-    return DEFAULT_THINKING_LEVELS.get(normalize_provider(provider, default="openai_compatible"), "")
 
 
 def default_timeout_for_provider(provider: str) -> int:
@@ -213,12 +205,6 @@ def _normalized_llm_config(raw: dict) -> dict:
         "timeout": resolve_timeout_for_provider(provider, raw.get("timeout", default_timeout_for_provider(provider))),
         "planning_mode": normalize_planning_mode(raw.get("planning_mode"), default=DEFAULT_PLANNING_MODE),
     }
-    thinking_level = str(raw.get("thinking_level", "") or "").strip()
-    if thinking_level:
-        config["thinking_level"] = thinking_level
-    thinking_budget = raw.get("thinking_budget")
-    if thinking_budget not in (None, ""):
-        config["thinking_budget"] = thinking_budget
     return config
 
 
@@ -244,7 +230,6 @@ def build_runtime_config(project_path: str | Path, overrides: dict[str, object],
     provider = normalize_provider(runtime_overrides.get("provider"), default=saved_provider)
     saved_model_name = str(saved.get("model_name") or saved.get("model") or "").strip()
     saved_api_base = str(saved.get("api_base", "") or "").strip()
-    saved_thinking_level = str(saved.get("thinking_level", "") or "").strip()
 
     model_name = (
         runtime_overrides.get("model_name")
@@ -277,16 +262,6 @@ def build_runtime_config(project_path: str | Path, overrides: dict[str, object],
             default=DEFAULT_PLANNING_MODE,
         ),
     }
-    thinking_level = runtime_overrides.get("thinking_level")
-    if not thinking_level and provider == saved_provider:
-        thinking_level = saved_thinking_level
-    if thinking_level:
-        runtime["thinking_level"] = str(thinking_level).strip()
-    elif default_thinking_level(provider):
-        runtime["thinking_level"] = default_thinking_level(provider)
-    thinking_budget = saved.get("thinking_budget")
-    if thinking_budget not in (None, ""):
-        runtime["thinking_budget"] = thinking_budget
     if provider_requires_api_key(provider) and not runtime["api_key"]:
         raise RuntimeError(f"provider={provider} missing API key, please fill api_keys.sh")
     return runtime

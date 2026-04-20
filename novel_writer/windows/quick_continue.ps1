@@ -23,7 +23,6 @@ $DefaultApiBaseOverride = ""
 $DefaultTemperatureOverride = ""
 $DefaultMaxTokensOverride = ""
 $DefaultTimeoutOverride = ""
-$DefaultThinkingLevelOverride = ""
 $DefaultPlanningModeOverride = ""
 $DefaultContinueMode = "direct"
 $DefaultGuidedOptionCount = 4
@@ -91,7 +90,6 @@ $apiBaseOverride = if ($env:NOVEL_API_BASE_OVERRIDE) { $env:NOVEL_API_BASE_OVERR
 $temperatureOverride = if ($env:NOVEL_TEMPERATURE_OVERRIDE) { $env:NOVEL_TEMPERATURE_OVERRIDE } else { $DefaultTemperatureOverride }
 $maxTokensOverride = if ($env:NOVEL_MAX_TOKENS_OVERRIDE) { $env:NOVEL_MAX_TOKENS_OVERRIDE } else { $DefaultMaxTokensOverride }
 $timeoutOverride = if ($env:NOVEL_TIMEOUT_OVERRIDE) { $env:NOVEL_TIMEOUT_OVERRIDE } else { $DefaultTimeoutOverride }
-$thinkingLevelOverride = if ($env:NOVEL_THINKING_LEVEL_OVERRIDE) { $env:NOVEL_THINKING_LEVEL_OVERRIDE } else { $DefaultThinkingLevelOverride }
 $planningModeOverride = if ($env:NOVEL_PLANNING_MODE_OVERRIDE) { Normalize-PlanningMode $env:NOVEL_PLANNING_MODE_OVERRIDE } elseif ($PlanningModeOverride) { $PlanningModeOverride } else { $DefaultPlanningModeOverride }
 
 if ($ContinueMode -eq "guided" -and $ChapterCount -ne 1) {
@@ -118,7 +116,6 @@ try {
 		-TemperatureOverride $temperatureOverride `
 		-MaxTokensOverride $maxTokensOverride `
 		-TimeoutOverride $timeoutOverride `
-		-ThinkingLevelOverride $thinkingLevelOverride `
 		-PlanningModeOverride $planningModeOverride
 
 	if ($ContinueMode -eq "guided") {

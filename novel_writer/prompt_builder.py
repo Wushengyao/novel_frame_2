@@ -106,10 +106,13 @@ def build_init_prompt(data: dict) -> str:
   }},
   "plot_state": {{
     "main_plot": "",
+    "current_arc": "",
     "recent_events": [],
     "open_threads": [],
+    "resolved_threads": [],
     "foreshadowing": [],
     "character_updates": [],
+    "active_characters": [],
     "current_location": "",
     "current_time": "",
     "next_chapter_goal": ""
@@ -124,6 +127,54 @@ def build_init_prompt(data: dict) -> str:
 
 
 def build_volume_outline_prompt(data: dict, user_request: str = "") -> str:
+    if isinstance(data, dict) and isinstance(data.get("sections"), dict):
+        sections = data["sections"]
+        return f"""你是一名长篇小说总策划助手。请先为这部小说设计分卷大纲。
+
+【作者意图】
+{sections.get("author_intent", "")}
+
+【世界观速览】
+{sections.get("world", "")}
+
+【角色速览】
+{sections.get("characters", "")}
+
+【当前 live state】
+{sections.get("live_state", "")}
+
+【文风契约】
+{sections.get("style_contract", "")}
+
+【已完成章节（如有）】
+{sections.get("completed_chapters", "[]")}
+
+【用户对分卷的额外要求】
+{sections.get("user_request", user_request.strip() or "无额外要求。请基于现有设定给出合理的长篇分卷规划。")}
+
+要求：
+1. 输出必须是合法 JSON
+2. 分卷规划要适合长篇连载，整体节奏要有递进，不要过早完结
+3. 已完成章节是既成事实，不要推翻
+4. 每卷都要有明确阶段目标、核心矛盾和推进重点
+5. `planned_chapter_count` 给出合理正整数，建议单卷 4 到 15 章
+6. 卷与卷之间必须承接自然，既延续主线，也给人物关系升级留空间
+7. 不要输出解释，不要输出 Markdown
+
+输出 JSON：
+{{
+  "volumes": [
+    {{
+      "volume_number": 1,
+      "title": "",
+      "summary": "",
+      "story_goal": "",
+      "planned_chapter_count": 8
+    }}
+  ]
+}}
+"""
+
     project = _to_block(data.get("project", {}))
     world = _to_block(data.get("world", {}))
     characters = _to_block(data.get("characters", {}))
@@ -190,6 +241,62 @@ def build_chapter_outline_prompt(
     completed_chapters: list[dict] | None = None,
     user_request: str = "",
 ) -> str:
+    if isinstance(data, dict) and isinstance(data.get("sections"), dict):
+        sections = data["sections"]
+        current_volume = sections.get("current_volume", _to_block(volume))
+        return f"""你是一名长篇小说分章策划助手。请基于当前分卷大纲，为这一卷设计分章大纲。
+
+【作者意图】
+{sections.get("author_intent", "")}
+
+【世界观速览】
+{sections.get("world", "")}
+
+【角色速览】
+{sections.get("characters", "")}
+
+【当前 live state】
+{sections.get("live_state", "")}
+
+【文风契约】
+{sections.get("style_contract", "")}
+
+【前序分卷摘要】
+{sections.get("previous_volumes", "[]")}
+
+【当前卷大纲】
+{current_volume}
+
+【本卷已完成章节（如有）】
+{sections.get("completed_chapters", "[]")}
+
+【用户对分章的额外要求】
+{sections.get("user_request", user_request.strip() or "无额外要求。请基于当前卷纲细化出稳定的分章推进。")}
+
+要求：
+1. 输出必须是合法 JSON
+2. 本卷必须输出与 `planned_chapter_count` 一致数量的章节规划
+3. 已完成章节是既成事实，剩余章节要自然衔接
+4. 每章都要有明确任务，不要让多章内容重复或空转
+5. `summary` 写这一章会发生什么，`goal` 写这一章必须完成的叙事目标
+6. `key_events` 列出 2 到 5 个关键事件或推进点
+7. 不要输出解释，不要输出 Markdown
+
+输出 JSON：
+{{
+  "volume_number": {int(volume.get("volume_number", 1) or 1)},
+  "chapters": [
+    {{
+      "chapter_in_volume": 1,
+      "title": "",
+      "summary": "",
+      "goal": "",
+      "key_events": []
+    }}
+  ]
+}}
+"""
+
     project = _to_block(data.get("project", {}))
     world = _to_block(data.get("world", {}))
     characters = _to_block(data.get("characters", {}))
@@ -263,6 +370,60 @@ def build_batch_chapter_plan_prompt(
     upcoming_chapters: list[dict],
     user_request: str,
 ) -> str:
+    if isinstance(data, dict) and isinstance(data.get("sections"), dict):
+        sections = data["sections"]
+        return f"""你是长篇连载小说的续写规划助手。请根据用户现在想看的情节，为接下来几章做一次短期续写编排。
+
+【作者意图】
+{sections.get("author_intent", "")}
+
+【世界观速览】
+{sections.get("static_world", "")}
+
+【角色速览】
+{sections.get("static_characters", "")}
+
+【当前 live state】
+{sections.get("live_state", "")}
+
+【最近场景与近两章摘要】
+{sections.get("recent_scene", "")}
+
+【文风契约】
+{sections.get("style_contract", "")}
+
+【接下来待写的章节框架】
+{sections.get("upcoming_chapters", _to_block(upcoming_chapters))}
+
+【用户这次想看的内容】
+{sections.get("user_request", user_request.strip())}
+
+要求：
+1. 输出必须是合法 JSON
+2. 把用户想看的内容合理分配到接下来这些章节，而不是每章重复同一句要求
+3. 不同章节可分别承担铺垫、受阻、推进、兑现或余波
+4. 规划必须尊重既有顺序、当前状态与已有任务，尽量做细化和重心调整
+5. 每章都要给出清晰且彼此不同的 `writer_guidance`
+6. `key_events` 列出 2 到 5 个关键推进点
+7. 不要输出解释，不要输出 Markdown
+
+输出 JSON：
+{{
+  "chapters": [
+    {{
+      "chapter_number": 1,
+      "title": "",
+      "summary": "",
+      "goal": "",
+      "key_events": [],
+      "request_focus": "",
+      "request_role": "",
+      "writer_guidance": ""
+    }}
+  ]
+}}
+"""
+
     project = _to_block(data.get("project", {}))
     world = _to_block(data.get("world", {}))
     characters = _to_block(data.get("characters", {}))
@@ -334,6 +495,74 @@ def build_progression_options_prompt(
     current_volume = _to_block(next_context.get("volume", {}))
     current_chapter = _to_block(next_context.get("chapter", {}))
     user_request_block = user_request.strip() or "无额外要求。请仅基于当前状态给出下一章推进选项。"
+
+    if isinstance(data, dict) and isinstance(data.get("sections"), dict):
+        sections = data["sections"]
+        return f"""你是长篇连载小说的剧情推进顾问。请为下一章设计若干互斥但都合理的推进方案。
+
+【作者意图】
+{sections.get("author_intent", "")}
+
+【下一章任务卡】
+{sections.get("chapter_task", "")}
+
+【世界观速览】
+{sections.get("static_world", "")}
+
+【角色速览】
+{sections.get("static_characters", "")}
+
+【当前 live state】
+{sections.get("live_state", "")}
+
+【最近场景与近两章摘要】
+{sections.get("recent_scene", "")}
+
+【文风契约】
+{sections.get("style_contract", "")}
+
+【当前 planning mode】
+{sections.get("planning_mode", planning_mode)}
+
+【用户这次想看的方向】
+{sections.get("user_request", user_request_block)}
+
+【需要给出的选项数】
+{sections.get("option_count", option_count)}
+
+要求：
+1. 输出必须是合法 JSON
+2. 必须只针对下一章给方案，不要把两三章后的核心剧情提前塞进来
+3. 必须返回恰好 {int(sections.get("option_count", option_count) or option_count)} 个互斥选项
+4. 方案要尊重既有设定、最近正文、当前 live state 和下一章任务卡，只能细化和调整重心
+5. 每个选项都必须包含 `option_id`、`title`、`summary`、`why_now`、`key_events`、`writer_guidance`、`chapter_outline`、`recommended`
+6. `chapter_outline` 必须包含 `title`、`summary`、`goal`、`key_events`
+7. `key_events` 和 `chapter_outline.key_events` 都要给出 2 到 5 个条目
+8. 只能有一个选项 `recommended=true`，并且 `recommended_option_id` 必须与该选项一致
+9. 不要输出解释，不要输出 Markdown
+
+输出 JSON：
+{{
+  "recommended_option_id": "option_1",
+  "options": [
+    {{
+      "option_id": "option_1",
+      "title": "",
+      "summary": "",
+      "why_now": "",
+      "key_events": [],
+      "writer_guidance": "",
+      "chapter_outline": {{
+        "title": "",
+        "summary": "",
+        "goal": "",
+        "key_events": []
+      }},
+      "recommended": true
+    }}
+  ]
+}}
+"""
 
     return f"""你是长篇连载小说的剧情推进顾问。请为“下一章”设计若干互斥但都合理的推进方案，供用户二选一或多选一中的单选。
 
@@ -409,11 +638,60 @@ def build_progression_options_prompt(
 
 def build_writer_prompt(
     data: dict,
-    recent_text: str,
+    recent_text: str = "",
     user_request: str = "",
     current_volume_outline: dict | None = None,
     chapter_outline: dict | None = None,
 ) -> str:
+    if isinstance(data, dict) and isinstance(data.get("sections"), dict):
+        sections = data["sections"]
+        chapter_count = int(data.get("chapter_count", 0) or 0)
+        opening_note = (
+            "当前将要写的是第一章。重点完成开篇铺陈，不要把后续章节才会发生的大事件提前写出。"
+            if chapter_count == 0
+            else "这不是第一章，请延续已有状态、记忆与场景动势。"
+        )
+        return f"""你是一名长篇小说写作助手。请续写下一章。
+
+【作者意图】
+{sections.get("author_intent", "")}
+
+【下一章任务卡】
+{sections.get("chapter_task", "")}
+
+【当前 live state】
+{sections.get("live_state", "")}
+
+【相关设定速览】
+【世界】
+{sections.get("static_world", "")}
+
+【角色】
+{sections.get("static_characters", "")}
+
+【检索到的相关记忆】
+{sections.get("retrieved_memory", "无")}
+
+【最近场景与近两章摘要】
+{sections.get("recent_scene", "")}
+
+【文风契约】
+{sections.get("style_contract", "")}
+
+【开篇说明】
+{opening_note}
+
+要求：
+1. 人物不能 OOC，地点、时间、未解线程与已写正文必须一致
+2. 不遗忘伏笔，也不要把已解决的事情重新写成未解决
+3. 严格只写当前这一章，不要提前完成下一章或后续章节的大事件
+4. 任务卡是当前章节任务的最高优先级来源，但具体场景组织、细节与节奏要保持创造力与活力
+5. 如果结尾需要承接后续内容，可以留下明确悬念或过渡，但不要把后续章核心情节直接写完
+6. 输出纯正文
+7. 不要输出章标题、序号、小标题、Markdown 标题
+8. 字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读
+"""
+
     world = _to_block(data.get("world", {}))
     characters = _to_block(data.get("characters", {}))
     plot_state = _writer_plot_state_block(data.get("plot_state", {}), chapter_outline)
@@ -480,6 +758,48 @@ def build_writer_prompt(
 
 
 def build_summary_prompt(data: dict, new_text: str) -> str:
+    if isinstance(data, dict) and isinstance(data.get("sections"), dict):
+        sections = data["sections"]
+        return f"""请基于新章节更新小说 live state。
+
+【作者意图】
+{sections.get("author_intent", "")}
+
+【已有 live state】
+{sections.get("live_state", "")}
+
+【角色速览】
+{sections.get("static_characters", "")}
+
+【新章节】
+{sections.get("chapter_text", new_text)}
+
+要求：
+1. 输出必须是合法 JSON
+2. `current_location`、`current_time`、`current_arc` 必须根据本章结束时的状态明确更新
+3. `open_threads` 只保留仍未解决的问题，已解决的要写入 `resolved_threads`
+4. `active_characters` 只保留本章真正参与推进的角色名
+5. `chapter_summary` 用 1 到 2 句话概括本章核心推进
+6. `retrieval_tags` 给出便于后续记忆检索的简短标签
+7. 不要输出解释，不要输出 Markdown
+
+输出 JSON：
+{{
+  "chapter_summary": "",
+  "current_location": "",
+  "current_time": "",
+  "current_arc": "",
+  "recent_events": [],
+  "open_threads": [],
+  "resolved_threads": [],
+  "foreshadowing": [],
+  "character_updates": [],
+  "active_characters": [],
+  "retrieval_tags": [],
+  "next_chapter_goal": ""
+}}
+"""
+
     plot_state = _to_block(data.get("plot_state", {}))
     characters = _to_block(data.get("characters", {}))
 

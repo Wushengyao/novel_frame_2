@@ -14,12 +14,14 @@ from chapter_context import (
 )
 from common_utils import emit_progress, extract_json_object, safe_int
 from console_logger import log_info, log_success, log_warning
+from context_builder import build_batch_plan_context
 from llm_client import generate_text_with_metadata
 from outline_manager import ensure_project_outlines
 from project_manager import (
     PLANNING_MODE_CHAPTER,
     PLANNING_MODE_VOLUME,
     load_project,
+    record_context_telemetry,
     update_project_stats,
 )
 from prompt_builder import build_batch_chapter_plan_prompt
@@ -170,7 +172,24 @@ def plan_batch_chapters(
             allow_outline_override=allow_outline_override,
         )
 
-    prompt = build_batch_chapter_plan_prompt(project_data, compact_contexts(upcoming_contexts), request)
+    prompt_context = build_batch_plan_context(
+        project_path,
+        project_data,
+        compact_contexts(upcoming_contexts),
+        request,
+    )
+    prompt = build_batch_chapter_plan_prompt(prompt_context, compact_contexts(upcoming_contexts), request)
+    record_context_telemetry(
+        project_path,
+        "outline",
+        prompt_chars=len(prompt),
+        section_chars=prompt_context.get("section_chars"),
+        planning_mode=planning_mode,
+        extra={
+            "prompt_type": "batch_plan",
+            "requested_chapter_count": count,
+        },
+    )
     try:
         response_text, metadata = generate_text_with_metadata(prompt, config)
         update_project_stats(

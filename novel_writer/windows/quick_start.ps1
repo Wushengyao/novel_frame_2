@@ -3,7 +3,7 @@
 	[string]$StoryRequest = "",
 	[string]$ProjectName = "",
 	[string]$ProjectDescription = "",
-	[string]$PlanningMode = "volume",
+	[string]$PlanningMode = "chapter",
 	[bool]$AutoCreateCoverAndPortraits = $true
 )
 
@@ -27,8 +27,7 @@ $DefaultApiBase = ""
 $DefaultTemperature = "1.0"
 $DefaultMaxTokens = "10240"
 $DefaultTimeout = ""
-$DefaultThinkingLevel = "medium"
-$DefaultPlanningMode = "volume"
+$DefaultPlanningMode = "chapter"
 
 if (-not $PSBoundParameters.ContainsKey("Provider")) {
 	$Provider = Prompt-OptionalValue -PromptText "Provider (gemini/grok/deepseek/doubao/ollama)" -DefaultValue $Provider
@@ -75,7 +74,6 @@ $apiBase = if ($env:NOVEL_API_BASE) { $env:NOVEL_API_BASE } elseif ($DefaultApiB
 $temperature = if ($env:NOVEL_TEMPERATURE) { [double]$env:NOVEL_TEMPERATURE } else { [double]$DefaultTemperature }
 $maxTokens = if ($env:NOVEL_MAX_TOKENS) { [int]$env:NOVEL_MAX_TOKENS } else { [int]$DefaultMaxTokens }
 $timeout = if ($env:NOVEL_TIMEOUT) { [int]$env:NOVEL_TIMEOUT } elseif ($DefaultTimeout) { [int]$DefaultTimeout } else { Get-DefaultTimeoutForProvider $Provider }
-$thinkingLevel = if ($env:NOVEL_THINKING_LEVEL) { $env:NOVEL_THINKING_LEVEL } elseif ($DefaultThinkingLevel) { $DefaultThinkingLevel } else { Get-DefaultThinkingLevelForProvider $Provider }
 
 $outputRoot = Join-Path $ProjectRoot "output"
 $existingProjects = @()
@@ -99,7 +97,6 @@ try {
 		-Temperature $temperature `
 		-MaxTokens $maxTokens `
 		-Timeout $timeout `
-		-ThinkingLevel $thinkingLevel `
 		-PlanningMode $PlanningMode
 
 	$initResult = Invoke-NativeCommandCapture -Executable $pythonExe -Arguments @(

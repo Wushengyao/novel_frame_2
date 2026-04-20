@@ -9,6 +9,7 @@ from uuid import uuid4
 from chapter_context import get_next_context_for_mode, resolve_planning_mode
 from common_utils import emit_progress, extract_json_object, safe_int, utc_now
 from console_logger import log_success, log_warning
+from context_builder import build_progression_context
 from llm_client import generate_text_with_metadata
 from outline_manager import apply_chapter_outline_override
 from project_manager import (
@@ -16,6 +17,7 @@ from project_manager import (
     get_last_chapter_text,
     load_json,
     load_project,
+    record_context_telemetry,
     save_json,
     update_project_stats,
 )
@@ -220,13 +222,33 @@ def generate_progression_options(
     recent_text = get_last_chapter_text(project_path)
     if not recent_text:
         recent_text = "这是开篇前状态。请围绕第一章如何自然开场来给出推进选项。"
-    prompt = build_progression_options_prompt(
+    prompt_context = build_progression_context(
+        project_path,
         project_data,
+        next_context,
+        recent_text,
+        user_request=user_request,
+        option_count=count,
+        planning_mode=planning_mode,
+    )
+    prompt = build_progression_options_prompt(
+        prompt_context,
         recent_text,
         next_context,
         user_request=user_request,
         option_count=count,
         planning_mode=planning_mode,
+    )
+    record_context_telemetry(
+        project_path,
+        "outline",
+        prompt_chars=len(prompt),
+        section_chars=prompt_context.get("section_chars"),
+        planning_mode=planning_mode,
+        extra={
+            "prompt_type": "progression_options",
+            "target_chapter_number": safe_int(project_data["project"].get("chapter_count"), 0) + 1,
+        },
     )
     try:
         response_text, metadata = generate_text_with_metadata(prompt, config)

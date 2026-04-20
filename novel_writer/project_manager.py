@@ -39,10 +39,13 @@ EMPTY_CHARACTER_PROFILE = {
 
 EMPTY_PLOT_STATE = {
     "main_plot": "",
+    "current_arc": "",
     "recent_events": [],
     "open_threads": [],
+    "resolved_threads": [],
     "foreshadowing": [],
     "character_updates": [],
+    "active_characters": [],
     "current_location": "",
     "current_time": "",
     "next_chapter_goal": "",
@@ -54,6 +57,15 @@ EMPTY_STYLE = {
     "requirements": [],
 }
 
+EMPTY_AUTHOR_INTENT = {
+    "premise": "",
+    "long_arc": "",
+    "tone_contract": "",
+    "must_haves": [],
+    "must_not_break": [],
+    "creativity_guidance": "",
+}
+
 DEFAULT_WORLD = deepcopy(EMPTY_WORLD)
 DEFAULT_CHARACTERS = deepcopy(EMPTY_CHARACTERS)
 DEFAULT_PLOT_STATE = deepcopy(EMPTY_PLOT_STATE)
@@ -61,7 +73,7 @@ DEFAULT_STYLE = deepcopy(EMPTY_STYLE)
 PLANNING_MODE_NONE = "none"
 PLANNING_MODE_VOLUME = "volume"
 PLANNING_MODE_CHAPTER = "chapter"
-DEFAULT_PLANNING_MODE = PLANNING_MODE_VOLUME
+DEFAULT_PLANNING_MODE = PLANNING_MODE_CHAPTER
 PLANNING_MODES = {
     PLANNING_MODE_NONE,
     PLANNING_MODE_VOLUME,
@@ -80,13 +92,19 @@ SNAPSHOT_STATE_FILES = (
     "characters.json",
     "plot_state.json",
     "style.json",
+    "author_intent.json",
     "outlines.json",
 )
 ROLLBACK_SUMMARY_KEYS = (
+    "current_arc",
+    "current_location",
+    "current_time",
     "recent_events",
     "open_threads",
+    "resolved_threads",
     "foreshadowing",
     "character_updates",
+    "active_characters",
     "next_chapter_goal",
 )
 
@@ -129,6 +147,10 @@ def _build_project_stats() -> dict:
     return {
         "total": _empty_usage_stats(),
         "by_phase": {phase: _empty_usage_stats() for phase in STATS_PHASES},
+        "context_telemetry": {
+            "recent_runs": [],
+            "last_by_phase": {},
+        },
     }
 
 
@@ -160,10 +182,64 @@ def update_project_stats(project_path: str, phase: str, success: bool, usage: di
     stats.setdefault("total", _empty_usage_stats())
     stats.setdefault("by_phase", {})
     stats["by_phase"].setdefault(phase, _empty_usage_stats())
+    stats.setdefault(
+        "context_telemetry",
+        {
+            "recent_runs": [],
+            "last_by_phase": {},
+        },
+    )
 
     _merge_usage_stats(stats["total"], success=success, usage=usage)
     _merge_usage_stats(stats["by_phase"][phase], success=success, usage=usage)
 
+    project_data["stats"] = stats
+    project_data["updated_at"] = utc_now()
+    save_json(str(project_file), project_data)
+
+
+def record_context_telemetry(
+    project_path: str,
+    phase: str,
+    *,
+    prompt_chars: int,
+    section_chars: dict[str, int] | None = None,
+    planning_mode: str = "",
+    extra: dict | None = None,
+) -> None:
+    project_file = Path(project_path) / "project.json"
+    project_data = load_json(str(project_file))
+    stats = project_data.get("stats") or _build_project_stats()
+    telemetry = stats.setdefault(
+        "context_telemetry",
+        {
+            "recent_runs": [],
+            "last_by_phase": {},
+        },
+    )
+
+    entry = {
+        "created_at": utc_now(),
+        "phase": str(phase or "").strip(),
+        "planning_mode": normalize_planning_mode(planning_mode, default="") if planning_mode else "",
+        "prompt_chars": max(0, int(prompt_chars or 0)),
+        "section_chars": {
+            str(key): max(0, int(value or 0))
+            for key, value in (section_chars or {}).items()
+        },
+    }
+    if isinstance(extra, dict):
+        for key, value in extra.items():
+            if value in (None, "", []):
+                continue
+            entry[str(key)] = value
+
+    recent_runs = telemetry.setdefault("recent_runs", [])
+    recent_runs.append(entry)
+    telemetry["recent_runs"] = recent_runs[-120:]
+    telemetry.setdefault("last_by_phase", {})[entry["phase"]] = entry
+
+    stats["context_telemetry"] = telemetry
     project_data["stats"] = stats
     project_data["updated_at"] = utc_now()
     save_json(str(project_file), project_data)
@@ -210,8 +286,6 @@ def _build_llm_config(config: dict) -> dict:
         "temperature": config.get("temperature", 0.8),
         "max_tokens": config.get("max_tokens", 4000),
         "timeout": config.get("timeout", 120),
-        "thinking_level": config.get("thinking_level"),
-        "thinking_budget": config.get("thinking_budget"),
         "planning_mode": normalize_planning_mode(config.get("planning_mode")),
     }
 
@@ -255,6 +329,94 @@ def _normalize_characters(characters: dict) -> dict:
     return result
 
 
+def _normalize_author_intent(author_intent: dict | None) -> dict:
+    normalized = deepcopy(EMPTY_AUTHOR_INTENT)
+    if isinstance(author_intent, dict):
+        normalized = _deep_merge(normalized, author_intent)
+
+    result = {
+        "premise": str(normalized.get("premise", "") or "").strip(),
+        "long_arc": str(normalized.get("long_arc", "") or "").strip(),
+        "tone_contract": str(normalized.get("tone_contract", "") or "").strip(),
+        "creativity_guidance": str(normalized.get("creativity_guidance", "") or "").strip(),
+    }
+    for key in ("must_haves", "must_not_break"):
+        value = normalized.get(key) or []
+        if not isinstance(value, list):
+            value = [value]
+        result[key] = [str(item).strip() for item in value if str(item).strip()]
+    return result
+
+
+def _extract_story_constraints(text: str, max_items: int = 5) -> list[str]:
+    source = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    fragments = []
+    for line in source.split("\n"):
+        cleaned = line.strip().lstrip("-").strip()
+        if not cleaned:
+            continue
+        cleaned = re.sub(r"^[0-9]+[、.．:：)]\s*", "", cleaned).strip()
+        if cleaned:
+            fragments.append(cleaned)
+
+    if not fragments and source.strip():
+        fragments = [
+            item.strip()
+            for item in re.split(r"[。！？!?；;]\s*", source)
+            if item.strip()
+        ]
+
+    unique = []
+    seen = set()
+    for fragment in fragments:
+        compact = fragment[:80].strip()
+        if not compact or compact in seen:
+            continue
+        unique.append(compact)
+        seen.add(compact)
+        if len(unique) >= max_items:
+            break
+    return unique
+
+
+def _build_author_intent_from_project(project: dict, world: dict, style: dict, plot_state: dict) -> dict:
+    story_request = str(project.get("story_request", "") or "").strip()
+    project_description = str(project.get("description", "") or "").strip()
+    tone = str(style.get("tone", "") or "").strip()
+    pov = str(style.get("pov", "") or "").strip()
+    premise = project_description or story_request[:240] or str(world.get("setting", "") or "").strip()
+    long_arc = (
+        str(plot_state.get("main_plot", "") or "").strip()
+        or story_request[:240]
+        or project_description
+    )
+    tone_contract = " / ".join(part for part in (tone, pov) if part).strip()
+    style_requirements = style.get("requirements") or []
+    if not isinstance(style_requirements, list):
+        style_requirements = [style_requirements]
+    must_haves = [
+        str(item).strip()
+        for item in style_requirements
+        if str(item).strip()
+    ]
+    must_haves.extend(_extract_story_constraints(story_request, max_items=6))
+    must_not_break = [
+        "人物行为与既有关系不能失真或跳变。",
+        "重大设定、地点状态与时间推进必须与已有正文一致。",
+        "不能提前写完后续章节的核心事件。",
+    ]
+    return _normalize_author_intent(
+        {
+            "premise": premise[:240],
+            "long_arc": long_arc[:240],
+            "tone_contract": tone_contract[:180],
+            "must_haves": must_haves[:6],
+            "must_not_break": must_not_break,
+            "creativity_guidance": "在不破坏设定与记忆的前提下，优先写出有新鲜感的场景调度、互动细节与推进方式。",
+        }
+    )
+
+
 def _build_seed_story_data(config: dict) -> dict:
     use_empty_defaults = config.get("init_with_llm", False)
     world_default = EMPTY_WORLD if use_empty_defaults else DEFAULT_WORLD
@@ -291,10 +453,13 @@ def _build_fallback_story_data(config: dict, seed_data: dict) -> dict:
     if not any(fallback["plot_state"].values()):
         fallback["plot_state"] = {
             "main_plot": project_description or story_request,
+            "current_arc": "开篇阶段",
             "recent_events": [],
             "open_threads": [],
+            "resolved_threads": [],
             "foreshadowing": [],
             "character_updates": [],
+            "active_characters": [],
             "current_location": "",
             "current_time": "",
             "next_chapter_goal": "根据用户需求自然展开故事开篇。",
@@ -322,8 +487,13 @@ def _normalize_initial_plot_state(plot_state: dict) -> dict:
     # or future dangling threads generated during initialization.
     normalized["recent_events"] = []
     normalized["open_threads"] = []
+    normalized["resolved_threads"] = []
     normalized["foreshadowing"] = []
     normalized["character_updates"] = []
+    normalized["active_characters"] = []
+
+    if not str(normalized.get("current_arc", "")).strip():
+        normalized["current_arc"] = "开篇阶段"
 
     if not str(normalized.get("next_chapter_goal", "")).strip():
         normalized["next_chapter_goal"] = "作为第一章自然展开故事开篇，建立人物、环境与核心矛盾。"
@@ -443,6 +613,8 @@ def init_project(config_path: str, progress_callback=None) -> str:
     project_path.mkdir(parents=True, exist_ok=True)
     (project_path / "chapters").mkdir(exist_ok=True)
     (project_path / "summaries").mkdir(exist_ok=True)
+    (project_path / "arc_summaries").mkdir(exist_ok=True)
+    (project_path / "task_cards").mkdir(exist_ok=True)
     (project_path / "illustrations").mkdir(exist_ok=True)
     log_success("init_project: base directories ready")
 
@@ -452,6 +624,15 @@ def init_project(config_path: str, progress_callback=None) -> str:
     characters = generated_data["characters"]
     plot_state = _normalize_initial_plot_state(generated_data["plot_state"])
     style = generated_data["style"]
+    author_intent = _build_author_intent_from_project(
+        {
+            "story_request": config.get("story_request", ""),
+            "description": config.get("project_description", "Structured-memory novel writing project."),
+        },
+        world,
+        style,
+        plot_state,
+    )
     log_info("init_project: writing project json files")
 
     project_data = {
@@ -475,6 +656,7 @@ def init_project(config_path: str, progress_callback=None) -> str:
     save_json(str(project_path / "characters.json"), characters)
     save_json(str(project_path / "plot_state.json"), plot_state)
     save_json(str(project_path / "style.json"), style)
+    save_json(str(project_path / "author_intent.json"), author_intent)
     log_success("init_project: project files written")
 
     from outline_manager import regenerate_chapter_outline, regenerate_volume_outline
@@ -515,17 +697,48 @@ def init_project(config_path: str, progress_callback=None) -> str:
 def load_project(project_path: str) -> dict:
     base = Path(project_path)
     outlines_path = base / "outlines.json"
+    project = load_json(str(base / "project.json"))
+    world = load_json(str(base / "world.json"))
+    characters = _normalize_characters(load_json(str(base / "characters.json")))
+    plot_state = load_json(str(base / "plot_state.json"))
+    style = load_json(str(base / "style.json"))
+    author_intent_path = base / "author_intent.json"
+    author_intent = _normalize_author_intent(
+        load_json(str(author_intent_path))
+        if author_intent_path.exists()
+        else _build_author_intent_from_project(project, world, style, plot_state)
+    )
     return {
-        "project": load_json(str(base / "project.json")),
-        "world": load_json(str(base / "world.json")),
-        "characters": _normalize_characters(load_json(str(base / "characters.json"))),
-        "plot_state": load_json(str(base / "plot_state.json")),
-        "style": load_json(str(base / "style.json")),
+        "project": project,
+        "world": world,
+        "characters": characters,
+        "plot_state": plot_state,
+        "style": style,
+        "author_intent": author_intent,
         "outlines": load_json(str(outlines_path)) if outlines_path.exists() else {"meta": {}, "volumes": []},
         "chapters_path": str(base / "chapters"),
         "summaries_path": str(base / "summaries"),
+        "arc_summaries_path": str(base / "arc_summaries"),
+        "task_cards_path": str(base / "task_cards"),
         "illustrations_path": str(base / "illustrations"),
     }
+
+
+def ensure_author_intent(project_path: str) -> dict:
+    base = Path(project_path)
+    path = base / "author_intent.json"
+    if path.exists():
+        return _normalize_author_intent(load_json(str(path)))
+
+    project_data = load_project(project_path)
+    author_intent = _build_author_intent_from_project(
+        project_data["project"],
+        project_data["world"],
+        project_data["style"],
+        project_data["plot_state"],
+    )
+    save_json(str(path), author_intent)
+    return author_intent
 
 
 def _parse_numbered_name(name: str, prefix: str, suffix: str) -> int | None:
@@ -631,10 +844,15 @@ def _restore_plot_state_from_summary(project_path: str, chapter_count: int) -> s
     plot_state = load_json(str(plot_state_path))
 
     if chapter_count == 0:
+        plot_state["current_arc"] = "开篇阶段"
+        plot_state["current_location"] = ""
+        plot_state["current_time"] = ""
         plot_state["recent_events"] = []
         plot_state["open_threads"] = []
+        plot_state["resolved_threads"] = []
         plot_state["foreshadowing"] = []
         plot_state["character_updates"] = []
+        plot_state["active_characters"] = []
         plot_state["next_chapter_goal"] = ""
         save_json(str(plot_state_path), plot_state)
         return "best_effort_reset"
@@ -647,9 +865,9 @@ def _restore_plot_state_from_summary(project_path: str, chapter_count: int) -> s
 
     summary = load_json(str(summary_path))
     for key in ROLLBACK_SUMMARY_KEYS:
-        default_value = "" if key == "next_chapter_goal" else []
+        default_value = "" if key in {"current_arc", "current_location", "current_time", "next_chapter_goal"} else []
         value = summary.get(key, default_value)
-        if key == "next_chapter_goal":
+        if key in {"current_arc", "current_location", "current_time", "next_chapter_goal"}:
             plot_state[key] = value if isinstance(value, str) else str(value or "")
         elif isinstance(value, list):
             plot_state[key] = value
@@ -673,6 +891,8 @@ def _delete_future_artifacts(project_path: str, keep_chapter_count: int) -> dict
     removed = {
         "chapters": [],
         "summaries": [],
+        "arc_summaries": [],
+        "task_cards": [],
         "illustrations": [],
         "snapshots": [],
     }
@@ -688,6 +908,18 @@ def _delete_future_artifacts(project_path: str, keep_chapter_count: int) -> dict
         if chapter_number is not None and chapter_number > keep_chapter_count:
             _remove_path(summary_path)
             removed["summaries"].append(str(summary_path.relative_to(base)).replace("\\", "/"))
+
+    for task_card_path in sorted((base / "task_cards").glob("chapter_*.json")):
+        chapter_number = _parse_numbered_name(task_card_path.name, "chapter_", ".json")
+        if chapter_number is not None and chapter_number > keep_chapter_count:
+            _remove_path(task_card_path)
+            removed["task_cards"].append(str(task_card_path.relative_to(base)).replace("\\", "/"))
+
+    for arc_summary_path in sorted((base / "arc_summaries").glob("arc_*.json")):
+        arc_index = _parse_numbered_name(arc_summary_path.name, "arc_", ".json")
+        if arc_index is not None and arc_index * 5 > keep_chapter_count:
+            _remove_path(arc_summary_path)
+            removed["arc_summaries"].append(str(arc_summary_path.relative_to(base)).replace("\\", "/"))
 
     illustrations_dir = base / "illustrations"
     if illustrations_dir.exists():

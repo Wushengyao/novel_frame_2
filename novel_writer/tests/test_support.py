@@ -19,7 +19,7 @@ def read_json(path: Path) -> dict:
 def create_test_project(base_dir: Path, *, project_id: str = "test", planning_mode: str = "chapter") -> Path:
     project_path = base_dir / f"novel_project_{project_id}"
     project_path.mkdir(parents=True, exist_ok=True)
-    for name in ("chapters", "summaries", "illustrations", "snapshots"):
+    for name in ("chapters", "summaries", "arc_summaries", "task_cards", "illustrations", "snapshots"):
         (project_path / name).mkdir(exist_ok=True)
 
     save_json(
@@ -81,10 +81,13 @@ def create_test_project(base_dir: Path, *, project_id: str = "test", planning_mo
         str(project_path / "plot_state.json"),
         {
             "main_plot": "求生",
+            "current_arc": "开篇阶段",
             "recent_events": [],
             "open_threads": [],
+            "resolved_threads": [],
             "foreshadowing": [],
             "character_updates": [],
+            "active_characters": ["林宇", "苏浅"],
             "current_location": "空间站隔离区",
             "current_time": "入侵后第48小时",
             "next_chapter_goal": "建立临时安全区",
@@ -96,6 +99,17 @@ def create_test_project(base_dir: Path, *, project_id: str = "test", planning_mo
             "tone": "紧张中带温情",
             "pov": "第三人称",
             "requirements": ["延续人物状态"],
+        },
+    )
+    save_json(
+        str(project_path / "author_intent.json"),
+        {
+            "premise": "三人在被入侵后的空间站隔离区内求生。",
+            "long_arc": "从建立安全区逐步走向外部探索与长期生存。",
+            "tone_contract": "紧张中带温情 / 第三人称",
+            "must_haves": ["人物状态延续", "维持生存压力"],
+            "must_not_break": ["人物不能 OOC", "不能提前写完后续主线"],
+            "creativity_guidance": "在保持一致性的前提下，让每章的推进方式有变化。",
         },
     )
     save_json(

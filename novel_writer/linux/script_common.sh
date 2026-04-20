@@ -97,7 +97,7 @@ normalize_planning_mode() {
   case "${mode,,}" in
     none|volume|chapter) printf '%s\n' "${mode,,}" ;;
     "")
-      printf '%s\n' "volume"
+      printf '%s\n' "chapter"
       ;;
     *)
       echo "Unsupported planning mode: $mode (allowed: none / volume / chapter)" >&2
@@ -125,15 +125,6 @@ default_api_base_for_provider() {
     gemini|grok|deepseek) printf '%s\n' "" ;;
     doubao) printf '%s\n' "https://ark.cn-beijing.volces.com/api/v3" ;;
     ollama) printf '%s\n' "http://127.0.0.1:11434/v1" ;;
-  esac
-}
-
-default_thinking_level_for_provider() {
-  local provider
-  provider="$(normalize_provider "$1")"
-  case "$provider" in
-    gemini) printf '%s\n' "medium" ;;
-    grok|deepseek|doubao|ollama) printf '%s\n' "" ;;
   esac
 }
 
@@ -220,7 +211,7 @@ data = {
     "project_path": str(output_root / "novel_project_{project_id}"),
     "init_with_llm": True,
     "story_request": os.environ["NOVEL_STORY_REQUEST"],
-    "planning_mode": os.environ.get("NOVEL_PLANNING_MODE", "volume").strip() or "volume",
+    "planning_mode": os.environ.get("NOVEL_PLANNING_MODE", "chapter").strip() or "chapter",
     "model_provider": provider,
     "model_name": os.environ["NOVEL_MODEL_NAME"],
     "api_base": os.environ["NOVEL_API_BASE"],
@@ -229,9 +220,6 @@ data = {
     "max_tokens": int(os.environ["NOVEL_MAX_TOKENS"]),
     "timeout": int(os.environ.get("NOVEL_TIMEOUT") or default_timeouts.get(provider, 120)),
 }
-thinking_level = os.environ.get("NOVEL_THINKING_LEVEL", "").strip()
-if thinking_level:
-    data["thinking_level"] = thinking_level
 
 outline_request = os.environ.get("NOVEL_OUTLINE_REQUEST", "").strip()
 if outline_request:
@@ -259,7 +247,7 @@ project = json.loads((project_path / "project.json").read_text(encoding="utf-8")
 saved = project.get("llm_config", {})
 saved_provider = str(saved.get("model_provider", "gemini") or "gemini").strip().lower()
 resolved_provider = os.environ.get("NOVEL_PROVIDER_OVERRIDE", "").strip() or saved_provider
-saved_planning_mode = str(project.get("planning_mode", "volume") or "volume").strip().lower() or "volume"
+saved_planning_mode = str(project.get("planning_mode", "chapter") or "chapter").strip().lower() or "chapter"
 resolved_planning_mode = os.environ.get("NOVEL_PLANNING_MODE_OVERRIDE", "").strip() or saved_planning_mode
 default_models = {
   "gemini": "gemini-3.1-pro-preview",
@@ -271,9 +259,6 @@ default_models = {
 default_api_bases = {
   "doubao": "https://ark.cn-beijing.volces.com/api/v3",
   "ollama": "http://127.0.0.1:11434/v1",
-}
-default_thinking_levels = {
-  "gemini": "medium",
 }
 default_timeouts = {
   "gemini": 120,
@@ -314,19 +299,6 @@ data = {
       )
     ),
 }
-
-thinking_level = os.environ.get("NOVEL_THINKING_LEVEL_OVERRIDE", "").strip()
-if not thinking_level:
-  if resolved_provider == saved_provider:
-    thinking_level = str(saved.get("thinking_level", "") or "")
-  else:
-    thinking_level = default_thinking_levels.get(resolved_provider, "")
-if thinking_level:
-    data["thinking_level"] = thinking_level
-
-thinking_budget = str(saved.get("thinking_budget", "") or "").strip()
-if thinking_budget:
-    data["thinking_budget"] = thinking_budget
 
 with open(config_path, "w", encoding="utf-8") as fh:
     json.dump(data, fh, ensure_ascii=False, indent=2)
@@ -375,14 +347,6 @@ data = {
     )
   ),
 }
-
-thinking_level = str(saved.get("thinking_level", "") or "").strip()
-if thinking_level:
-  data["thinking_level"] = thinking_level
-
-thinking_budget = str(saved.get("thinking_budget", "") or "").strip()
-if thinking_budget:
-  data["thinking_budget"] = thinking_budget
 
 with open(config_path, "w", encoding="utf-8") as fh:
   json.dump(data, fh, ensure_ascii=False, indent=2)

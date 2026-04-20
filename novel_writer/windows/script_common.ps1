@@ -183,15 +183,6 @@ function Get-DefaultApiBaseForProvider {
 	}
 }
 
-function Get-DefaultThinkingLevelForProvider {
-	param([string]$Provider)
-
-	switch (Normalize-Provider $Provider) {
-		"gemini" { return "medium" }
-		default { return "" }
-	}
-}
-
 function Get-DefaultTimeoutForProvider {
 	param([string]$Provider)
 
@@ -209,7 +200,7 @@ function Normalize-PlanningMode {
 		"none" { return "none" }
 		"volume" { return "volume" }
 		"chapter" { return "chapter" }
-		"" { return "volume" }
+		"" { return "chapter" }
 		default { throw "Unsupported planning mode: $Mode (allowed: none / volume / chapter)" }
 	}
 }
@@ -370,8 +361,7 @@ function Write-InitConfig {
 		[double]$Temperature,
 		[int]$MaxTokens,
 		[int]$Timeout,
-		[string]$ThinkingLevel = "",
-		[string]$PlanningMode = "volume"
+		[string]$PlanningMode = "chapter"
 	)
 
 	$outputRoot = Join-Path $ProjectRoot "output"
@@ -395,10 +385,6 @@ function Write-InitConfig {
 		timeout = $Timeout
 	}
 
-	if (-not [string]::IsNullOrWhiteSpace($ThinkingLevel)) {
-		$config["thinking_level"] = $ThinkingLevel
-	}
-
 	Write-Utf8JsonFile -Path $OutputPath -Data $config
 }
 
@@ -413,7 +399,6 @@ function Write-ContinueConfig {
 		[string]$TemperatureOverride = "",
 		[string]$MaxTokensOverride = "",
 		[string]$TimeoutOverride = "",
-		[string]$ThinkingLevelOverride = "",
 		[string]$PlanningModeOverride = ""
 	)
 
@@ -467,16 +452,6 @@ function Write-ContinueConfig {
 		Resolve-ProviderTimeout -Provider $resolvedProvider -Timeout $null
 	}
 
-	$thinkingLevel = if ($ThinkingLevelOverride) {
-		$ThinkingLevelOverride
-	}
-	elseif ($resolvedProvider -eq $savedProvider -and $saved.thinking_level) {
-		"$($saved.thinking_level)"
-	}
-	else {
-		Get-DefaultThinkingLevelForProvider $resolvedProvider
-	}
-
 	$planningMode = if ($PlanningModeOverride) {
 		Normalize-PlanningMode $PlanningModeOverride
 	}
@@ -484,7 +459,7 @@ function Write-ContinueConfig {
 		Normalize-PlanningMode "$($project.planning_mode)"
 	}
 	else {
-		"volume"
+		"chapter"
 	}
 
 	$config = [ordered]@{
@@ -496,14 +471,6 @@ function Write-ContinueConfig {
 		max_tokens = $maxTokens
 		timeout = $timeout
 		planning_mode = $planningMode
-	}
-
-	if (-not [string]::IsNullOrWhiteSpace($thinkingLevel)) {
-		$config["thinking_level"] = $thinkingLevel
-	}
-
-	if ($saved.thinking_budget) {
-		$config["thinking_budget"] = "$($saved.thinking_budget)"
 	}
 
 	Write-Utf8JsonFile -Path $OutputPath -Data $config
@@ -571,14 +538,6 @@ function Write-IllustrateConfig {
 		temperature = $temperature
 		max_tokens = $maxTokens
 		timeout = $timeout
-	}
-
-	if ($saved.thinking_level) {
-		$config["thinking_level"] = "$($saved.thinking_level)"
-	}
-
-	if ($saved.thinking_budget) {
-		$config["thinking_budget"] = "$($saved.thinking_budget)"
 	}
 
 	Write-Utf8JsonFile -Path $OutputPath -Data $config

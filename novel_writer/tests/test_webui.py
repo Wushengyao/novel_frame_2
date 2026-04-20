@@ -60,8 +60,24 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         conn.close()
         return response
 
+    def _wait_for_job_status(self, job_id: str, statuses: set[str] | None = None) -> dict:
+        target_statuses = statuses or {"succeeded", "failed"}
+        for _ in range(30):
+            job = webui.JOB_REGISTRY.get(job_id)
+            if job and job.get("status") in target_statuses:
+                return job
+            time.sleep(0.1)
+        self.fail(f"job {job_id} did not reach one of {sorted(target_statuses)}")
+
     def test_progression_options_endpoint_saves_session_and_project_page_reflects_it(self) -> None:
-        options_payload = {
+        session_payload = {
+            "session_id": "session_generated",
+            "created_at": "2026-04-20T00:00:00+00:00",
+            "project_chapter_count": 0,
+            "target_chapter_number": 1,
+            "planning_mode": "chapter",
+            "source_user_request": "先看试探",
+            "runtime_overrides": {},
             "recommended_option_id": "option_1",
             "options": [
                 {
@@ -78,59 +94,22 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                         "key_events": ["规划路线", "短程离开"],
                     },
                     "recommended": True,
-                },
-                {
-                    "option_id": "option_2",
-                    "title": "加固防线",
-                    "summary": "优先内部整备。",
-                    "why_now": "先稳住安全区。",
-                    "key_events": ["检查门锁", "重新分工"],
-                    "writer_guidance": "偏向内部磨合。",
-                    "chapter_outline": {
-                        "title": "加固防线",
-                        "summary": "优先整备内部。",
-                        "goal": "稳住据点",
-                        "key_events": ["检查门锁", "重新分工"],
-                    },
-                    "recommended": False,
-                },
-                {
-                    "option_id": "option_3",
-                    "title": "修复传感器",
-                    "summary": "先修传感设备。",
-                    "why_now": "需要更多环境信息。",
-                    "key_events": ["清点零件", "测试线路"],
-                    "writer_guidance": "偏向技术协作。",
-                    "chapter_outline": {
-                        "title": "修复传感器",
-                        "summary": "尝试恢复监测设备。",
-                        "goal": "恢复基础感知能力",
-                        "key_events": ["清点零件", "测试线路"],
-                    },
-                    "recommended": False,
-                },
-                {
-                    "option_id": "option_4",
-                    "title": "内部磨合",
-                    "summary": "进一步确定合作关系。",
-                    "why_now": "后续外出需要更强默契。",
-                    "key_events": ["确认边界", "重新协商分工"],
-                    "writer_guidance": "突出人物关系。",
-                    "chapter_outline": {
-                        "title": "内部磨合",
-                        "summary": "重新确认合作方式。",
-                        "goal": "增强团队默契",
-                        "key_events": ["确认边界", "重新协商分工"],
-                    },
-                    "recommended": False,
-                },
+                }
             ],
+            "status": "pending",
+            "selected_option_id": "",
+            "selection_feedback": "",
         }
 
-        with patch(
-            "progression_manager.generate_text_with_metadata",
-            return_value=(json.dumps(options_payload, ensure_ascii=False), {"usage": {}}),
-        ):
+        def fake_generate(*args, **kwargs):
+            (self.project_path / "progression_sessions").mkdir(exist_ok=True)
+            (self.project_path / "progression_sessions" / "progression_session_generated.json").write_text(
+                json.dumps(session_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return session_payload
+
+        with patch("webui.generate_progression_options", side_effect=fake_generate):
             response = self._post(
                 f"/project/web/progression-options",
                 "option_count=4&planning_mode=chapter&user_request=%E5%85%88%E7%9C%8B%E8%AF%95%E6%8E%A2",
@@ -138,12 +117,15 @@ class WebUiGuidedFlowTests(unittest.TestCase):
 
         self.assertEqual(response.status, 303)
         self.assertIn("/project/web", response.getheader("Location"))
-        session_files = list((self.project_path / "progression_sessions").glob("progression_*.json"))
-        self.assertEqual(len(session_files), 1)
+        jobs = webui.JOB_REGISTRY.list_jobs(project_id="web", active_only=False, limit=8)
+        progression_jobs = [job for job in jobs if job.get("kind") == "progression_options"]
+        self.assertEqual(len(progression_jobs), 1)
+        self._wait_for_job_status(progression_jobs[0]["id"])
 
         page = self._get("/project/web")
         self.assertEqual(page.status, 200)
         self.assertIn("先探查走廊", page.body)
+        self.assertIn("project-layout", page.body)
 
     def test_continue_guided_endpoint_creates_background_job(self) -> None:
         session = {
@@ -193,13 +175,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertTrue(location.startswith("/job/"))
         job_id = location.rsplit("/", 1)[-1]
 
-        for _ in range(20):
-            job = webui.JOB_REGISTRY.get(job_id)
-            if job and job.get("status") in {"succeeded", "failed"}:
-                break
-            time.sleep(0.1)
-        else:
-            self.fail("guided continue job did not finish in time")
+        self._wait_for_job_status(job_id)
 
         page = self._get(location)
         self.assertEqual(page.status, 200)
@@ -251,6 +227,90 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             )
 
         self.assertEqual(captured["config"]["model_name"], "qwen2.5:14b")
+
+    def test_continue_async_starts_followup_progression_job(self) -> None:
+        session_payload = {
+            "session_id": "session_auto",
+            "created_at": "2026-04-20T00:00:00+00:00",
+            "project_chapter_count": 1,
+            "target_chapter_number": 2,
+            "planning_mode": "chapter",
+            "source_user_request": "",
+            "runtime_overrides": {},
+            "recommended_option_id": "option_1",
+            "options": [],
+            "status": "pending",
+            "selected_option_id": "",
+            "selection_feedback": "",
+        }
+
+        with patch("webui.run_next_chapters", return_value=[str(self.project_path / "chapters" / "chapter_0001.md")]), patch(
+            "webui.generate_progression_options",
+            return_value=session_payload,
+        ):
+            response = self._post(
+                "/project/web/continue",
+                "count=1&user_request=%E7%BB%A7%E7%BB%AD%E6%8E%A8%E8%BF%9B",
+            )
+
+        self.assertEqual(response.status, 303)
+        job_id = response.getheader("Location").rsplit("/", 1)[-1]
+        self._wait_for_job_status(job_id)
+
+        jobs = webui.JOB_REGISTRY.list_jobs(project_id="web", active_only=False, limit=8)
+        auto_jobs = [job for job in jobs if job.get("kind") == "progression_options_auto"]
+        self.assertEqual(len(auto_jobs), 1)
+        auto_job = self._wait_for_job_status(auto_jobs[0]["id"])
+        self.assertFalse(auto_job.get("blocks_project", True))
+
+    def test_create_project_async_starts_followup_progression_job(self) -> None:
+        session_payload = {
+            "session_id": "session_project_bootstrap",
+            "created_at": "2026-04-20T00:00:00+00:00",
+            "project_chapter_count": 0,
+            "target_chapter_number": 1,
+            "planning_mode": "chapter",
+            "source_user_request": "",
+            "runtime_overrides": {},
+            "recommended_option_id": "option_1",
+            "options": [],
+            "status": "pending",
+            "selected_option_id": "",
+            "selection_feedback": "",
+        }
+
+        with patch("webui._create_project", return_value=str(self.project_path)), patch(
+            "webui.generate_progression_options",
+            return_value=session_payload,
+        ):
+            response = self._post(
+                "/projects/create",
+                "provider=ollama&project_name=%E6%B5%8B%E8%AF%95&story_request=%E5%BC%80%E7%AF%87",
+            )
+
+        self.assertEqual(response.status, 303)
+        job_id = response.getheader("Location").rsplit("/", 1)[-1]
+        self._wait_for_job_status(job_id)
+
+        jobs = webui.JOB_REGISTRY.list_jobs(project_id="web", active_only=False, limit=8)
+        auto_jobs = [job for job in jobs if job.get("kind") == "progression_options_auto"]
+        self.assertEqual(len(auto_jobs), 1)
+        self._wait_for_job_status(auto_jobs[0]["id"])
+
+    def test_project_page_keeps_forms_available_during_non_blocking_progression_job(self) -> None:
+        job = webui.JOB_REGISTRY.create_job(
+            kind="progression_options_auto",
+            title="后台生成推进选项",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+            blocks_project=False,
+        )
+        webui.JOB_REGISTRY.mark_running(job["id"], "正在生成下一章推进选项")
+
+        page = self._get("/project/web")
+        self.assertEqual(page.status, 200)
+        self.assertIn("下一章推进选项正在后台生成", page.body)
+        self.assertNotIn("为避免并发写入冲突", page.body)
 
 
 if __name__ == "__main__":
