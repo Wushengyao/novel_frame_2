@@ -106,9 +106,11 @@ class ProgressionManagerTests(unittest.TestCase):
             saved = read_json(project_path / "progression_sessions" / "progression_session_1.json")
             self.assertEqual(saved["status"], "stale")
 
-    def test_resolve_progression_selection_writes_outline_override_in_chapter_mode(self) -> None:
+    def test_resolve_progression_selection_persists_progression_task_without_touching_outline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp))
+            original_outlines = read_json(project_path / "outlines.json")
+            original_plot_state = read_json(project_path / "plot_state.json")
             session = {
                 "session_id": "session_override",
                 "created_at": "2026-04-20T00:00:00+00:00",
@@ -149,11 +151,16 @@ class ProgressionManagerTests(unittest.TestCase):
             )
 
             outlines = read_json(project_path / "outlines.json")
-            chapter = outlines["volumes"][0]["chapters"][0]
-            self.assertEqual(chapter["goal"], "完成第一次谨慎侦查")
+            self.assertEqual(outlines, original_outlines)
             self.assertEqual(selection["session"]["status"], "selected")
+            task_card = read_json(project_path / "task_cards" / "chapter_0001.json")
+            self.assertEqual(task_card["source"], "progression_selected")
+            self.assertEqual(task_card["goal"], "完成第一次谨慎侦查")
+            self.assertIn("用户补充细化", task_card["writer_guidance"])
+            self.assertEqual(task_card["derived_from"]["option_id"], "option_1")
+            self.assertEqual(task_card["derived_from"]["baseline_source"], "chapter_outline")
             plot_state = read_json(project_path / "plot_state.json")
-            self.assertEqual(plot_state["next_chapter_goal"], "完成第一次谨慎侦查")
+            self.assertEqual(plot_state, original_plot_state)
 
 
 if __name__ == "__main__":

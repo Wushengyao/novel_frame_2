@@ -6,14 +6,16 @@ from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
 
-from chapter_context import get_next_context_for_mode, resolve_planning_mode
+from chapter_context import get_next_context_for_mode, peek_next_context_for_mode, resolve_planning_mode
 from common_utils import emit_progress, extract_json_object, safe_int, utc_now
-from console_logger import log_success, log_warning
-from context_builder import build_progression_context
+from console_logger import log_success
+from context_builder import (
+    build_progression_context,
+    build_progression_selected_task_card,
+    resolve_effective_chapter_task,
+)
 from llm_client import generate_text_with_metadata
-from outline_manager import apply_chapter_outline_override
 from project_manager import (
-    PLANNING_MODE_CHAPTER,
     get_last_chapter_text,
     load_json,
     load_project,
@@ -63,7 +65,7 @@ def _normalize_option(option: dict, fallback_id: str) -> dict:
         "summary": str(chapter_outline.get("summary", "") or "").strip(),
         "goal": str(chapter_outline.get("goal", "") or "").strip(),
         "key_events": _normalize_key_events(chapter_outline.get("key_events", [])),
-    }
+}
     return {
         "option_id": option_id,
         "title": str(option.get("title", "") or "").strip(),
@@ -119,19 +121,6 @@ def normalize_progression_options_response(data: dict, option_count: int) -> dic
         "recommended_option_id": recommended[0]["option_id"],
         "options": normalized,
     }
-
-
-def _build_selection_request(option: dict, selection_feedback: str) -> str:
-    feedback = selection_feedback.strip()
-    base = str(option.get("writer_guidance", "") or "").strip()
-    if not feedback:
-        return base
-    return (
-        f"{base}\n\n"
-        f"用户补充细化：{feedback}\n"
-        "这些补充只能作为已选推进方案的细化与微调，不能推翻本章核心任务。"
-    )
-
 
 def save_progression_session(project_path: str, session: dict) -> str:
     session_id = str(session.get("session_id", "") or "").strip()
@@ -323,21 +312,35 @@ def resolve_progression_selection(
     session["status"] = "selected"
     save_progression_session(project_path, session)
 
-    chapter_outline_override = deepcopy(selected.get("chapter_outline") or {})
-    if session.get("planning_mode") == PLANNING_MODE_CHAPTER and chapter_outline_override:
-        apply_chapter_outline_override(
-            project_path,
-            safe_int(session.get("target_chapter_number"), 0),
-            chapter_outline_override,
-        )
-        log_success("progression_options: applied selected chapter outline override")
-    elif chapter_outline_override:
-        log_warning("progression_options: selected option carries display-only chapter outline in non-chapter mode")
+    project_data = load_project(project_path)
+    planning_mode = str(session.get("planning_mode", "") or "").strip()
+    next_context = peek_next_context_for_mode(project_data, planning_mode)
+    baseline_task = resolve_effective_chapter_task(
+        project_path,
+        project_data,
+        next_context,
+        planning_mode=planning_mode,
+        persist=False,
+    )
+    selected_task_card = build_progression_selected_task_card(
+        project_path,
+        project_data,
+        next_context,
+        selected,
+        session_id=str(session.get("session_id", "") or "").strip(),
+        option_id=selected["option_id"],
+        planning_mode=planning_mode,
+        baseline_source=str(baseline_task.get("source", "") or "").strip(),
+        selection_feedback=selection_feedback,
+        persist=True,
+    )
+    log_success("progression_options: persisted selected progression task card")
 
     return {
         "session": session,
-        "planning_mode": session.get("planning_mode", ""),
-        "user_request": _build_selection_request(selected, selection_feedback),
-        "chapter_outline_override": chapter_outline_override if session.get("planning_mode") == PLANNING_MODE_CHAPTER else None,
+        "planning_mode": planning_mode,
+        "user_request": "",
+        "chapter_outline_override": None,
         "selected_option": selected,
+        "task_card": selected_task_card,
     }

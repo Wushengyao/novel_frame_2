@@ -149,6 +149,33 @@ def get_next_context_for_mode(
     return project_data, {"volume": {}, "chapter": {}}
 
 
+def peek_next_context_for_mode(project_data: dict, planning_mode: str) -> dict:
+    current_chapter_count = int((project_data.get("project") or {}).get("chapter_count", 0) or 0)
+    normalized_mode = normalize_planning_mode(planning_mode, default=DEFAULT_PLANNING_MODE)
+
+    if normalized_mode == PLANNING_MODE_CHAPTER:
+        outlines = project_data.get("outlines") or {"meta": {}, "volumes": []}
+        next_context = find_next_chapter_context(outlines, current_chapter_count)
+        if next_context is not None:
+            return next_context
+        return {"volume": {}, "chapter": {}}
+
+    if normalized_mode == PLANNING_MODE_VOLUME:
+        outlines = normalize_outlines(project_data.get("outlines") or {"meta": {}, "volumes": []})
+        upcoming_contexts = collect_upcoming_volume_contexts(outlines, current_chapter_count, 1)
+        if upcoming_contexts:
+            return upcoming_contexts[0]
+        return {"volume": {}, "chapter": {}}
+
+    if normalized_mode == PLANNING_MODE_NONE:
+        contexts = collect_upcoming_freeform_contexts(project_data, 1)
+        if contexts:
+            return contexts[0]
+        return {"volume": {}, "chapter": {}}
+
+    return {"volume": {}, "chapter": {}}
+
+
 def compact_contexts(upcoming_contexts: list[dict]) -> list[dict]:
     compact = []
     for context in upcoming_contexts:

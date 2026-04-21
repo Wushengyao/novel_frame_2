@@ -84,6 +84,14 @@ STOP_WORDS = {
     "goal",
 }
 
+TASK_CARD_PRIORITY = {
+    "progression_selected": 4,
+    "chapter_outline": 3,
+    "volume_outline": 2,
+    "plot_state": 1,
+    "freeform": 0,
+}
+
 
 def _trim_text(text: str, max_chars: int) -> str:
     content = str(text or "").strip()
@@ -508,6 +516,69 @@ def build_chapter_task_card(
     user_request: str = "",
     persist: bool = True,
 ) -> dict:
+    task_card = resolve_effective_chapter_task(
+        project_path,
+        project_data,
+        next_context,
+        planning_mode=planning_mode,
+        persist=persist,
+    )
+    if user_request:
+        return merge_task_card_guidance(task_card, user_request)
+    return task_card
+
+
+def _normalize_task_card_payload(
+    task_card: dict,
+    *,
+    chapter_number: int,
+    planning_mode: str,
+    volume: dict | None = None,
+) -> dict:
+    volume = volume if isinstance(volume, dict) else {}
+    normalized_mode = normalize_planning_mode(task_card.get("planning_mode") or planning_mode)
+    source = str(task_card.get("source", "") or "").strip() or "freeform"
+    if source not in TASK_CARD_PRIORITY:
+        source = "freeform"
+
+    normalized = {
+        "chapter_number": max(1, chapter_number),
+        "planning_mode": normalized_mode,
+        "source": source,
+        "title": str(task_card.get("title", "") or "").strip() or f"第 {chapter_number} 章任务",
+        "summary": str(task_card.get("summary", "") or "").strip(),
+        "goal": str(task_card.get("goal", "") or "").strip(),
+        "key_events": _normalize_string_list(task_card.get("key_events"), max_items=5),
+        "volume_title": str(task_card.get("volume_title", "") or volume.get("title", "") or "").strip(),
+        "volume_goal": str(task_card.get("volume_goal", "") or volume.get("story_goal", "") or "").strip(),
+        "writer_guidance": str(task_card.get("writer_guidance", "") or "").strip(),
+    }
+    if not normalized["summary"]:
+        normalized["summary"] = normalized["goal"]
+    if not normalized["goal"]:
+        normalized["goal"] = normalized["summary"]
+    normalized["summary"] = _trim_text(normalized.get("summary", ""), 220)
+    normalized["goal"] = _trim_text(normalized.get("goal", ""), 180)
+    normalized["writer_guidance"] = _trim_text(normalized.get("writer_guidance", ""), 220)
+    normalized["key_events"] = _normalize_string_list(normalized.get("key_events"), max_items=5)
+
+    if normalized["source"] == "progression_selected":
+        derived = task_card.get("derived_from") or {}
+        normalized["derived_from"] = {
+            "session_id": str(derived.get("session_id", "") or "").strip(),
+            "option_id": str(derived.get("option_id", "") or "").strip(),
+            "base_planning_mode": normalize_planning_mode(derived.get("base_planning_mode") or normalized_mode),
+            "baseline_source": str(derived.get("baseline_source", "") or "").strip(),
+        }
+    return normalized
+
+
+def _build_baseline_task_card(
+    project_data: dict,
+    next_context: dict,
+    *,
+    planning_mode: str,
+) -> dict:
     chapter = deepcopy(next_context.get("chapter") or {})
     volume = deepcopy(next_context.get("volume") or {})
     plot_state = normalize_live_plot_state(project_data.get("plot_state"))
@@ -525,26 +596,36 @@ def build_chapter_task_card(
             "key_events": _normalize_string_list(chapter.get("key_events"), max_items=5),
             "volume_title": str(volume.get("title", "") or "").strip(),
             "volume_goal": str(volume.get("story_goal", "") or "").strip(),
-            "writer_guidance": str(user_request or "").strip(),
+            "writer_guidance": "",
         }
     else:
+        chapter_summary = str(chapter.get("summary", "") or "").strip()
+        chapter_goal = str(chapter.get("goal", "") or "").strip()
+        next_goal = str(plot_state.get("next_chapter_goal", "") or "").strip()
+        volume_summary = str(volume.get("summary", "") or "").strip()
+        volume_goal = str(volume.get("story_goal", "") or "").strip()
         focus = (
-            str(user_request or "").strip()
-            or str(chapter.get("summary", "") or "").strip()
-            or str(plot_state.get("next_chapter_goal", "") or "").strip()
-            or str(volume.get("summary", "") or "").strip()
+            chapter_summary
+            or next_goal
+            or volume_summary
             or str(plot_state.get("main_plot", "") or "").strip()
         )
         goal = (
-            str(plot_state.get("next_chapter_goal", "") or "").strip()
-            or str(chapter.get("goal", "") or "").strip()
-            or str(volume.get("story_goal", "") or "").strip()
+            chapter_goal
+            or next_goal
+            or volume_goal
             or focus
         )
+        if normalized_mode == "volume" and (volume_summary or volume_goal):
+            source = "volume_outline"
+        elif next_goal:
+            source = "plot_state"
+        else:
+            source = "freeform"
         task_card = {
             "chapter_number": chapter_number,
             "planning_mode": normalized_mode,
-            "source": "volume_outline" if normalized_mode == "volume" else "freeform",
+            "source": source,
             "title": str(chapter.get("title", "") or "").strip() or f"第 {chapter_number} 章任务",
             "summary": focus,
             "goal": goal,
@@ -556,18 +637,122 @@ def build_chapter_task_card(
             ],
             "volume_title": str(volume.get("title", "") or "").strip(),
             "volume_goal": str(volume.get("story_goal", "") or "").strip(),
-            "writer_guidance": str(user_request or "").strip() or f"以“{goal}”为本章核心任务，允许自由选择更有活力的推进方式。",
+            "writer_guidance": f"以“{goal}”为本章核心任务，允许自由选择更有活力的推进方式。" if goal else "",
         }
 
-    task_card["summary"] = _trim_text(task_card.get("summary", ""), 220)
-    task_card["goal"] = _trim_text(task_card.get("goal", ""), 180)
-    task_card["writer_guidance"] = _trim_text(task_card.get("writer_guidance", ""), 220)
-    task_card["key_events"] = _normalize_string_list(task_card.get("key_events"), max_items=5)
+    return _normalize_task_card_payload(
+        task_card,
+        chapter_number=chapter_number,
+        planning_mode=normalized_mode,
+        volume=volume,
+    )
 
+
+def save_task_card(project_path: str, task_card: dict) -> dict:
+    chapter_number = max(1, safe_int(task_card.get("chapter_number"), 0))
+    normalized = _normalize_task_card_payload(
+        task_card,
+        chapter_number=chapter_number,
+        planning_mode=str(task_card.get("planning_mode", "") or ""),
+    )
+    path = _task_card_path(project_path, chapter_number)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_json(str(path), normalized)
+    return normalized
+
+
+def resolve_effective_chapter_task(
+    project_path: str,
+    project_data: dict,
+    next_context: dict,
+    *,
+    planning_mode: str,
+    persist: bool = True,
+) -> dict:
+    chapter = deepcopy(next_context.get("chapter") or {})
+    volume = deepcopy(next_context.get("volume") or {})
+    chapter_number = max(1, safe_int(chapter.get("chapter_number"), safe_int(project_data.get("project", {}).get("chapter_count"), 0) + 1))
+    existing = load_task_card(project_path, chapter_number)
+    if existing and str(existing.get("source", "") or "").strip() == "progression_selected":
+        return _normalize_task_card_payload(
+            existing,
+            chapter_number=chapter_number,
+            planning_mode=planning_mode,
+            volume=volume,
+        )
+
+    task_card = _build_baseline_task_card(
+        project_data,
+        next_context,
+        planning_mode=planning_mode,
+    )
     if persist:
-        path = _task_card_path(project_path, chapter_number)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        save_json(str(path), task_card)
+        return save_task_card(project_path, task_card)
+    return task_card
+
+
+def merge_task_card_guidance(task_card: dict, guidance: str, *, prefix: str = "用户当前补充：") -> dict:
+    extra = str(guidance or "").strip()
+    if not extra:
+        return deepcopy(task_card)
+    merged = deepcopy(task_card)
+    extra_line = f"{prefix}{extra}" if prefix else extra
+    base = str(merged.get("writer_guidance", "") or "").strip()
+    if extra_line in base or extra in base:
+        return merged
+    merged["writer_guidance"] = _trim_text("\n".join(part for part in (base, extra_line) if part), 220)
+    return merged
+
+
+def build_progression_selected_task_card(
+    project_path: str,
+    project_data: dict,
+    next_context: dict,
+    selected_option: dict,
+    *,
+    session_id: str,
+    option_id: str,
+    planning_mode: str,
+    baseline_source: str,
+    selection_feedback: str = "",
+    persist: bool = True,
+) -> dict:
+    chapter = deepcopy(next_context.get("chapter") or {})
+    volume = deepcopy(next_context.get("volume") or {})
+    chapter_number = max(1, safe_int(chapter.get("chapter_number"), safe_int(project_data.get("project", {}).get("chapter_count"), 0) + 1))
+    chapter_outline = deepcopy(selected_option.get("chapter_outline") or {})
+    feedback = str(selection_feedback or "").strip()
+
+    guidance_parts = [str(selected_option.get("writer_guidance", "") or "").strip()]
+    if feedback:
+        guidance_parts.append(f"用户补充细化：{feedback}")
+        guidance_parts.append("这些补充只能作为已选推进方案的细化与微调，不能推翻本章核心任务。")
+
+    task_card = _normalize_task_card_payload(
+        {
+            "chapter_number": chapter_number,
+            "planning_mode": planning_mode,
+            "source": "progression_selected",
+            "title": str(chapter_outline.get("title", "") or "").strip() or str(selected_option.get("title", "") or "").strip(),
+            "summary": str(chapter_outline.get("summary", "") or "").strip() or str(selected_option.get("summary", "") or "").strip(),
+            "goal": str(chapter_outline.get("goal", "") or "").strip() or str(selected_option.get("summary", "") or "").strip(),
+            "key_events": chapter_outline.get("key_events") or selected_option.get("key_events") or [],
+            "volume_title": str(volume.get("title", "") or "").strip(),
+            "volume_goal": str(volume.get("story_goal", "") or "").strip(),
+            "writer_guidance": "\n".join(part for part in guidance_parts if part),
+            "derived_from": {
+                "session_id": session_id,
+                "option_id": option_id,
+                "base_planning_mode": normalize_planning_mode(planning_mode),
+                "baseline_source": str(baseline_source or "").strip(),
+            },
+        },
+        chapter_number=chapter_number,
+        planning_mode=planning_mode,
+        volume=volume,
+    )
+    if persist:
+        return save_task_card(project_path, task_card)
     return task_card
 
 
@@ -575,7 +760,12 @@ def load_task_card(project_path: str, chapter_number: int) -> dict | None:
     path = _task_card_path(project_path, chapter_number)
     if not path.exists():
         return None
-    return load_json(str(path))
+    payload = load_json(str(path))
+    return _normalize_task_card_payload(
+        payload,
+        chapter_number=max(1, chapter_number),
+        planning_mode=str(payload.get("planning_mode", "") or ""),
+    )
 
 
 def _build_chapter_task_block(task_card: dict, *, max_chars: int) -> str:
@@ -602,16 +792,18 @@ def _build_chapter_task_block(task_card: dict, *, max_chars: int) -> str:
     return _trim_text("\n".join(lines), max_chars)
 
 
-def _build_live_state_block(plot_state: dict, *, max_chars: int) -> str:
+def _build_live_state_block(plot_state: dict, *, max_chars: int, include_next_goal: bool = True) -> str:
     state = normalize_live_plot_state(plot_state)
     lines = []
-    for label, key in (
+    entries = [
         ("主线", "main_plot"),
         ("当前弧线", "current_arc"),
         ("当前位置", "current_location"),
         ("当前时间", "current_time"),
-        ("下一目标", "next_chapter_goal"),
-    ):
+    ]
+    if include_next_goal:
+        entries.append(("下一目标", "next_chapter_goal"))
+    for label, key in entries:
         value = str(state.get(key, "") or "").strip()
         if not value:
             continue
@@ -785,13 +977,13 @@ def build_writer_context(
     chapter_count = safe_int(project_data.get("project", {}).get("chapter_count"), 0)
     plot_state = normalize_live_plot_state(project_data.get("plot_state"))
     author_intent = normalize_author_intent(project_data.get("author_intent") or ensure_author_intent(project_path))
-    task_card = build_chapter_task_card(
+    effective_task_card = resolve_effective_chapter_task(
         project_path,
         project_data,
         next_context,
         planning_mode=planning_mode,
-        user_request=user_request,
     )
+    task_card = merge_task_card_guidance(effective_task_card, user_request) if user_request else effective_task_card
     task_text = " ".join(
         part
         for part in (
@@ -805,7 +997,11 @@ def build_writer_context(
     sections = {
         "author_intent": _build_author_intent_block(author_intent, max_chars=WRITER_SECTION_LIMITS["author_intent"]),
         "chapter_task": _build_chapter_task_block(task_card, max_chars=WRITER_SECTION_LIMITS["chapter_task"]),
-        "live_state": _build_live_state_block(plot_state, max_chars=WRITER_SECTION_LIMITS["live_state"]),
+        "live_state": _build_live_state_block(
+            plot_state,
+            max_chars=WRITER_SECTION_LIMITS["live_state"],
+            include_next_goal=False,
+        ),
         "style_contract": _build_style_contract_block(
             project_data.get("style") or {},
             author_intent,
@@ -842,6 +1038,7 @@ def build_writer_context(
         "planning_mode": normalize_planning_mode(planning_mode),
         "chapter_count": chapter_count,
         "task_card": task_card,
+        "effective_task_card": effective_task_card,
         "sections": sections,
         "section_chars": {key: len(value) for key, value in sections.items() if value},
     }
@@ -901,18 +1098,17 @@ def build_progression_context(
     plot_state = normalize_live_plot_state(project_data.get("plot_state"))
     author_intent = normalize_author_intent(project_data.get("author_intent") or ensure_author_intent(project_path))
     chapter_count = safe_int(project_data.get("project", {}).get("chapter_count"), 0)
-    task_card = build_chapter_task_card(
+    task_card = resolve_effective_chapter_task(
         project_path,
         project_data,
         next_context,
         planning_mode=planning_mode,
-        user_request=user_request,
         persist=False,
     )
     sections = {
         "author_intent": _build_author_intent_block(author_intent, max_chars=700),
         "chapter_task": _build_chapter_task_block(task_card, max_chars=560),
-        "live_state": _build_live_state_block(plot_state, max_chars=1000),
+        "live_state": _build_live_state_block(plot_state, max_chars=1000, include_next_goal=False),
         "static_world": _compact_world_block(project_data.get("world") or {}, user_request, max_chars=500),
         "static_characters": _compact_characters_block(project_data.get("characters") or {}, plot_state, max_chars=700),
         "recent_scene": _build_recent_scene_block(project_path, chapter_count, recent_text, max_chars=2200),

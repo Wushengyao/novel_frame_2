@@ -20,6 +20,7 @@ from prompt_builder import (
     build_batch_chapter_plan_prompt,
     build_chapter_outline_prompt,
     build_progression_options_prompt,
+    build_writer_prompt,
 )
 from project_manager import load_json, load_project, save_json
 from state_updater import update_plot_state
@@ -149,6 +150,62 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertEqual(task_card["source"], "volume_outline")
             saved = load_json(str(project_path / "task_cards" / "chapter_0001.json"))
             self.assertEqual(saved["goal"], task_card["goal"])
+
+    def test_progression_selected_task_card_is_highest_priority_and_deduplicates_next_goal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="selected")
+            save_json(
+                str(project_path / "task_cards" / "chapter_0001.json"),
+                {
+                    "chapter_number": 1,
+                    "planning_mode": "chapter",
+                    "source": "progression_selected",
+                    "title": "先试探外部",
+                    "summary": "先离开隔离区做一次短程侦查。",
+                    "goal": "完成一次谨慎的外出试探",
+                    "key_events": ["规划撤退路线", "短程外出试探"],
+                    "volume_title": "第一卷",
+                    "volume_goal": "建立据点",
+                    "writer_guidance": "保持紧张感与配合。",
+                    "derived_from": {
+                        "session_id": "session_a",
+                        "option_id": "option_2",
+                        "base_planning_mode": "chapter",
+                        "baseline_source": "chapter_outline",
+                    },
+                },
+            )
+            project_data = load_project(str(project_path))
+            next_context = {
+                "volume": project_data["outlines"]["volumes"][0],
+                "chapter": project_data["outlines"]["volumes"][0]["chapters"][0],
+            }
+
+            writer_context = build_writer_context(
+                str(project_path),
+                project_data,
+                next_context,
+                "最近正文",
+                planning_mode="chapter",
+            )
+            progression_context = build_progression_context(
+                str(project_path),
+                project_data,
+                next_context,
+                "最近正文",
+                user_request="希望这次把人物互动写得更细一点。",
+                option_count=4,
+                planning_mode="chapter",
+            )
+            prompt = build_writer_prompt(writer_context)
+
+            self.assertEqual(writer_context["task_card"]["source"], "progression_selected")
+            self.assertEqual(writer_context["task_card"]["goal"], "完成一次谨慎的外出试探")
+            self.assertEqual(progression_context["task_card"]["source"], "progression_selected")
+            self.assertEqual(progression_context["task_card"]["goal"], "完成一次谨慎的外出试探")
+            self.assertNotIn("下一目标", writer_context["sections"]["live_state"])
+            self.assertNotIn("建立临时安全区", prompt)
+            self.assertIn("完成一次谨慎的外出试探", prompt)
 
     def test_writer_context_retrieves_saved_memory_cards(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

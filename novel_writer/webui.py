@@ -18,7 +18,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from app import run_next_chapter_from_progression, run_next_chapters
+from chapter_context import peek_next_context_for_mode
 from common_utils import utc_now
+from context_builder import resolve_effective_chapter_task
 from illustration_manager import get_illustration_record, illustrate_chapters, list_illustration_records
 from progression_manager import (
     ensure_fresh_progression_session,
@@ -780,6 +782,48 @@ def _render_progression_session(
         <button type="submit">按所选方案续写下一章</button>
       </fieldset>
     </form>
+    """
+
+
+def _render_effective_task_summary(task_card: dict | None) -> str:
+    if not task_card:
+        return '<p class="muted">当前还没有可用的下一章任务卡。</p>'
+
+    source = str(task_card.get("source", "") or "").strip()
+    source_label_map = {
+        "progression_selected": "已由推进选项细化",
+        "chapter_outline": "来自分章大纲",
+        "volume_outline": "来自分卷大纲",
+        "plot_state": "来自 live state 的下一目标",
+        "freeform": "来自自由续写兜底任务",
+    }
+    source_label = source_label_map.get(source, source or "未知来源")
+    key_events = "".join(f"<li>{escape(item)}</li>" for item in task_card.get("key_events", []))
+    derived = task_card.get("derived_from") or {}
+    derived_text = ""
+    if source == "progression_selected" and derived:
+        option_id = str(derived.get("option_id", "") or "").strip()
+        session_id = str(derived.get("session_id", "") or "").strip()
+        details = " / ".join(part for part in (option_id, session_id) if part)
+        if details:
+            derived_text = f'<div class="muted">来源记录：{escape(details)}</div>'
+
+    return f"""
+    <div class="task-summary-card">
+      <div class="option-panel-head">
+        <div>
+          <h3>有效当前章任务</h3>
+          <div class="muted">{escape(source_label)}</div>
+          {derived_text}
+        </div>
+        <span class="pill">第 {escape(str(task_card.get('chapter_number', '')))} 章</span>
+      </div>
+      <p><strong>当前章目标：</strong>{escape(task_card.get("goal", "") or "暂无")}</p>
+      <p><strong>当前章摘要：</strong>{escape(task_card.get("summary", "") or "暂无")}</p>
+      <p><strong>卷目标：</strong>{escape(task_card.get("volume_goal", "") or "暂无")}</p>
+      <div class="muted"><strong>本章关键事件：</strong></div>
+      <ul class="option-list">{key_events or '<li>暂无</li>'}</ul>
+    </div>
     """
 
 
@@ -1674,6 +1718,15 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         project = data["project"]
         project_name = _repair_display_text(project.get("name", project_id))
         plot_state = data["plot_state"]
+        planning_mode = normalize_planning_mode(project.get("planning_mode", DEFAULT_PLANNING_MODE))
+        effective_task = resolve_effective_chapter_task(
+            str(project_path),
+            data,
+            peek_next_context_for_mode(data, planning_mode),
+            planning_mode=planning_mode,
+            persist=False,
+        )
+        effective_task_html = _render_effective_task_summary(effective_task)
         chapters = _read_chapters(project_path)
         latest_snapshot = get_latest_state_snapshot_chapter(str(project_path))
         stats = (project.get("stats") or {}).get("total", {})
@@ -2257,6 +2310,15 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         project = data["project"]
         project_name = _repair_display_text(project.get("name", project_id))
         plot_state = data["plot_state"]
+        planning_mode = normalize_planning_mode(project.get("planning_mode", DEFAULT_PLANNING_MODE))
+        effective_task = resolve_effective_chapter_task(
+            str(project_path),
+            data,
+            peek_next_context_for_mode(data, planning_mode),
+            planning_mode=planning_mode,
+            persist=False,
+        )
+        effective_task_html = _render_effective_task_summary(effective_task)
         chapters = _read_chapters(project_path)
         latest_snapshot = get_latest_state_snapshot_chapter(str(project_path))
         stats = (project.get("stats") or {}).get("total", {})
@@ -2351,12 +2413,14 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               </p>
               <div class="project-snapshot">
                 <p><strong>状态快照：</strong>{escape(snapshot_text)}</p>
-                <p><strong>下章目标：</strong>{escape(plot_state.get("next_chapter_goal", "") or "暂无")}</p>
+                <p><strong>当前章任务：</strong>{escape(effective_task.get("goal", "") or "暂无")}</p>
+                <p><strong>卷目标：</strong>{escape(effective_task.get("volume_goal", "") or "暂无")}</p>
+                <p><strong>live-state 下一目标：</strong>{escape(plot_state.get("next_chapter_goal", "") or "暂无")}</p>
                 <p><strong>当前位置：</strong>{escape(plot_state.get("current_location", "") or "未知")}</p>
                 <p><strong>当前时间：</strong>{escape(plot_state.get("current_time", "") or "未知")}</p>
                 <p><strong>请求：</strong>{stats.get("requests", 0)} 次</p>
                 <p><strong>Token：</strong>{stats.get("total_tokens", 0)}</p>
-                <p><strong>Planning:</strong>{escape(_planning_mode_label(project.get("planning_mode", DEFAULT_PLANNING_MODE)))}</p>
+                <p><strong>Planning:</strong>{escape(_planning_mode_label(planning_mode))}</p>
               </div>
             </section>
             <section class="panel">
@@ -2452,6 +2516,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <section class="panel">
               <h2>最近一章</h2>
               <div class="chapter-view">{latest_chapter_text}</div>
+            </section>
+            <section class="panel">
+              {effective_task_html}
             </section>
             <section class="panel">
               <div class="option-panel-head">

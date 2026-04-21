@@ -126,6 +126,8 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(page.status, 200)
         self.assertIn("先探查走廊", page.body)
         self.assertIn("project-layout", page.body)
+        self.assertIn("当前章任务", page.body)
+        self.assertIn("卷目标", page.body)
 
     def test_continue_guided_endpoint_creates_background_job(self) -> None:
         session = {

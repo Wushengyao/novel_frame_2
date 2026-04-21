@@ -13,10 +13,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from chapter_context import get_next_context_for_mode
+from chapter_context import get_next_context_for_mode, peek_next_context_for_mode
 from common_utils import emit_progress, utc_now
 from console_logger import log_error, log_info, log_success, log_warning
-from context_builder import build_writer_context
+from context_builder import build_writer_context, resolve_effective_chapter_task
 from illustration_manager import illustrate_chapters, illustrate_project_assets
 from llm_client import generate_text_with_metadata
 from outline_manager import (
@@ -277,7 +277,7 @@ def run_next_chapter_from_progression(
         project_path,
         config,
         user_request=selection["user_request"],
-        chapter_outline_override=selection.get("chapter_outline_override"),
+        chapter_outline_override=None,
         planning_mode=selection.get("planning_mode"),
         progress_callback=progress_callback,
     )
@@ -378,13 +378,29 @@ def _print_status(project_path: str) -> None:
 
     print(f"Current Location: {plot_state.get('current_location', '')}")
     print(f"Current Time: {plot_state.get('current_time', '')}")
-    print(f"Next Goal: {plot_state.get('next_chapter_goal', '')}")
+    planning_mode = normalize_planning_mode(project.get("planning_mode"))
+    next_context = peek_next_context_for_mode(project_data, planning_mode)
+    effective_task = resolve_effective_chapter_task(
+        project_path,
+        project_data,
+        next_context,
+        planning_mode=planning_mode,
+        persist=False,
+    )
+    print(f"Current Chapter Goal: {effective_task.get('goal', '')}")
+    if effective_task.get("summary"):
+        print(f"Current Chapter Summary: {effective_task.get('summary', '')}")
+    if effective_task.get("source"):
+        print(f"Current Task Source: {effective_task.get('source', '')}")
+    if effective_task.get("volume_goal"):
+        print(f"Volume Goal: {effective_task.get('volume_goal', '')}")
+    print(f"Live Next Goal: {plot_state.get('next_chapter_goal', '')}")
 
     outline_status = get_outline_status(project_path)
     if outline_status.get("has_outlines"):
         print(f"Volumes: {outline_status.get('volume_count', 0)}")
         if (
-            normalize_planning_mode(project.get("planning_mode")) == PLANNING_MODE_CHAPTER
+            planning_mode == PLANNING_MODE_CHAPTER
             and outline_status.get("chapter_outline_stale")
         ):
             print("Chapter outlines are stale.")

@@ -121,9 +121,12 @@ class GuidedFlowTests(unittest.TestCase):
             self.assertEqual(project["chapter_count"], 1)
             plot_state = read_json(project_path / "plot_state.json")
             self.assertEqual(plot_state["recent_events"], ["三人完成了第一次短程侦查。"])
-            self.assertEqual(plot_state["next_chapter_goal"], "尝试离开隔离区")
+            self.assertEqual(plot_state["next_chapter_goal"], "决定是否进一步深入走廊")
             outlines = read_json(project_path / "outlines.json")
             self.assertEqual(outlines["volumes"][0]["chapters"][0]["status"], "completed")
+            self.assertEqual(outlines["volumes"][0]["chapters"][0]["goal"], "建立临时安全区")
+            task_card = read_json(project_path / "task_cards" / "chapter_0001.json")
+            self.assertEqual(task_card["source"], "progression_selected")
             self.assertTrue((project_path / "snapshots" / "chapter_0001").exists())
 
     def test_cli_rejects_guided_batch_count_greater_than_one(self) -> None:

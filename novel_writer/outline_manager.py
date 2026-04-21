@@ -522,6 +522,8 @@ def _sync_plot_state_next_goal(project_path: str, outlines: dict) -> None:
         return
     plot_state_path = Path(project_path) / "plot_state.json"
     plot_state = load_json(str(plot_state_path))
+    if str(plot_state.get("next_chapter_goal", "") or "").strip():
+        return
     chapter = next_context["chapter"]
     plot_state["next_chapter_goal"] = chapter.get("goal") or chapter.get("summary") or plot_state.get("next_chapter_goal", "")
     save_json(str(plot_state_path), plot_state)
