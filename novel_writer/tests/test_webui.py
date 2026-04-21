@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import webui
+from web_auth import WebAuthSettings
 from webui import NovelWriterHandler, ThreadingHTTPServer
 from progression_manager import CUSTOM_PROGRESSION_OPTION_ID
 
@@ -25,8 +26,11 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.project_path = create_test_project(self.output_dir, project_id="web")
         self.original_output_dir = webui.OUTPUT_DIR
         self.original_registry = webui.JOB_REGISTRY
+        webui._LOGIN_ATTEMPT_GUARDS.clear()
         webui.OUTPUT_DIR = self.output_dir
         webui.JOB_REGISTRY = webui.BackgroundJobRegistry()
+        self.auth_settings_patch = patch("webui._auth_settings", return_value=self._make_auth_settings(enabled=False))
+        self.auth_settings_patch.start()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), NovelWriterHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -37,25 +41,46 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
+        self.auth_settings_patch.stop()
         webui.OUTPUT_DIR = self.original_output_dir
         webui.JOB_REGISTRY = self.original_registry
 
-    def _post(self, path: str, body: str) -> http.client.HTTPResponse:
+    def _make_auth_settings(self, *, enabled: bool, **overrides) -> WebAuthSettings:
+        data = {
+            "enabled": enabled,
+            "username": "admin",
+            "password": "letmein-test",
+            "secret_key": "unit-test-secret",
+            "cookie_name": "novel_writer_webui_session",
+            "cookie_secure": False,
+            "session_max_age_seconds": 3600,
+            "login_max_attempts": 5,
+            "login_window_seconds": 300,
+            "login_lockout_seconds": 900,
+            "config_path": "/tmp/test-webui-auth.env",
+        }
+        data.update(overrides)
+        return WebAuthSettings(**data)
+
+    def _post(self, path: str, body: str, *, headers: dict[str, str] | None = None) -> http.client.HTTPResponse:
         conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        request_headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        if headers:
+            request_headers.update(headers)
         conn.request(
             "POST",
             path,
             body=body,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            headers=request_headers,
         )
         response = conn.getresponse()
         response.body = response.read().decode("utf-8", errors="replace")
         conn.close()
         return response
 
-    def _get(self, path: str) -> http.client.HTTPResponse:
+    def _get(self, path: str, *, headers: dict[str, str] | None = None) -> http.client.HTTPResponse:
         conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
-        conn.request("GET", path)
+        conn.request("GET", path, headers=headers or {})
         response = conn.getresponse()
         response.body = response.read().decode("utf-8", errors="replace")
         conn.close()
@@ -264,15 +289,162 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("/project/web?error=", response.getheader("Location"))
 
     def test_pages_render_model_preset_controls(self) -> None:
-        projects_page = self._get("/projects")
+        with patch(
+            "webui._get_repo_admin_info",
+            return_value={
+                "repo_root": "/repo",
+                "service_name": "novel-writer-webui.service",
+                "git_available": True,
+                "systemd_run_available": True,
+                "systemctl_available": True,
+                "branch": "master",
+                "commit": "abc1234",
+                "upstream": "origin/master",
+                "dirty": False,
+                "error": "",
+            },
+        ), patch("webui._read_admin_action_status", return_value={}):
+            projects_page = self._get("/projects")
         self.assertEqual(projects_page.status, 200)
         self.assertIn('name="model_preset"', projects_page.body)
         self.assertIn("使用 gemini 默认模型", projects_page.body)
+        self.assertIn("维护操作", projects_page.body)
+        self.assertIn("/admin/restart", projects_page.body)
+        self.assertIn("/admin/update", projects_page.body)
 
         project_page = self._get("/project/web")
         self.assertEqual(project_page.status, 200)
         self.assertIn('name="model_preset"', project_page.body)
         self.assertIn("沿用项目当前模型（llama3.2）", project_page.body)
+
+    def test_protected_pages_redirect_to_login_when_auth_enabled(self) -> None:
+        with patch("webui._auth_settings", return_value=self._make_auth_settings(enabled=True)):
+            response = self._get("/projects")
+
+        self.assertEqual(response.status, 303)
+        self.assertIn("/login?next=", response.getheader("Location"))
+
+    def test_login_submit_sets_cookie_and_allows_followup_access(self) -> None:
+        settings = self._make_auth_settings(enabled=True)
+        with patch("webui._auth_settings", return_value=settings):
+            login_page = self._get("/login")
+            self.assertEqual(login_page.status, 200)
+            self.assertIn("登录后继续", login_page.body)
+
+            response = self._post(
+                "/login",
+                "username=admin&password=letmein-test&next=%2Fprojects",
+            )
+
+            self.assertEqual(response.status, 303)
+            self.assertEqual(response.getheader("Location"), "/projects")
+            cookie_header = response.getheader("Set-Cookie")
+            self.assertIn(settings.cookie_name, cookie_header)
+
+            cookie_value = cookie_header.split(";", 1)[0]
+            projects_page = self._get("/projects", headers={"Cookie": cookie_value})
+
+        self.assertEqual(projects_page.status, 200)
+        self.assertIn("项目书架", projects_page.body)
+        self.assertIn("退出登录", projects_page.body)
+
+    def test_login_lockout_returns_retry_after(self) -> None:
+        settings = self._make_auth_settings(
+            enabled=True,
+            login_max_attempts=1,
+            login_window_seconds=60,
+            login_lockout_seconds=30,
+        )
+        with patch("webui._auth_settings", return_value=settings):
+            first = self._post(
+                "/login",
+                "username=admin&password=wrong&next=%2Fprojects",
+            )
+            second = self._post(
+                "/login",
+                "username=admin&password=wrong&next=%2Fprojects",
+            )
+
+        self.assertEqual(first.status, 401)
+        self.assertEqual(second.status, 429)
+        retry_after = int(second.getheader("Retry-After") or "0")
+        self.assertGreaterEqual(retry_after, 1)
+        self.assertLessEqual(retry_after, 30)
+
+    def test_admin_restart_endpoint_launches_task(self) -> None:
+        with patch("webui._launch_admin_task", return_value="novel-writer-admin-restart-test") as mocked_launch:
+            response = self._post("/admin/restart", "")
+
+        self.assertEqual(response.status, 303)
+        self.assertIn("/projects?notice=", response.getheader("Location"))
+        mocked_launch.assert_called_once_with("restart")
+
+    def test_admin_restart_requires_login_when_auth_enabled(self) -> None:
+        settings = self._make_auth_settings(enabled=True)
+        with patch("webui._auth_settings", return_value=settings):
+            response = self._post("/admin/restart", "")
+            self.assertEqual(response.status, 303)
+            self.assertIn("/login?next=", response.getheader("Location"))
+
+            login_response = self._post(
+                "/login",
+                "username=admin&password=letmein-test&next=%2Fprojects",
+            )
+            cookie_value = login_response.getheader("Set-Cookie").split(";", 1)[0]
+
+            with patch("webui._launch_admin_task", return_value="novel-writer-admin-restart-test") as mocked_launch:
+                restart_response = self._post(
+                    "/admin/restart",
+                    "",
+                    headers={"Cookie": cookie_value},
+                )
+
+        self.assertEqual(restart_response.status, 303)
+        self.assertIn("/projects?notice=", restart_response.getheader("Location"))
+        mocked_launch.assert_called_once_with("restart")
+
+    def test_admin_update_endpoint_rejects_dirty_repo(self) -> None:
+        with patch(
+            "webui._get_repo_admin_info",
+            return_value={
+                "repo_root": "/repo",
+                "service_name": "novel-writer-webui.service",
+                "git_available": True,
+                "systemd_run_available": True,
+                "systemctl_available": True,
+                "branch": "master",
+                "commit": "abc1234",
+                "upstream": "origin/master",
+                "dirty": True,
+                "error": "",
+            },
+        ):
+            response = self._post("/admin/update", "")
+
+        self.assertEqual(response.status, 303)
+        self.assertIn("/projects?error=", response.getheader("Location"))
+
+    def test_admin_update_endpoint_launches_task_when_repo_clean(self) -> None:
+        with patch(
+            "webui._get_repo_admin_info",
+            return_value={
+                "repo_root": "/repo",
+                "service_name": "novel-writer-webui.service",
+                "git_available": True,
+                "systemd_run_available": True,
+                "systemctl_available": True,
+                "branch": "master",
+                "commit": "abc1234",
+                "upstream": "origin/master",
+                "dirty": False,
+                "error": "",
+            },
+        ), patch("webui._launch_admin_task", return_value="novel-writer-admin-update-test") as mocked_launch:
+            response = self._post("/admin/update", "")
+
+        self.assertEqual(response.status, 303)
+        self.assertIn("/projects?notice=", response.getheader("Location"))
+        mocked_launch.assert_called_once_with("update")
 
     def test_model_preset_submission_resolves_without_manual_model_name(self) -> None:
         overrides = webui._runtime_overrides_from_form(

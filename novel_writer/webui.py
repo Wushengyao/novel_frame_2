@@ -7,12 +7,17 @@ import json
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import traceback
 import urllib.parse
 from html import escape
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import uuid4
@@ -55,17 +60,27 @@ from runtime_config import (
     resolve_timeout_for_provider as shared_resolve_timeout_for_provider,
     sanitize_runtime_overrides,
 )
+from web_auth import AuthService, LoginAttemptGuard, WebAuthSettings, load_auth_settings
 
 
 BASE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BASE_DIR.parent
 OUTPUT_DIR = BASE_DIR / "output"
 API_KEYS_PATH = BASE_DIR / "api_keys.sh"
 PROJECT_DIR_PATTERN = re.compile(r"^novel_project_")
 MOJIBAKE_HINT_CHARS = set("闆皝绌归《鍙鍦鏄鐨勪簡鍚庡墠闂閿璇浠绗锛銆鈥€")
+WEBUI_SERVICE_NAME = os.getenv("NOVEL_WRITER_WEBUI_SERVICE", "novel-writer-webui.service")
+ADMIN_LOCALHOSTS = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
+ADMIN_ACTION_STATUS_FILENAME = "admin_action_status.json"
+PUBLIC_PATHS = {"/login", "/healthz"}
+API_PATH_PREFIX = "/api/"
 
 JOB_ACTIVE_STATUSES = {"queued", "running"}
 JOB_FINISHED_STATUSES = {"succeeded", "failed"}
 PROGRESSION_JOB_KINDS = {"progression_options", "progression_options_auto"}
+
+_LOGIN_ATTEMPT_GUARDS: dict[tuple[int, int, int], LoginAttemptGuard] = {}
+_LOGIN_ATTEMPT_GUARDS_LOCK = threading.Lock()
 
 
 class BackgroundJobRegistry:
@@ -316,6 +331,243 @@ def _load_api_keys() -> dict[str, str]:
         if key in env_keys and not env_keys[key]:
             env_keys[key] = value
     return env_keys
+
+
+def _auth_settings() -> WebAuthSettings:
+    return load_auth_settings()
+
+
+def _login_attempt_guard(settings: WebAuthSettings) -> LoginAttemptGuard:
+    key = (
+        int(settings.login_max_attempts),
+        int(settings.login_window_seconds),
+        int(settings.login_lockout_seconds),
+    )
+    with _LOGIN_ATTEMPT_GUARDS_LOCK:
+        guard = _LOGIN_ATTEMPT_GUARDS.get(key)
+        if guard is None:
+            guard = LoginAttemptGuard(
+                max_attempts=settings.login_max_attempts,
+                window_seconds=settings.login_window_seconds,
+                lockout_seconds=settings.login_lockout_seconds,
+            )
+            _LOGIN_ATTEMPT_GUARDS[key] = guard
+        return guard
+
+
+def _auth_service(settings: WebAuthSettings) -> AuthService:
+    return AuthService(settings)
+
+
+def _safe_next_path(raw_path: str) -> str:
+    candidate = str(raw_path or "").strip()
+    if not candidate.startswith("/"):
+        return "/projects"
+    if candidate.startswith("//"):
+        return "/projects"
+    return candidate
+
+
+def _is_public_path(path: str) -> bool:
+    normalized = str(path or "").strip() or "/"
+    return normalized in PUBLIC_PATHS
+
+
+def _admin_action_status_path() -> Path:
+    return OUTPUT_DIR / ADMIN_ACTION_STATUS_FILENAME
+
+
+def _write_admin_action_status(payload: dict) -> None:
+    path = _admin_action_status_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_admin_action_status() -> dict:
+    path = _admin_action_status_path()
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _run_checked_command(command: list[str], *, cwd: str | None = None) -> str:
+    completed = subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    stdout = str(completed.stdout or "").strip()
+    stderr = str(completed.stderr or "").strip()
+    if completed.returncode != 0:
+        raise RuntimeError(stderr or stdout or f"command failed: {' '.join(command)}")
+    return stdout
+
+
+def _client_can_manage_server(
+    client_host: str,
+    *,
+    auth_settings: WebAuthSettings,
+    authenticated: bool,
+) -> bool:
+    host = str(client_host or "").strip().split("%", 1)[0].lower()
+    if auth_settings.enabled:
+        return authenticated
+    return host in ADMIN_LOCALHOSTS or host == "localhost"
+
+
+def _get_repo_admin_info() -> dict:
+    info = {
+        "repo_root": str(REPO_ROOT),
+        "service_name": WEBUI_SERVICE_NAME,
+        "git_available": bool(shutil.which("git")),
+        "systemd_run_available": bool(shutil.which("systemd-run")),
+        "systemctl_available": bool(shutil.which("systemctl")),
+        "branch": "",
+        "commit": "",
+        "upstream": "",
+        "dirty": False,
+        "error": "",
+    }
+    if not info["git_available"]:
+        info["error"] = "git 不可用"
+        return info
+    try:
+        info["branch"] = _run_checked_command(
+            ["git", "-C", str(REPO_ROOT), "branch", "--show-current"]
+        )
+        info["commit"] = _run_checked_command(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "--short", "HEAD"]
+        )
+        try:
+            info["upstream"] = _run_checked_command(
+                ["git", "-C", str(REPO_ROOT), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]
+            )
+        except Exception:
+            info["upstream"] = ""
+        dirty_output = _run_checked_command(
+            ["git", "-C", str(REPO_ROOT), "status", "--porcelain"]
+        )
+        info["dirty"] = bool(dirty_output.strip())
+    except Exception as exc:
+        info["error"] = str(exc)
+    return info
+
+
+def _launch_admin_task(task: str) -> str:
+    if task not in {"restart", "update"}:
+        raise RuntimeError("不支持的管理操作。")
+    if not shutil.which("systemd-run"):
+        raise RuntimeError("当前环境缺少 systemd-run，无法从 Web UI 触发维护操作。")
+    status_path = _admin_action_status_path()
+    _write_admin_action_status(
+        {
+            "action": task,
+            "status": "queued",
+            "message": "维护任务已排队，等待 systemd 启动。",
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+        }
+    )
+    unit_name = f"novel-writer-admin-{task}-{uuid4().hex[:8]}"
+    command = [
+        "systemd-run",
+        "--user",
+        "--collect",
+        "--unit",
+        unit_name,
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--admin-task",
+        task,
+        "--repo-root",
+        str(REPO_ROOT),
+        "--service-name",
+        WEBUI_SERVICE_NAME,
+        "--status-path",
+        str(status_path),
+    ]
+    _run_checked_command(command, cwd=str(BASE_DIR))
+    return unit_name
+
+
+def _run_admin_task(task: str, *, repo_root: str, service_name: str, status_path: str) -> int:
+    repo_path = Path(repo_root).resolve()
+    status_file = Path(status_path).resolve()
+    status_file.parent.mkdir(parents=True, exist_ok=True)
+
+    def write_status(status: str, message: str, **extra) -> None:
+        payload = {
+            "action": task,
+            "status": status,
+            "message": message,
+            "updated_at": utc_now(),
+        }
+        payload.update(extra)
+        status_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    started_at = utc_now()
+    write_status("running", "维护任务已启动。", started_at=started_at)
+    time.sleep(1.0)
+
+    try:
+        if task == "restart":
+            _run_checked_command(["systemctl", "--user", "restart", service_name])
+            write_status(
+                "succeeded",
+                "Web UI 已重启。请刷新页面重新连接。",
+                started_at=started_at,
+                finished_at=utc_now(),
+                service_name=service_name,
+            )
+            return 0
+
+        if task == "update":
+            branch = _run_checked_command(["git", "-C", str(repo_path), "branch", "--show-current"])
+            if not branch:
+                raise RuntimeError("当前仓库不在可更新的分支上（detached HEAD）。")
+            upstream = _run_checked_command(
+                ["git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]
+            )
+            dirty_output = _run_checked_command(["git", "-C", str(repo_path), "status", "--porcelain"])
+            if dirty_output.strip():
+                raise RuntimeError("当前仓库有未提交改动，已拒绝自动更新。")
+            before_commit = _run_checked_command(["git", "-C", str(repo_path), "rev-parse", "--short", "HEAD"])
+            pull_output = _run_checked_command(["git", "-C", str(repo_path), "pull", "--ff-only"])
+            after_commit = _run_checked_command(["git", "-C", str(repo_path), "rev-parse", "--short", "HEAD"])
+            _run_checked_command(["systemctl", "--user", "restart", service_name])
+            changed = before_commit != after_commit
+            message = "代码已更新并重启 Web UI。" if changed else "代码已是最新版本，Web UI 已重启。"
+            write_status(
+                "succeeded",
+                message,
+                started_at=started_at,
+                finished_at=utc_now(),
+                branch=branch,
+                upstream=upstream,
+                before_commit=before_commit,
+                after_commit=after_commit,
+                changed=changed,
+                pull_output=pull_output,
+                service_name=service_name,
+            )
+            return 0
+
+        raise RuntimeError("不支持的管理操作。")
+    except Exception as exc:
+        write_status(
+            "failed",
+            str(exc),
+            started_at=started_at,
+            finished_at=utc_now(),
+            service_name=service_name,
+            repo_root=str(repo_path),
+        )
+        return 1
 
 
 def _api_key_for_provider(provider: str, api_keys: dict[str, str]) -> str:
@@ -833,6 +1085,91 @@ def _render_effective_task_summary(task_card: dict | None) -> str:
     """
 
 
+def _render_admin_panel(
+    *,
+    client_host: str,
+    auth_settings: WebAuthSettings,
+    authenticated: bool,
+) -> str:
+    repo_info = _get_repo_admin_info()
+    admin_status = _read_admin_action_status()
+    can_manage = _client_can_manage_server(
+        client_host,
+        auth_settings=auth_settings,
+        authenticated=authenticated,
+    )
+
+    branch = escape(repo_info.get("branch", "") or "未知")
+    commit = escape(repo_info.get("commit", "") or "未知")
+    upstream = escape(repo_info.get("upstream", "") or "未配置")
+    repo_state = "有未提交改动" if repo_info.get("dirty") else "干净"
+    if auth_settings.enabled:
+        action_hint = "这些操作会影响整个 Web UI 服务。当前已启用登录鉴权，登录用户可远程执行。"
+    else:
+        action_hint = "这些操作会影响整个 Web UI 服务。当前未启用登录鉴权，因此仍只允许本机访问。"
+    update_disabled = ""
+    restart_disabled = ""
+    disabled_reason = ""
+    if not can_manage:
+        update_disabled = " disabled"
+        restart_disabled = " disabled"
+        if auth_settings.enabled:
+            disabled_reason = "当前会话未登录，已禁用管理按钮。"
+        else:
+            disabled_reason = "当前请求不是本机访问，已禁用管理按钮。"
+    elif repo_info.get("error"):
+        update_disabled = " disabled"
+        disabled_reason = f"仓库状态读取失败：{repo_info['error']}"
+    elif repo_info.get("dirty"):
+        update_disabled = " disabled"
+        disabled_reason = "仓库当前有未提交改动，已禁用自动更新。"
+    elif not repo_info.get("upstream"):
+        update_disabled = " disabled"
+        disabled_reason = "当前分支未配置上游远端，无法自动 pull。"
+
+    status_html = ""
+    if admin_status:
+        status_class = admin_status.get("status", "")
+        status_html = f"""
+        <div class="job-card">
+          <div class="job-card-head">
+            <strong>最近维护结果</strong>
+            <span class="status-pill {escape(_job_status_class(status_class))}">{escape(_job_status_label(status_class) if status_class in JOB_ACTIVE_STATUSES | JOB_FINISHED_STATUSES else status_class or "unknown")}</span>
+          </div>
+          <div class="muted">{escape(admin_status.get("message", "") or "暂无说明")}</div>
+          <div class="muted">更新时间：{escape(admin_status.get("updated_at", "") or "未知")}</div>
+        </div>
+        """
+
+    notice_html = f'<div class="warning-box">{escape(disabled_reason or action_hint)}</div>'
+    return f"""
+    <section class="panel">
+      <div class="option-panel-head">
+        <div>
+          <h2>维护操作</h2>
+          <p class="muted">在页面里直接重启 Web UI，或从远端拉取最新代码后自动重启。</p>
+        </div>
+        <span class="pill">{escape(WEBUI_SERVICE_NAME)}</span>
+      </div>
+      <p><strong>当前分支：</strong>{branch}</p>
+      <p><strong>当前提交：</strong>{commit}</p>
+      <p><strong>跟踪远端：</strong>{upstream}</p>
+      <p><strong>仓库状态：</strong>{escape(repo_state)}</p>
+      {notice_html}
+      <div class="two-col">
+        <form method="post" action="/admin/restart">
+          <button type="submit"{restart_disabled}>重启 Web UI</button>
+        </form>
+        <form method="post" action="/admin/update">
+          <button type="submit"{update_disabled}>拉取更新并重启</button>
+        </form>
+      </div>
+      <div class="muted">更新使用 `git pull --ff-only`，如果仓库有本地改动或没有配置上游分支，系统会拒绝自动更新。</div>
+      {status_html}
+    </section>
+    """
+
+
 def _start_background_job(job_id: str, runner) -> None:
     def _target() -> None:
         JOB_REGISTRY.mark_running(job_id)
@@ -856,12 +1193,27 @@ def _start_background_job(job_id: str, runner) -> None:
     thread.start()
 
 
-def _render_page(title: str, body: str, notice: str = "", error: str = "") -> str:
+def _render_page(
+    title: str,
+    body: str,
+    notice: str = "",
+    error: str = "",
+    *,
+    auth_enabled: bool = False,
+    authenticated: bool = False,
+) -> str:
     flash = ""
     if notice:
         flash += f'<div class="flash notice">{escape(notice)}</div>'
     if error:
         flash += f'<div class="flash error">{escape(error)}</div>'
+    topbar_action = '<a href="/projects">项目列表</a>'
+    if auth_enabled and authenticated:
+        topbar_action = """
+        <form method="post" action="/logout" class="inline-form">
+          <button type="submit" class="ghost-button">退出登录</button>
+        </form>
+        """
     model_presets = _load_model_presets()
     default_models = {
         provider: _default_model_for_provider(provider)
@@ -1133,6 +1485,23 @@ def _render_page(title: str, body: str, notice: str = "", error: str = "") -> st
     .ghost-button:hover {{
       background: rgba(255,255,255,0.9);
     }}
+    .topbar-actions {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }}
+    .login-shell {{
+      width: min(560px, 100%);
+      margin: 8vh auto 0;
+    }}
+    .login-card {{
+      display: grid;
+      gap: 14px;
+    }}
+    .mono {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }}
     .job-card {{
       display: grid;
       gap: 8px;
@@ -1319,7 +1688,7 @@ def _render_page(title: str, body: str, notice: str = "", error: str = "") -> st
         <h1 class="brand">Novel Writer Web UI</h1>
         <p class="sub">浏览项目、在线阅读章节、直接续写。</p>
       </div>
-      <div><a href="/projects">项目列表</a></div>
+      <div class="topbar-actions">{topbar_action}</div>
     </div>
     {flash}
     {body}
@@ -1406,11 +1775,139 @@ def _render_page(title: str, body: str, notice: str = "", error: str = "") -> st
 """
 
 
+def _render_login_page(
+    *,
+    error: str = "",
+    next_path: str = "/projects",
+    auth_settings: WebAuthSettings,
+) -> str:
+    warnings = []
+    auth_service = _auth_service(auth_settings)
+    if auth_service.should_warn_default_credentials():
+        warnings.append("当前仍在使用默认账号密码，建议你尽快修改配置。")
+    if auth_service.should_warn_default_secret_key():
+        warnings.append("当前仍在使用默认 secret key，建议你尽快修改配置。")
+    warning_html = "".join(f'<div class="warning-box">{escape(item)}</div>' for item in warnings)
+    body = f"""
+    <div class="login-shell">
+      <section class="panel login-card">
+        <div class="hero">
+          <h2>登录后继续</h2>
+          <p class="sub">当前 Web UI 已启用简单鉴权。登录成功后，你就可以继续远程访问项目、续写正文和执行维护操作。</p>
+        </div>
+        <form method="post" action="/login">
+          <input type="hidden" name="next" value="{escape(_safe_next_path(next_path))}">
+          <label>用户名
+            <input type="text" name="username" autocomplete="username" autofocus>
+          </label>
+          <label>密码
+            <input type="password" name="password" autocomplete="current-password">
+          </label>
+          <button type="submit">登录</button>
+        </form>
+        <div class="muted">认证配置文件：<span class="mono">{escape(auth_settings.config_path)}</span></div>
+        {warning_html}
+      </section>
+    </div>
+    """
+    return _render_page(
+        "登录",
+        body,
+        error=error,
+        auth_enabled=auth_settings.enabled,
+        authenticated=False,
+    )
+
+
 class NovelWriterHandler(BaseHTTPRequestHandler):
     server_version = "NovelWriterWebUI/0.1"
 
+    def _current_auth_settings(self) -> WebAuthSettings:
+        return _auth_settings()
+
+    def _auth_cookie_value(self) -> str:
+        raw_cookie = self.headers.get("Cookie", "")
+        if not raw_cookie:
+            return ""
+        cookie = SimpleCookie()
+        try:
+            cookie.load(raw_cookie)
+        except Exception:
+            return ""
+        morsel = cookie.get(self._current_auth_settings().cookie_name)
+        if morsel is None:
+            return ""
+        return morsel.value or ""
+
+    def _is_authenticated(self, auth_settings: WebAuthSettings | None = None) -> bool:
+        settings = auth_settings or self._current_auth_settings()
+        if not settings.enabled:
+            return True
+        return _auth_service(settings).verify_token(self._auth_cookie_value())
+
+    def _login_attempt_key(self) -> str:
+        forwarded = str(self.headers.get("X-Forwarded-For", "") or "").split(",", 1)[0].strip()
+        host = forwarded or str(self.client_address[0] or "").strip()
+        return host or "unknown"
+
+    def _requires_auth(self, path: str) -> bool:
+        settings = self._current_auth_settings()
+        return settings.enabled and not _is_public_path(path)
+
+    def _send_standard_headers(self) -> None:
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+
+    def _cookie_header_value(
+        self,
+        name: str,
+        value: str,
+        *,
+        max_age: int | None = None,
+        secure: bool = False,
+    ) -> str:
+        cookie = SimpleCookie()
+        cookie[name] = value
+        cookie[name]["path"] = "/"
+        cookie[name]["httponly"] = True
+        cookie[name]["samesite"] = "Lax"
+        if secure:
+            cookie[name]["secure"] = True
+        if max_age is not None:
+            cookie[name]["max-age"] = str(max_age)
+        return cookie[name].OutputString()
+
+    def _auth_redirect_target(self) -> str:
+        path = self.path or "/projects"
+        return _safe_next_path(path)
+
+    def _enforce_auth(self, path: str) -> bool:
+        settings = self._current_auth_settings()
+        if not settings.enabled or _is_public_path(path):
+            return True
+        if self._is_authenticated(settings):
+            return True
+        if path.startswith(API_PATH_PREFIX):
+            self._write_json({"error": "Unauthorized."}, status=HTTPStatus.UNAUTHORIZED)
+            return False
+        self._redirect(
+            "/login?next=" + urllib.parse.quote(self._auth_redirect_target(), safe="/?=&"),
+        )
+        return False
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        auth_settings = self._current_auth_settings()
+        if parsed.path == "/login":
+            self._handle_login_page(parsed)
+            return
+        if parsed.path == "/healthz":
+            self._write_json({"ok": True, "auth_enabled": auth_settings.enabled})
+            return
+        if not self._enforce_auth(parsed.path):
+            return
         params = urllib.parse.parse_qs(parsed.query)
         notice = params.get("notice", [""])[0]
         error = params.get("error", [""])[0]
@@ -1440,10 +1937,24 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/login":
+            self._handle_login_submit(self._read_form())
+            return
+        if parsed.path == "/logout":
+            self._handle_logout()
+            return
+        if not self._enforce_auth(parsed.path):
+            return
         form = self._read_form()
 
         if parsed.path == "/projects/create":
             self._handle_create_project_async(form)
+            return
+        if parsed.path == "/admin/restart":
+            self._handle_admin_restart()
+            return
+        if parsed.path == "/admin/update":
+            self._handle_admin_update()
             return
 
         parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
@@ -1474,20 +1985,70 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
     def _redirect(self, location: str) -> None:
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", location)
+        self._send_standard_headers()
         self.end_headers()
 
-    def _write_html(self, html: str) -> None:
+    def _write_html(self, html: str, *, status: HTTPStatus = HTTPStatus.OK, extra_headers: dict[str, str] | None = None) -> None:
         data = html.encode("utf-8")
-        self.send_response(HTTPStatus.OK)
+        self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self._send_standard_headers()
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _handle_admin_restart(self) -> None:
+        settings = self._current_auth_settings()
+        if not _client_can_manage_server(
+            self.client_address[0],
+            auth_settings=settings,
+            authenticated=self._is_authenticated(settings),
+        ):
+            reason = "请先登录后再执行管理操作。" if settings.enabled else "管理操作默认只允许本机访问。"
+            self._redirect("/projects?error=" + urllib.parse.quote(reason))
+            return
+        try:
+            _launch_admin_task("restart")
+            self._redirect(
+                "/projects?notice="
+                + urllib.parse.quote("已开始重启 Web UI。页面会短暂断开，请在 3 秒后刷新。")
+            )
+        except Exception as exc:
+            self._redirect("/projects?error=" + urllib.parse.quote(str(exc)))
+
+    def _handle_admin_update(self) -> None:
+        settings = self._current_auth_settings()
+        if not _client_can_manage_server(
+            self.client_address[0],
+            auth_settings=settings,
+            authenticated=self._is_authenticated(settings),
+        ):
+            reason = "请先登录后再执行管理操作。" if settings.enabled else "管理操作默认只允许本机访问。"
+            self._redirect("/projects?error=" + urllib.parse.quote(reason))
+            return
+        try:
+            repo_info = _get_repo_admin_info()
+            if repo_info.get("error"):
+                raise RuntimeError(f"仓库状态读取失败：{repo_info['error']}")
+            if repo_info.get("dirty"):
+                raise RuntimeError("当前仓库有未提交改动，请先提交或清理后再更新。")
+            if not repo_info.get("upstream"):
+                raise RuntimeError("当前分支未配置上游远端，无法自动更新。")
+            _launch_admin_task("update")
+            self._redirect(
+                "/projects?notice="
+                + urllib.parse.quote("已开始拉取更新并重启 Web UI。若更新成功，页面会在几秒后恢复。")
+            )
+        except Exception as exc:
+            self._redirect("/projects?error=" + urllib.parse.quote(str(exc)))
 
     def _write_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self._send_standard_headers()
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -1506,9 +2067,100 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
+        self._send_standard_headers()
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _handle_login_page(self, parsed) -> None:
+        settings = self._current_auth_settings()
+        if not settings.enabled:
+            self._redirect("/projects")
+            return
+        params = urllib.parse.parse_qs(parsed.query)
+        next_path = _safe_next_path(params.get("next", ["/projects"])[0])
+        if self._is_authenticated(settings):
+            self._redirect(next_path)
+            return
+        self._write_html(
+            _render_login_page(
+                next_path=next_path,
+                auth_settings=settings,
+            ),
+            extra_headers={"Cache-Control": "no-store"},
+        )
+
+    def _handle_login_submit(self, form: dict[str, str]) -> None:
+        settings = self._current_auth_settings()
+        if not settings.enabled:
+            self._redirect("/projects")
+            return
+        next_path = _safe_next_path(form.get("next", "/projects"))
+        attempt_key = self._login_attempt_key()
+        guard = _login_attempt_guard(settings)
+        if guard.is_locked(attempt_key):
+            retry_after = max(1, guard.retry_after_seconds(attempt_key))
+            self._write_html(
+                _render_login_page(
+                    error=f"登录失败次数过多，请 {retry_after} 秒后再试。",
+                    next_path=next_path,
+                    auth_settings=settings,
+                ),
+                status=HTTPStatus.TOO_MANY_REQUESTS,
+                extra_headers={
+                    "Retry-After": str(retry_after),
+                    "Cache-Control": "no-store",
+                },
+            )
+            return
+
+        auth_service = _auth_service(settings)
+        username = (form.get("username") or "").strip()
+        password = form.get("password") or ""
+        if not auth_service.verify(username, password):
+            guard.register_failure(attempt_key)
+            time.sleep(0.8)
+            self._write_html(
+                _render_login_page(
+                    error="账号或密码错误。",
+                    next_path=next_path,
+                    auth_settings=settings,
+                ),
+                status=HTTPStatus.UNAUTHORIZED,
+                extra_headers={"Cache-Control": "no-store"},
+            )
+            return
+
+        guard.register_success(attempt_key)
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", next_path)
+        self._send_standard_headers()
+        self.send_header(
+            "Set-Cookie",
+            self._cookie_header_value(
+                settings.cookie_name,
+                auth_service.issue_token(),
+                max_age=settings.session_max_age_seconds,
+                secure=settings.cookie_secure,
+            ),
+        )
+        self.end_headers()
+
+    def _handle_logout(self) -> None:
+        settings = self._current_auth_settings()
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", "/login" if settings.enabled else "/projects")
+        self._send_standard_headers()
+        self.send_header(
+            "Set-Cookie",
+            self._cookie_header_value(
+                settings.cookie_name,
+                "",
+                max_age=0,
+                secure=settings.cookie_secure,
+            ),
+        )
+        self.end_headers()
 
     def _handle_job_api(self, job_id: str) -> None:
         job = JOB_REGISTRY.get(job_id)
@@ -1522,6 +2174,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if job is None:
             self.send_error(HTTPStatus.NOT_FOUND, "任务不存在")
             return
+        auth_settings = self._current_auth_settings()
+        authenticated = self._is_authenticated(auth_settings)
 
         action_html = ""
         if job.get("result_url"):
@@ -1619,9 +2273,20 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         }})();
         </script>
         """
-        self._write_html(_render_page(f"任务状态 - {job.get('title', job_id)}", body, notice=notice, error=error))
+        self._write_html(
+            _render_page(
+                f"任务状态 - {job.get('title', job_id)}",
+                body,
+                notice=notice,
+                error=error,
+                auth_enabled=auth_settings.enabled,
+                authenticated=authenticated,
+            )
+        )
 
     def _handle_projects(self, notice: str = "", error: str = "") -> None:
+        auth_settings = self._current_auth_settings()
+        authenticated = self._is_authenticated(auth_settings)
         projects = _list_projects()
         cards = []
         for item in projects:
@@ -1643,66 +2308,74 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             JOB_REGISTRY.list_jobs(limit=6),
             "当前还没有后台任务。",
         )
+        admin_panel_html = _render_admin_panel(
+            client_host=self.client_address[0],
+            auth_settings=auth_settings,
+            authenticated=authenticated,
+        )
 
         body = f"""
         <div class="grid">
-          <section class="panel">
-            <h2>新建项目</h2>
-            <form method="post" action="/projects/create">
-              <div class="two-col">
-                <label>模型后端
-                  <select name="provider" data-model-provider-select data-base-provider="gemini">
-                    <option value="gemini" selected>gemini</option>
-                    <option value="grok">grok</option>
-                    <option value="deepseek">deepseek</option>
-                    <option value="doubao">doubao</option>
-                    <option value="ollama">ollama</option>
+          <div class="stack">
+            <section class="panel">
+              <h2>新建项目</h2>
+              <form method="post" action="/projects/create">
+                <div class="two-col">
+                  <label>模型后端
+                    <select name="provider" data-model-provider-select data-base-provider="gemini">
+                      <option value="gemini" selected>gemini</option>
+                      <option value="grok">grok</option>
+                      <option value="deepseek">deepseek</option>
+                      <option value="doubao">doubao</option>
+                      <option value="ollama">ollama</option>
+                    </select>
+                  </label>
+                  <label>模型预设
+                    <select name="model_preset" data-model-preset-select data-base-model="">
+                      {_render_model_preset_options("gemini", blank_label=_model_blank_label("gemini", base_model="", provider_explicit=True))}
+                    </select>
+                  </label>
+                </div>
+                <label>自定义模型名（可选）
+                  <input type="text" name="model_name_custom" data-model-custom-input placeholder="如需未预设的 Model ID，可在这里手填覆盖">
+                </label>
+                <div class="muted">默认可直接使用预设下拉，不需要每次手填 Model ID。</div>
+                <label>项目名
+                  <input type="text" name="project_name" value="雪封穹顶">
+                </label>
+                <label>项目简介
+                  <input type="text" name="project_description" value="由模型根据需求自动生成设定的长篇小说项目。">
+                </label>
+                <label>故事需求
+                  <textarea name="story_request" placeholder="把你想写的题材、角色、世界观、节奏偏好写在这里"></textarea>
+                </label>
+                <div class="two-col">
+                  <label>Temperature
+                    <input type="number" step="0.1" name="temperature" value="0.9">
+                  </label>
+                  <label>Max Tokens
+                    <input type="number" name="max_tokens" value="4000">
+                  </label>
+                </div>
+                <div class="two-col">
+                  <label>Timeout
+                    <input type="number" name="timeout" value="120">
+                  </label>
+                  <label>API Base（可选）
+                    <input type="text" name="api_base" placeholder="如需自定义接口地址可填写">
+                  </label>
+                </div>
+                <label>Planning Mode
+                  <select name="planning_mode">
+                    {_render_planning_mode_options(DEFAULT_PLANNING_MODE)}
                   </select>
                 </label>
-                <label>模型预设
-                  <select name="model_preset" data-model-preset-select data-base-model="">
-                    {_render_model_preset_options("gemini", blank_label=_model_blank_label("gemini", base_model="", provider_explicit=True))}
-                  </select>
-                </label>
-              </div>
-              <label>自定义模型名（可选）
-                <input type="text" name="model_name_custom" data-model-custom-input placeholder="如需未预设的 Model ID，可在这里手填覆盖">
-              </label>
-              <div class="muted">默认可直接使用预设下拉，不需要每次手填 Model ID。</div>
-              <label>项目名
-                <input type="text" name="project_name" value="雪封穹顶">
-              </label>
-              <label>项目简介
-                <input type="text" name="project_description" value="由模型根据需求自动生成设定的长篇小说项目。">
-              </label>
-              <label>故事需求
-                <textarea name="story_request" placeholder="把你想写的题材、角色、世界观、节奏偏好写在这里"></textarea>
-              </label>
-              <div class="two-col">
-                <label>Temperature
-                  <input type="number" step="0.1" name="temperature" value="0.9">
-                </label>
-                <label>Max Tokens
-                  <input type="number" name="max_tokens" value="4000">
-                </label>
-              </div>
-              <div class="two-col">
-                <label>Timeout
-                  <input type="number" name="timeout" value="120">
-                </label>
-                <label>API Base（可选）
-                  <input type="text" name="api_base" placeholder="如需自定义接口地址可填写">
-                </label>
-              </div>
-              <label>Planning Mode
-                <select name="planning_mode">
-                  {_render_planning_mode_options(DEFAULT_PLANNING_MODE)}
-                </select>
-              </label>
-              <div class="muted">{escape(_planning_mode_help(DEFAULT_PLANNING_MODE))}</div>
-              <button type="submit">创建项目</button>
-            </form>
-          </section>
+                <div class="muted">{escape(_planning_mode_help(DEFAULT_PLANNING_MODE))}</div>
+                <button type="submit">创建项目</button>
+              </form>
+            </section>
+            {admin_panel_html}
+          </div>
           <section class="panel">
             <div class="hero">
               <h2>项目书架</h2>
@@ -1716,13 +2389,24 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
           </section>
         </div>
         """
-        self._write_html(_render_page("项目列表", body, notice=notice, error=error))
+        self._write_html(
+            _render_page(
+                "项目列表",
+                body,
+                notice=notice,
+                error=error,
+                auth_enabled=auth_settings.enabled,
+                authenticated=authenticated,
+            )
+        )
 
     def _handle_project(self, project_id: str, notice: str = "", error: str = "") -> None:
         project_path = _find_project(project_id)
         if project_path is None:
             self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
             return
+        auth_settings = self._current_auth_settings()
+        authenticated = self._is_authenticated(auth_settings)
 
         data = load_project(str(project_path))
         project = data["project"]
@@ -1946,13 +2630,24 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
           </main>
         </div>
         """
-        self._write_html(_render_page(project_name, body, notice=notice, error=error))
+        self._write_html(
+            _render_page(
+                project_name,
+                body,
+                notice=notice,
+                error=error,
+                auth_enabled=auth_settings.enabled,
+                authenticated=authenticated,
+            )
+        )
 
     def _handle_chapter(self, project_id: str, chapter_slug: str, notice: str = "", error: str = "") -> None:
         project_path = _find_project(project_id)
         if project_path is None:
             self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
             return
+        auth_settings = self._current_auth_settings()
+        authenticated = self._is_authenticated(auth_settings)
 
         chapter_file = project_path / "chapters" / f"{chapter_slug}.md"
         if not chapter_file.exists():
@@ -2036,7 +2731,16 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
           </section>
         </div>
         """
-        self._write_html(_render_page(f"{project_name} - {chapter_file.name}", body, notice=notice, error=error))
+        self._write_html(
+            _render_page(
+                f"{project_name} - {chapter_file.name}",
+                body,
+                notice=notice,
+                error=error,
+                auth_enabled=auth_settings.enabled,
+                authenticated=authenticated,
+            )
+        )
 
     def _handle_illustration_file(self, project_id: str, chapter_slug: str, file_name: str) -> None:
         project_path = _find_project(project_id)
@@ -2206,6 +2910,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if job is None:
             self.send_error(HTTPStatus.NOT_FOUND, "任务不存在")
             return
+        auth_settings = self._current_auth_settings()
+        authenticated = self._is_authenticated(auth_settings)
 
         body = f"""
         <div class="status-shell">
@@ -2308,13 +3014,24 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         }})();
         </script>
         """
-        self._write_html(_render_page(f"任务状态 - {job.get('title', job_id)}", body, notice=notice, error=error))
+        self._write_html(
+            _render_page(
+                f"任务状态 - {job.get('title', job_id)}",
+                body,
+                notice=notice,
+                error=error,
+                auth_enabled=auth_settings.enabled,
+                authenticated=authenticated,
+            )
+        )
 
     def _handle_project_page(self, project_id: str, notice: str = "", error: str = "") -> None:
         project_path = _find_project(project_id)
         if project_path is None:
             self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
             return
+        auth_settings = self._current_auth_settings()
+        authenticated = self._is_authenticated(auth_settings)
 
         data = load_project(str(project_path))
         project = data["project"]
@@ -2579,7 +3296,16 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         </div>
         {project_live_script}
         """
-        self._write_html(_render_page(project_name, body, notice=notice, error=error))
+        self._write_html(
+            _render_page(
+                project_name,
+                body,
+                notice=notice,
+                error=error,
+                auth_enabled=auth_settings.enabled,
+                authenticated=authenticated,
+            )
+        )
 
     def _handle_create_project_async(self, form: dict[str, str]) -> None:
         api_keys = _load_api_keys()
@@ -2866,7 +3592,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Basic web UI for Novel Writer")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host, use 0.0.0.0 for remote access")
     parser.add_argument("--port", type=int, default=8008, help="Bind port")
+    parser.add_argument("--admin-task", choices=("restart", "update"), help="Run an admin maintenance task and exit")
+    parser.add_argument("--repo-root", default=str(REPO_ROOT), help=argparse.SUPPRESS)
+    parser.add_argument("--service-name", default=WEBUI_SERVICE_NAME, help=argparse.SUPPRESS)
+    parser.add_argument("--status-path", default=str(_admin_action_status_path()), help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.admin_task:
+        raise SystemExit(
+            _run_admin_task(
+                args.admin_task,
+                repo_root=args.repo_root,
+                service_name=args.service_name,
+                status_path=args.status_path,
+            )
+        )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((args.host, args.port), NovelWriterHandler)
