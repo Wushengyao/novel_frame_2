@@ -37,6 +37,7 @@ novel_writer/
   state_updater.py
   webui.py
   api_keys.sh
+  webui_auth.env
   linux/
     quick_start.sh
     quick_outline.sh
@@ -367,6 +368,8 @@ DEFAULT_PROVIDER_OVERRIDE=""
 - 直接在网页里续写
 - 在网页里新建项目
 - 用 ComfyUI 为章节生成插图并在网页中浏览
+- 生成“下一章推进选项”，再按选项续写
+- 在页面里直接重启 Web UI，或拉取代码更新后自动重启
 
 启动方式：
 
@@ -394,6 +397,52 @@ python3 ./webui.py --host 0.0.0.0 --port 8008
 ```
 
 然后确保服务器防火墙或安全组放行对应端口。
+
+### Web UI 登录鉴权
+
+如果你需要远程访问，推荐开启 Web UI 自带的简单登录鉴权。
+
+默认配置文件现在放在项目内，并且已经被 `.gitignore` 忽略：
+
+- [webui_auth.env](/home/wsy/novel_frame_2/novel_writer/webui_auth.env)
+
+常用配置示例：
+
+```bash
+NOVEL_WRITER_AUTH_ENABLED=1
+NOVEL_WRITER_AUTH_USERNAME=admin
+NOVEL_WRITER_AUTH_PASSWORD='请改成你自己的强密码'
+NOVEL_WRITER_AUTH_SECRET_KEY='请改成你自己的随机长字符串'
+NOVEL_WRITER_AUTH_COOKIE_NAME=novel_writer_webui_session
+NOVEL_WRITER_AUTH_COOKIE_SECURE=0
+NOVEL_WRITER_AUTH_SESSION_MAX_AGE_SECONDS=604800
+NOVEL_WRITER_AUTH_LOGIN_MAX_ATTEMPTS=5
+NOVEL_WRITER_AUTH_LOGIN_WINDOW_SECONDS=300
+NOVEL_WRITER_AUTH_LOGIN_LOCKOUT_SECONDS=900
+```
+
+说明：
+
+- `NOVEL_WRITER_AUTH_ENABLED=1` 表示启用登录鉴权
+- `USERNAME / PASSWORD / SECRET_KEY` 建议你部署时务必改成自己的值
+- 当前如果你还是用 `http://` 访问，`NOVEL_WRITER_AUTH_COOKIE_SECURE` 应保持为 `0`
+- 如果后面接了 HTTPS，再把 `NOVEL_WRITER_AUTH_COOKIE_SECURE` 改成 `1`
+- 如果你想把鉴权文件放到别处，也可以设置环境变量 `NOVEL_WRITER_AUTH_CONFIG=/your/path/webui_auth.env`
+
+启用后，远程打开 Web UI 会先进入登录页；登录成功后，才能：
+
+- 浏览项目和章节
+- 直接续写与回滚
+- 使用“重启 Web UI”
+- 使用“拉取更新并重启”
+
+如果你只是本机临时使用，也可以把：
+
+```bash
+NOVEL_WRITER_AUTH_ENABLED=0
+```
+
+然后重启 Web UI。
 
 ## 7. ComfyUI 插图能力
 

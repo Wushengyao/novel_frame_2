@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 
-DEFAULT_AUTH_CONFIG_PATH = Path.home() / ".config" / "novel-writer" / "webui_auth.env"
+DEFAULT_AUTH_CONFIG_PATH = Path(__file__).resolve().parent / "webui_auth.env"
 DEFAULT_AUTH_COOKIE_NAME = "novel_writer_webui_session"
 
 

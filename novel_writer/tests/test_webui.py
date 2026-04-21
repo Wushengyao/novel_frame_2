@@ -346,6 +346,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
 
         self.assertEqual(projects_page.status, 200)
         self.assertIn("项目书架", projects_page.body)
+        self.assertIn("返回首页", projects_page.body)
         self.assertIn("退出登录", projects_page.body)
 
     def test_login_lockout_returns_retry_after(self) -> None:

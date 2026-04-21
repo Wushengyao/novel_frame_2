@@ -1207,9 +1207,10 @@ def _render_page(
         flash += f'<div class="flash notice">{escape(notice)}</div>'
     if error:
         flash += f'<div class="flash error">{escape(error)}</div>'
-    topbar_action = '<a href="/projects">项目列表</a>'
+    topbar_action = '<a href="/projects" class="ghost-button">返回首页</a>'
     if auth_enabled and authenticated:
         topbar_action = """
+        <a href="/projects" class="ghost-button">返回首页</a>
         <form method="post" action="/logout" class="inline-form">
           <button type="submit" class="ghost-button">退出登录</button>
         </form>
