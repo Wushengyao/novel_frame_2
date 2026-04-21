@@ -10,6 +10,7 @@ from chapter_context import get_next_context_for_mode, peek_next_context_for_mod
 from common_utils import emit_progress, extract_json_object, safe_int, utc_now
 from console_logger import log_success
 from context_builder import (
+    build_custom_progression_task_card,
     build_progression_context,
     build_progression_selected_task_card,
     resolve_effective_chapter_task,
@@ -31,6 +32,7 @@ DEFAULT_OPTION_COUNT = 4
 ALLOWED_OPTION_COUNTS = {3, 4, 5}
 SESSION_DIR_NAME = "progression_sessions"
 OPTION_OUTLINE_KEYS = ("title", "summary", "goal", "key_events")
+CUSTOM_PROGRESSION_OPTION_ID = "custom_user_option"
 
 
 def validate_option_count(option_count: object) -> int:
@@ -75,6 +77,7 @@ def _normalize_option(option: dict, fallback_id: str) -> dict:
         "writer_guidance": str(option.get("writer_guidance", "") or "").strip(),
         "chapter_outline": normalized_outline,
         "recommended": bool(option.get("recommended")),
+        "custom": bool(option.get("custom")),
     }
 
 
@@ -120,6 +123,28 @@ def normalize_progression_options_response(data: dict, option_count: int) -> dic
     return {
         "recommended_option_id": recommended[0]["option_id"],
         "options": normalized,
+    }
+
+
+def build_custom_progression_option() -> dict:
+    return {
+        "option_id": CUSTOM_PROGRESSION_OPTION_ID,
+        "title": "空白自定义项",
+        "summary": "不采用上面的候选方案，改由你自己定义这一章想看的创意和情节。",
+        "why_now": "当你已经有更明确的章节灵感，或者想临时换成自己的推进方案时，就选这一项。",
+        "key_events": [
+            "由你在下方填写这一章真正想发生的内容。",
+            "系统会保留当前状态和卷目标作为上位约束。",
+        ],
+        "writer_guidance": "请把用户随后填写的自定义创意作为本章主任务。",
+        "chapter_outline": {
+            "title": "由你填写",
+            "summary": "由你填写这一章想看的情节。",
+            "goal": "由你填写当前章目标。",
+            "key_events": ["由你填写本章关键推进", "系统负责保持与当前状态衔接"],
+        },
+        "recommended": False,
+        "custom": True,
     }
 
 def save_progression_session(project_path: str, session: dict) -> str:
@@ -266,14 +291,15 @@ def generate_progression_options(
         "source_user_request": user_request.strip(),
         "runtime_overrides": sanitize_runtime_overrides(runtime_overrides),
         "recommended_option_id": normalized["recommended_option_id"],
-        "options": normalized["options"],
+        "options": normalized["options"] + [build_custom_progression_option()],
         "status": "pending",
         "selected_option_id": "",
         "selection_feedback": "",
     }
     save_progression_session(project_path, session)
     log_success(
-        f"progression_options: generated {len(session['options'])} options for chapter {session['target_chapter_number']}"
+        "progression_options: generated "
+        f"{count} model options plus 1 custom blank option for chapter {session['target_chapter_number']}"
     )
     return session
 
@@ -306,6 +332,8 @@ def resolve_progression_selection(
                 break
     if selected is None:
         raise ValueError("未找到对应的推进选项，请重新生成推进选项。")
+    if selected.get("custom") and not str(selection_feedback or "").strip():
+        raise ValueError("选择空白自定义项后，必须填写你自己的创意与想看的情节。")
 
     session["selected_option_id"] = selected["option_id"]
     session["selection_feedback"] = selection_feedback.strip()
@@ -322,18 +350,32 @@ def resolve_progression_selection(
         planning_mode=planning_mode,
         persist=False,
     )
-    selected_task_card = build_progression_selected_task_card(
-        project_path,
-        project_data,
-        next_context,
-        selected,
-        session_id=str(session.get("session_id", "") or "").strip(),
-        option_id=selected["option_id"],
-        planning_mode=planning_mode,
-        baseline_source=str(baseline_task.get("source", "") or "").strip(),
-        selection_feedback=selection_feedback,
-        persist=True,
-    )
+    if selected.get("custom"):
+        selected_task_card = build_custom_progression_task_card(
+            project_path,
+            project_data,
+            next_context,
+            baseline_task,
+            selection_feedback,
+            session_id=str(session.get("session_id", "") or "").strip(),
+            option_id=selected["option_id"],
+            planning_mode=planning_mode,
+            baseline_source=str(baseline_task.get("source", "") or "").strip(),
+            persist=True,
+        )
+    else:
+        selected_task_card = build_progression_selected_task_card(
+            project_path,
+            project_data,
+            next_context,
+            selected,
+            session_id=str(session.get("session_id", "") or "").strip(),
+            option_id=selected["option_id"],
+            planning_mode=planning_mode,
+            baseline_source=str(baseline_task.get("source", "") or "").strip(),
+            selection_feedback=selection_feedback,
+            persist=True,
+        )
     log_success("progression_options: persisted selected progression task card")
 
     return {

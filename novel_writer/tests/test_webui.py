@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import webui
 from webui import NovelWriterHandler, ThreadingHTTPServer
+from progression_manager import CUSTOM_PROGRESSION_OPTION_ID
 
 from tests.test_support import create_test_project, runtime_config
 
@@ -94,7 +95,23 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                         "key_events": ["规划路线", "短程离开"],
                     },
                     "recommended": True,
-                }
+                },
+                {
+                    "option_id": CUSTOM_PROGRESSION_OPTION_ID,
+                    "title": "空白自定义项",
+                    "summary": "不采用现有候选方案，改由你自己定义。",
+                    "why_now": "用户已有更明确的章节灵感。",
+                    "key_events": ["用户自定义本章推进", "系统保持状态与卷目标一致"],
+                    "writer_guidance": "请把用户填写的创意作为本章主任务。",
+                    "chapter_outline": {
+                        "title": "由你填写",
+                        "summary": "由你填写这一章想看的情节。",
+                        "goal": "由你填写当前章目标。",
+                        "key_events": ["由你填写", "系统衔接"],
+                    },
+                    "recommended": False,
+                    "custom": True,
+                },
             ],
             "status": "pending",
             "selected_option_id": "",
@@ -125,6 +142,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         page = self._get("/project/web")
         self.assertEqual(page.status, 200)
         self.assertIn("先探查走廊", page.body)
+        self.assertIn("空白自定义项", page.body)
         self.assertIn("project-layout", page.body)
         self.assertIn("当前章任务", page.body)
         self.assertIn("卷目标", page.body)
@@ -154,7 +172,23 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                         "key_events": ["规划路线", "短程离开"],
                     },
                     "recommended": True,
-                }
+                },
+                {
+                    "option_id": CUSTOM_PROGRESSION_OPTION_ID,
+                    "title": "空白自定义项",
+                    "summary": "由用户自己定义",
+                    "why_now": "用户已有更明确的章节灵感。",
+                    "key_events": ["用户自定义本章推进", "系统保持状态与卷目标一致"],
+                    "writer_guidance": "请把用户填写的创意作为本章主任务。",
+                    "chapter_outline": {
+                        "title": "由你填写",
+                        "summary": "由你填写",
+                        "goal": "由你填写",
+                        "key_events": ["由你填写", "系统衔接"],
+                    },
+                    "recommended": False,
+                    "custom": True,
+                },
             ],
             "status": "pending",
             "selected_option_id": "",
@@ -182,6 +216,52 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         page = self._get(location)
         self.assertEqual(page.status, 200)
         self.assertIn("任务状态", page.body)
+
+    def test_continue_guided_rejects_blank_custom_option_without_user_idea(self) -> None:
+        session = {
+            "session_id": "session_web_custom",
+            "created_at": "2026-04-20T00:00:00+00:00",
+            "project_chapter_count": 0,
+            "target_chapter_number": 1,
+            "planning_mode": "chapter",
+            "source_user_request": "",
+            "runtime_overrides": {},
+            "recommended_option_id": "option_1",
+            "options": [
+                {
+                    "option_id": CUSTOM_PROGRESSION_OPTION_ID,
+                    "title": "空白自定义项",
+                    "summary": "由用户自己定义",
+                    "why_now": "用户已有更明确的章节灵感。",
+                    "key_events": ["用户自定义本章推进", "系统保持状态与卷目标一致"],
+                    "writer_guidance": "请把用户填写的创意作为本章主任务。",
+                    "chapter_outline": {
+                        "title": "由你填写",
+                        "summary": "由你填写",
+                        "goal": "由你填写",
+                        "key_events": ["由你填写", "系统衔接"],
+                    },
+                    "recommended": False,
+                    "custom": True,
+                }
+            ],
+            "status": "pending",
+            "selected_option_id": "",
+            "selection_feedback": "",
+        }
+        (self.project_path / "progression_sessions").mkdir(exist_ok=True)
+        (self.project_path / "progression_sessions" / "progression_session_web_custom.json").write_text(
+            json.dumps(session, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        response = self._post(
+            "/project/web/continue-guided",
+            f"progression_session=session_web_custom&progression_option={CUSTOM_PROGRESSION_OPTION_ID}&progression_feedback=",
+        )
+
+        self.assertEqual(response.status, 303)
+        self.assertIn("/project/web?error=", response.getheader("Location"))
 
     def test_pages_render_model_preset_controls(self) -> None:
         projects_page = self._get("/projects")

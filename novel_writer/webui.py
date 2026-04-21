@@ -23,6 +23,7 @@ from common_utils import utc_now
 from context_builder import resolve_effective_chapter_task
 from illustration_manager import get_illustration_record, illustrate_chapters, list_illustration_records
 from progression_manager import (
+    CUSTOM_PROGRESSION_OPTION_ID,
     ensure_fresh_progression_session,
     generate_progression_options,
     get_latest_active_progression_session,
@@ -738,19 +739,23 @@ def _render_progression_session(
                 f'<div class="muted"><a href="/job/{escape(active_job.get("id", ""))}">查看任务详情</a></div>'
                 "</div>"
             )
-        return '<p class="muted">还没有已生成的下一章推进选项。先填写偏好并生成 3-5 个候选方案。</p>'
+        return '<p class="muted">还没有已生成的下一章推进选项。先填写偏好并生成 3-5 个候选方案；系统会额外附带 1 个空白自定义项。</p>'
 
     options_html = []
     recommended_option_id = str(session.get("recommended_option_id", "") or "").strip()
     for index, option in enumerate(session.get("options", []), start=1):
         option_id = str(option.get("option_id", "") or "").strip()
         checked_attr = ' checked' if option_id == recommended_option_id else ""
-        badge = '<span class="option-badge">推荐</span>' if option.get("recommended") else ""
+        if option.get("custom"):
+            badge = '<span class="option-badge">自定义</span>'
+        else:
+            badge = '<span class="option-badge">推荐</span>' if option.get("recommended") else ""
         key_events = "".join(f"<li>{escape(item)}</li>" for item in option.get("key_events", []))
         chapter_outline = option.get("chapter_outline") or {}
+        card_class = "option-card custom-option-card" if option.get("custom") else "option-card"
         options_html.append(
             f"""
-            <label class="option-card">
+            <label class="{card_class}">
               <input type="radio" name="progression_option" value="{escape(option_id)}"{checked_attr}>
               <div class="option-card-head">
                 <strong>{index}. {escape(option.get('title', ''))}</strong>
@@ -776,9 +781,10 @@ def _render_progression_session(
         <div class="option-grid">
           {''.join(options_html)}
         </div>
-        <label>补充修改 / 建议
-          <textarea name="progression_feedback" placeholder="例如：保留该方案的核心走向，但把人物互动写得更轻松一点。"></textarea>
+        <label>补充修改 / 自定义创意
+          <textarea name="progression_feedback" placeholder="如果你选了上面的空白自定义项，请在这里直接写这一章想看的创意与情节；如果你选的是普通方案，这里就作为微调补充。"></textarea>
         </label>
+        <div class="muted">选择“空白自定义项”后，这段输入会直接作为当前章的主任务；选择普通方案时，它只会作为微调补充。</div>
         <button type="submit">按所选方案续写下一章</button>
       </fieldset>
     </form>
@@ -1216,6 +1222,10 @@ def _render_page(title: str, body: str, notice: str = "", error: str = "") -> st
       border: 1px solid rgba(124, 91, 62, 0.16);
       background: rgba(255,255,255,0.62);
       box-shadow: 0 14px 28px rgba(75, 46, 24, 0.06);
+    }}
+    .option-card.custom-option-card {{
+      border-style: dashed;
+      background: rgba(250, 243, 232, 0.92);
     }}
     .option-card input[type="radio"] {{
       width: auto;
@@ -2524,7 +2534,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <div class="option-panel-head">
                 <div>
                   <h2>剧情推进选项</h2>
-                  <p class="muted">围绕当前小说状态生成下一章的多个推进方案。现在会在项目创建完成、正文写完后自动后台刷新，你也可以在这里手动再生成一组。</p>
+                  <p class="muted">围绕当前小说状态生成下一章的多个推进方案。系统会生成 3-5 个候选方案，并额外附带 1 个空白自定义项。现在会在项目创建完成、正文写完后自动后台刷新，你也可以在这里手动再生成一组。</p>
                 </div>
                 <span class="pill">固定作用于下一章</span>
               </div>
@@ -2736,6 +2746,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         try:
             if not session_id or not option_ref:
                 raise RuntimeError("请选择一个推进选项后再继续写。")
+            if option_ref == CUSTOM_PROGRESSION_OPTION_ID and not feedback:
+                raise RuntimeError("选择空白自定义项后，请先填写你自己的创意与想看的情节。")
             session = ensure_fresh_progression_session(
                 str(project_path),
                 load_progression_session(str(project_path), session_id),

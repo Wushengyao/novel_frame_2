@@ -27,7 +27,7 @@ from outline_manager import (
     sync_outline_progress,
 )
 from planning_service import plan_batch_chapters
-from progression_manager import generate_progression_options, resolve_progression_selection
+from progression_manager import CUSTOM_PROGRESSION_OPTION_ID, generate_progression_options, resolve_progression_selection
 from prompt_builder import build_writer_prompt
 from project_manager import (
     PLANNING_MODE_CHAPTER,
@@ -501,7 +501,7 @@ def main() -> None:
     options_parser.add_argument("--project", required=True, help="Path to novel_project")
     options_parser.add_argument("--config", help="Optional config.json to override saved LLM settings")
     options_parser.add_argument("--user-request", default="", help="Optional preference for guided options")
-    options_parser.add_argument("--option-count", type=int, default=4, choices=(3, 4, 5), help="How many options to generate")
+    options_parser.add_argument("--option-count", type=int, default=4, choices=(3, 4, 5), help="How many model-generated options to generate; a blank custom option is always added")
     options_parser.add_argument(
         "--planning-mode",
         choices=(PLANNING_MODE_NONE, PLANNING_MODE_VOLUME, PLANNING_MODE_CHAPTER),
@@ -712,7 +712,10 @@ def main() -> None:
         print(f"Target Chapter: {session.get('target_chapter_number', '')}")
         print(f"Recommended Option: {session.get('recommended_option_id', '')}")
         for index, option in enumerate(session.get("options", []), start=1):
-            marker = " [recommended]" if option.get("recommended") else ""
+            if option.get("custom"):
+                marker = " [custom]"
+            else:
+                marker = " [recommended]" if option.get("recommended") else ""
             print(f"Option {index} [{option.get('option_id', '')}]{marker}: {option.get('title', '')}")
             print(f"  Summary: {option.get('summary', '')}")
             print(f"  Why Now: {option.get('why_now', '')}")
@@ -724,6 +727,11 @@ def main() -> None:
                 f"title={outline.get('title', '')}; "
                 f"goal={outline.get('goal', '')}"
             )
+        print(
+            "Tip: choose "
+            f"`{CUSTOM_PROGRESSION_OPTION_ID}`"
+            " (or its option number) and pass `--progression-feedback` to write a fully custom chapter idea."
+        )
         return
 
     parser.error(f"Unsupported command: {args.command}")

@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import run_next_chapter_from_progression
-from progression_manager import generate_progression_options
+from progression_manager import CUSTOM_PROGRESSION_OPTION_ID, generate_progression_options
 
 from tests.test_support import create_test_project, read_json, runtime_config
 
@@ -100,6 +100,9 @@ class GuidedFlowTests(unittest.TestCase):
                     user_request="我想看一次更谨慎的外出试探",
                     option_count=4,
                 )
+            self.assertEqual(session["recommended_option_id"], "option_2")
+            self.assertTrue(any(option.get("custom") for option in session["options"]))
+            self.assertEqual(session["options"][-1]["option_id"], CUSTOM_PROGRESSION_OPTION_ID)
 
             with patch(
                 "app.generate_text_with_metadata",

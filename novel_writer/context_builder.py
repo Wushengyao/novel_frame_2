@@ -756,6 +756,95 @@ def build_progression_selected_task_card(
     return task_card
 
 
+def _normalize_custom_progression_lines(custom_idea: str, *, max_items: int = 4) -> list[str]:
+    lines = []
+    for raw_line in re.split(r"[\r\n]+", str(custom_idea or "").strip()):
+        cleaned = re.sub(r"^[\-\*\d\.\)\(、\s]+", "", raw_line).strip()
+        if cleaned:
+            lines.append(cleaned)
+    if len(lines) >= 2:
+        return _normalize_string_list(lines, max_items=max_items)
+
+    fragments = []
+    for piece in re.split(r"[。！？!?；;]+", str(custom_idea or "").strip()):
+        cleaned = re.sub(r"^[\-\*\d\.\)\(、\s]+", "", piece).strip()
+        if cleaned:
+            fragments.append(cleaned)
+    return _normalize_string_list(fragments, max_items=max_items)
+
+
+def build_custom_progression_task_card(
+    project_path: str,
+    project_data: dict,
+    next_context: dict,
+    baseline_task: dict,
+    custom_idea: str,
+    *,
+    session_id: str,
+    option_id: str,
+    planning_mode: str,
+    baseline_source: str,
+    persist: bool = True,
+) -> dict:
+    custom_text = str(custom_idea or "").strip()
+    if not custom_text:
+        raise ValueError("选择空白自定义项后，必须填写你自己的创意与想看的情节。")
+
+    chapter = deepcopy(next_context.get("chapter") or {})
+    volume = deepcopy(next_context.get("volume") or {})
+    chapter_number = max(1, safe_int(chapter.get("chapter_number"), safe_int(project_data.get("project", {}).get("chapter_count"), 0) + 1))
+
+    custom_lines = _normalize_custom_progression_lines(custom_text)
+    title_seed = custom_lines[0] if custom_lines else custom_text
+    title = _trim_text(title_seed, 28) or str(baseline_task.get("title", "") or "").strip() or f"第 {chapter_number} 章自定义推进"
+    summary = _trim_text(custom_text, 220)
+    goal = _trim_text(custom_lines[0] if custom_lines else custom_text, 180)
+
+    if len(custom_lines) >= 2:
+        key_events = [_trim_text(item, 70) for item in custom_lines[:4]]
+    else:
+        focus = _trim_text(goal or summary, 48)
+        key_events = [
+            _trim_text(f"围绕“{focus}”推进本章主要情节。", 70),
+            "承接当前状态、人物关系与未解问题，保持前后连贯。",
+            "让人物关系、局势或线索至少出现一项清晰变化。",
+            "结尾保留下一章可自然承接的变化或悬念。",
+        ]
+
+    task_card = _normalize_task_card_payload(
+        {
+            "chapter_number": chapter_number,
+            "planning_mode": planning_mode,
+            "source": "progression_selected",
+            "title": title,
+            "summary": summary,
+            "goal": goal,
+            "key_events": key_events,
+            "volume_title": str(volume.get("title", "") or baseline_task.get("volume_title", "") or "").strip(),
+            "volume_goal": str(volume.get("story_goal", "") or baseline_task.get("volume_goal", "") or "").strip(),
+            "writer_guidance": "\n".join(
+                [
+                    "本章采用用户自定义推进方案。",
+                    f"用户自定义创意：{summary}",
+                    "请优先落实这段创意，同时保持与当前状态、人物关系和卷目标一致。",
+                ]
+            ),
+            "derived_from": {
+                "session_id": session_id,
+                "option_id": option_id,
+                "base_planning_mode": normalize_planning_mode(planning_mode),
+                "baseline_source": str(baseline_source or "").strip(),
+            },
+        },
+        chapter_number=chapter_number,
+        planning_mode=planning_mode,
+        volume=volume,
+    )
+    if persist:
+        return save_task_card(project_path, task_card)
+    return task_card
+
+
 def load_task_card(project_path: str, chapter_number: int) -> dict | None:
     path = _task_card_path(project_path, chapter_number)
     if not path.exists():
