@@ -81,12 +81,15 @@ def build_init_prompt(data: dict) -> str:
 1. 输出必须是合法 JSON
 2. 设定要适合长篇连载，人物关系和剧情目标要能持续推进
 3. 人物要鲜明稳定，避免脸谱化
-4. 每个角色对象都必须包含 `name`、`role`、`description`、`appearance` 四个字段
-5. `description` 侧重人物身份、性格、能力、关系与叙事定位
-6. `appearance` 单独描写人物外貌特征（包括人种，避免文生图模型的不确定性）、体态气质、发型发色、五官特点、常见衣着与穿搭风格
-7. plot_state 必须兼容以下结构
-8. style 要明确语气、视角和写作要求
-9. 如果种子设定为空，请根据用户需求自行完整设计
+4. `protagonists` 只放核心常驻人物；`supporting` 只保留第一章到前几章就会实际出场、并对开篇推进不可缺少的必要配角，没有就返回空数组
+5. 不要为了“以后可能会用到”提前创建导师、邻居、系统 AI、反派手下等暂时不会出场的配角档案
+6. 每个角色对象都必须包含 `name`、`role`、`description`、`appearance` 四个字段
+7. `description` 侧重人物身份、性格、能力、关系与叙事定位
+8. `appearance` 单独描写人物外貌特征（包括人种，避免文生图模型的不确定性）、体态气质、发型发色、五官特点、常见衣着与穿搭风格
+9. `plot_state.active_characters` 在初始化阶段只填写第一章开场就会实际出场的人物，通常 1 到 3 人，不要把未来角色写进去
+10. plot_state 必须兼容以下结构
+11. style 要明确语气、视角和写作要求
+12. 如果种子设定为空，请根据用户需求自行完整设计
 
 输出 JSON：
 {{
@@ -106,14 +109,7 @@ def build_init_prompt(data: dict) -> str:
         "appearance": ""
       }}
     ],
-    "supporting": [
-      {{
-        "name": "",
-        "role": "",
-        "description": "",
-        "appearance": ""
-      }}
-    ]
+    "supporting": []
   }},
   "plot_state": {{
     "main_plot": "",

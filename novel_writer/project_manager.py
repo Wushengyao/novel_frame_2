@@ -329,6 +329,47 @@ def _normalize_characters(characters: dict) -> dict:
     return result
 
 
+def _normalize_name_list(value: object, *, max_items: int = 8) -> list[str]:
+    items = value or []
+    if not isinstance(items, list):
+        items = [items]
+
+    normalized = []
+    seen = set()
+    for item in items:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        normalized.append(text)
+        seen.add(text)
+        if len(normalized) >= max_items:
+            break
+    return normalized
+
+
+def _prune_initial_supporting_characters(
+    characters: dict,
+    plot_state: dict,
+    *,
+    seeded_characters: dict | None = None,
+) -> dict:
+    normalized = _normalize_characters(characters)
+    seeded = _normalize_characters(seeded_characters or {})
+    opening_names = set(_normalize_name_list((plot_state or {}).get("active_characters"), max_items=6))
+    seeded_supporting_names = {
+        str(item.get("name", "") or "").strip()
+        for item in seeded.get("supporting") or []
+        if str(item.get("name", "") or "").strip()
+    }
+    keep_names = opening_names | seeded_supporting_names
+    normalized["supporting"] = [
+        item
+        for item in normalized.get("supporting") or []
+        if str(item.get("name", "") or "").strip() in keep_names
+    ]
+    return normalized
+
+
 def _normalize_author_intent(author_intent: dict | None) -> dict:
     normalized = deepcopy(EMPTY_AUTHOR_INTENT)
     if isinstance(author_intent, dict):
@@ -568,6 +609,11 @@ def _generate_initial_story_data(config: dict) -> tuple[dict, dict]:
         key: _deep_merge(fallback_data[key], generated_data.get(key, {}))
         for key in INIT_SECTION_KEYS
     }
+    final_data["characters"] = _prune_initial_supporting_characters(
+        final_data["characters"],
+        final_data["plot_state"],
+        seeded_characters=seed_data["characters"],
+    )
     final_data["plot_state"] = _normalize_initial_plot_state(final_data["plot_state"])
     return final_data, {
         "used_llm": True,
