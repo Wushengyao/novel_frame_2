@@ -49,6 +49,7 @@ from project_manager import (
 )
 from runtime_config import extract_llm_config, load_runtime_config
 from state_updater import update_plot_state
+from version import APP_NAME, DISPLAY_VERSION
 
 
 def _add_illustration_arguments(parser: argparse.ArgumentParser) -> None:
@@ -421,7 +422,8 @@ def _print_status(project_path: str) -> None:
         for item in open_threads:
             print(f"- {item}")
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Novel writer MVP")
+    parser = argparse.ArgumentParser(description=f"{APP_NAME} CLI")
+    parser.add_argument("--version", action="version", version=f"{APP_NAME} {DISPLAY_VERSION}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init", help="Initialize a novel project")

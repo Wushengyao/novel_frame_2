@@ -60,6 +60,7 @@ from runtime_config import (
     resolve_timeout_for_provider as shared_resolve_timeout_for_provider,
     sanitize_runtime_overrides,
 )
+from version import APP_NAME, DISPLAY_VERSION, HTTP_SERVER_TOKEN, WEBUI_NAME
 from web_auth import AuthService, LoginAttemptGuard, WebAuthSettings, load_auth_settings
 
 
@@ -1512,6 +1513,23 @@ def _render_page(
       gap: 10px;
       flex-wrap: wrap;
     }}
+    .brand-row {{
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }}
+    .version-pill {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px;
+      color: var(--accent-dark);
+      background: rgba(255,255,255,0.76);
+      border: 1px solid rgba(124, 91, 62, 0.18);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.45);
+    }}
     .login-shell {{
       width: min(560px, 100%);
       margin: 8vh auto 0;
@@ -1706,7 +1724,10 @@ def _render_page(
   <div class="shell">
     <div class="topbar">
       <div>
-        <h1 class="brand">Novel Writer Web UI</h1>
+        <div class="brand-row">
+          <h1 class="brand">{escape(WEBUI_NAME)}</h1>
+          <span class="version-pill">版本 {escape(DISPLAY_VERSION)}</span>
+        </div>
         <p class="sub">浏览项目、在线阅读章节、直接续写。</p>
       </div>
       <div class="topbar-actions">{topbar_action}</div>
@@ -1841,7 +1862,7 @@ def _render_login_page(
 
 
 class NovelWriterHandler(BaseHTTPRequestHandler):
-    server_version = "NovelWriterWebUI/0.1"
+    server_version = HTTP_SERVER_TOKEN
 
     def _current_auth_settings(self) -> WebAuthSettings:
         return _auth_settings()
@@ -3610,7 +3631,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         self._redirect("/job/" + urllib.parse.quote(job["id"]))
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Basic web UI for Novel Writer")
+    parser = argparse.ArgumentParser(description=f"Basic web UI for {APP_NAME}")
+    parser.add_argument("--version", action="version", version=f"{WEBUI_NAME} {DISPLAY_VERSION}")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host, use 0.0.0.0 for remote access")
     parser.add_argument("--port", type=int, default=8008, help="Bind port")
     parser.add_argument("--admin-task", choices=("restart", "update"), help="Run an admin maintenance task and exit")

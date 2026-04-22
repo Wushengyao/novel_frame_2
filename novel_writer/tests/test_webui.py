@@ -14,6 +14,7 @@ import webui
 from web_auth import WebAuthSettings
 from webui import NovelWriterHandler, ThreadingHTTPServer
 from progression_manager import CUSTOM_PROGRESSION_OPTION_ID
+from version import DISPLAY_VERSION
 
 from tests.test_support import create_test_project, runtime_config
 
@@ -312,11 +313,13 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("维护操作", projects_page.body)
         self.assertIn("/admin/restart", projects_page.body)
         self.assertIn("/admin/update", projects_page.body)
+        self.assertIn(f"版本 {DISPLAY_VERSION}", projects_page.body)
 
         project_page = self._get("/project/web")
         self.assertEqual(project_page.status, 200)
         self.assertIn('name="model_preset"', project_page.body)
         self.assertIn("沿用项目当前模型（llama3.2）", project_page.body)
+        self.assertIn(f"版本 {DISPLAY_VERSION}", project_page.body)
 
     def test_protected_pages_redirect_to_login_when_auth_enabled(self) -> None:
         with patch("webui._auth_settings", return_value=self._make_auth_settings(enabled=True)):
