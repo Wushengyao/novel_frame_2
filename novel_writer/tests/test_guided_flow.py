@@ -93,13 +93,17 @@ class GuidedFlowTests(unittest.TestCase):
             with patch(
                 "progression_manager.generate_text_with_metadata",
                 return_value=(json.dumps(options_payload, ensure_ascii=False), {"usage": {}}),
-            ):
+            ) as mocked_progression_generate:
                 session = generate_progression_options(
                     str(project_path),
                     runtime_config("chapter"),
                     user_request="我想看一次更谨慎的外出试探",
                     option_count=4,
                 )
+            mocked_progression_generate.assert_called_once()
+            _, progression_call_kwargs = mocked_progression_generate.call_args
+            self.assertEqual(progression_call_kwargs["log_context"]["phase"], "outline")
+            self.assertEqual(progression_call_kwargs["log_context"]["option_count"], 4)
             self.assertEqual(session["recommended_option_id"], "option_2")
             self.assertTrue(any(option.get("custom") for option in session["options"]))
             self.assertEqual(session["options"][-1]["option_id"], CUSTOM_PROGRESSION_OPTION_ID)
@@ -107,10 +111,10 @@ class GuidedFlowTests(unittest.TestCase):
             with patch(
                 "app.generate_text_with_metadata",
                 return_value=("走廊外一片死寂，三人在门后短暂停顿后，小心地推门而出。", {"usage": {}}),
-            ), patch(
+            ) as mocked_writer_generate, patch(
                 "state_updater.generate_text_with_metadata",
                 return_value=(json.dumps(summary_payload, ensure_ascii=False), {"usage": {}}),
-            ):
+            ) as mocked_state_generate:
                 chapter_path = run_next_chapter_from_progression(
                     str(project_path),
                     runtime_config("chapter"),
@@ -118,6 +122,10 @@ class GuidedFlowTests(unittest.TestCase):
                     progression_option=session["recommended_option_id"],
                     progression_feedback="增加一点角色之间试探性的对话",
                 )
+            mocked_writer_generate.assert_called_once()
+            _, writer_call_kwargs = mocked_writer_generate.call_args
+            self.assertEqual(writer_call_kwargs["log_context"]["phase"], "writer")
+            self.assertEqual(writer_call_kwargs["log_context"]["source"], "run_next_chapter_from_progression")
 
             self.assertTrue(Path(chapter_path).exists())
             project = read_json(project_path / "project.json")

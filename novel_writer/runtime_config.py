@@ -72,7 +72,18 @@ RUNTIME_OVERRIDE_KEYS = (
     "max_tokens",
     "timeout",
     "planning_mode",
+    "log_llm_payload",
 )
+
+
+def _coerce_bool(raw_value: object, default: bool = False) -> bool:
+    if isinstance(raw_value, bool):
+        return raw_value
+    if raw_value is None:
+        return default
+
+    raw = str(raw_value).strip().lower()
+    return raw in {"1", "true", "yes", "y", "on"}
 
 
 def normalize_provider(provider: object, default: str = "gemini") -> str:
@@ -204,6 +215,7 @@ def _normalized_llm_config(raw: dict) -> dict:
         "max_tokens": raw.get("max_tokens", 4000),
         "timeout": resolve_timeout_for_provider(provider, raw.get("timeout", default_timeout_for_provider(provider))),
         "planning_mode": normalize_planning_mode(raw.get("planning_mode"), default=DEFAULT_PLANNING_MODE),
+        "log_llm_payload": _coerce_bool(raw.get("log_llm_payload")),
     }
     return config
 
@@ -216,6 +228,7 @@ def load_runtime_config(project_path: str) -> dict:
     project = load_json(str(Path(project_path) / "project.json"))
     return {
         **_normalized_llm_config(project.get("llm_config") or {}),
+        "project_path": str(Path(project_path).resolve()),
         "planning_mode": normalize_planning_mode(project.get("planning_mode"), default=DEFAULT_PLANNING_MODE),
     }
 
@@ -261,6 +274,11 @@ def build_runtime_config(project_path: str | Path, overrides: dict[str, object],
             runtime_overrides.get("planning_mode") or project.get("planning_mode"),
             default=DEFAULT_PLANNING_MODE,
         ),
+        "log_llm_payload": _coerce_bool(
+            runtime_overrides.get("log_llm_payload"),
+            default=_coerce_bool(saved.get("log_llm_payload")),
+        ),
+        "project_path": str(Path(project_path).resolve()),
     }
     if provider_requires_api_key(provider) and not runtime["api_key"]:
         raise RuntimeError(f"provider={provider} missing API key, please fill api_keys.sh")

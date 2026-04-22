@@ -169,6 +169,7 @@ def run_next_chapter(
     *,
     chapter_outline_override: dict | None = None,
     planning_mode: str | None = None,
+    log_context: dict[str, object] | None = None,
     progress_callback=None,
 ) -> str:
     log_info(f"next_chapter: prepare project={project_path}")
@@ -193,11 +194,28 @@ def run_next_chapter(
         merged_chapter.update(chapter_outline_override)
         next_context["chapter"] = merged_chapter
 
+    target_chapter_number = next_context["chapter"].get("chapter_number", current_chapter_count + 1)
+    resolved_project_id = str(project_data["project"].get("project_id") or "").strip()
+    log_context_payload = {
+        "phase": "writer",
+        "project_id": resolved_project_id,
+        "project_path": str(Path(project_path).resolve()),
+        "planning_mode": effective_mode,
+        "target_chapter_number": target_chapter_number,
+        "source": "run_next_chapter",
+    }
+    if user_request:
+        log_context_payload["user_request"] = user_request[:280]
+    if chapter_outline_override:
+        log_context_payload["has_chapter_outline_override"] = True
+    if log_context:
+        log_context_payload.update(log_context)
+
     log_info(
         "next_chapter: writing "
         f"mode={effective_mode} "
         f"volume={next_context['volume'].get('volume_number', '?')} "
-        f"chapter={next_context['chapter'].get('chapter_number', current_chapter_count + 1)} "
+        f"chapter={target_chapter_number} "
         f"title={next_context['chapter'].get('title', '')}"
     )
 
@@ -227,7 +245,11 @@ def run_next_chapter(
     try:
         log_info("next_chapter: requesting model output")
         emit_progress(progress_callback, "chapter_write", "Generating chapter text")
-        response_text, metadata = generate_text_with_metadata(prompt, config)
+        response_text, metadata = generate_text_with_metadata(
+            prompt,
+            config,
+            log_context=log_context_payload,
+        )
     except Exception:
         update_project_stats(project_path, phase="writer", success=False, usage=None)
         log_error("next_chapter: writer request failed")
@@ -280,6 +302,14 @@ def run_next_chapter_from_progression(
         user_request=selection["user_request"],
         chapter_outline_override=None,
         planning_mode=selection.get("planning_mode"),
+        log_context={
+            "phase": "writer",
+            "source": "run_next_chapter_from_progression",
+            "progression_session": progression_session,
+            "progression_option": progression_option,
+            "has_progression_feedback": bool(str(progression_feedback or "").strip()),
+            "selection_feedback": (progression_feedback or "").strip()[:120],
+        },
         progress_callback=progress_callback,
     )
 

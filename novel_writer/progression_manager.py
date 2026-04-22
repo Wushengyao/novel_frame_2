@@ -226,6 +226,7 @@ def generate_progression_options(
     count = validate_option_count(option_count)
     project_data = load_project(project_path)
     planning_mode = resolve_planning_mode(config, project_data)
+    target_chapter_number = safe_int(project_data["project"].get("chapter_count"), 0) + 1
     emit_progress(progress_callback, "progression_options_prepare", "正在生成下一章剧情推进选项")
     project_data, next_context = get_next_context_for_mode(
         project_path,
@@ -261,11 +262,28 @@ def generate_progression_options(
         planning_mode=planning_mode,
         extra={
             "prompt_type": "progression_options",
-            "target_chapter_number": safe_int(project_data["project"].get("chapter_count"), 0) + 1,
+            "target_chapter_number": target_chapter_number,
         },
     )
+
+    log_context = {
+        "phase": "outline",
+        "project_id": str(project_data["project"].get("project_id") or "").strip(),
+        "project_path": str(Path(project_path).resolve()),
+        "planning_mode": planning_mode,
+        "target_chapter_number": target_chapter_number,
+        "option_count": count,
+    }
+    request_context = user_request.strip()
+    if request_context:
+        log_context["user_request"] = request_context[:280]
+
     try:
-        response_text, metadata = generate_text_with_metadata(prompt, config)
+        response_text, metadata = generate_text_with_metadata(
+            prompt,
+            config,
+            log_context=log_context,
+        )
         update_project_stats(
             project_path,
             phase="outline",

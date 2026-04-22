@@ -736,6 +736,7 @@ def _load_saved_runtime_config(project_path: Path) -> dict:
 
 
 def _runtime_overrides_from_form(form: dict[str, str]) -> dict[str, str]:
+    log_llm_payload = bool(form.get("log_llm_payload"))
     return sanitize_runtime_overrides(
         {
             "provider": form.get("provider"),
@@ -745,6 +746,7 @@ def _runtime_overrides_from_form(form: dict[str, str]) -> dict[str, str]:
             "max_tokens": form.get("max_tokens"),
             "timeout": form.get("timeout"),
             "api_base": form.get("api_base"),
+            "log_llm_payload": "1" if log_llm_payload else "",
         }
     )
 
@@ -862,6 +864,10 @@ def _render_runtime_override_fields(base_provider: str = "gemini", base_model: s
         <input type="number" name="max_tokens" placeholder="沿用项目设置">
       </label>
     </div>
+    <label class="muted">
+      <input type="checkbox" name="log_llm_payload" value="1">
+      启用模型调用落盘（请求与返回将写入项目下 llm_logs，便于排查问题）
+    </label>
     """
 
 

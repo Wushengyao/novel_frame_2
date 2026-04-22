@@ -125,11 +125,22 @@ def update_plot_state(project_path: str, new_text: str, config: dict, progress_c
 
     summary = None
     last_error = None
+    summary_log_context = {
+        "phase": "summary",
+        "project_id": str(project_data["project"]["project_id"] or "").strip(),
+        "project_path": str(base.resolve()),
+        "chapter_count": int(load_json(str(base / "project.json")).get("chapter_count", 0) or 0),
+        "section_chars": prompt_context.get("section_chars", {}),
+    }
     for attempt in range(2):
         try:
             log_info(f"剧情状态更新: 第 {attempt + 1} 次请求模型总结本章。")
             emit_progress(progress_callback, "summary_request", f"正在请求剧情状态总结（第 {attempt + 1}/2 次）")
-            response_text, metadata = generate_text_with_metadata(prompt, config)
+            response_text, metadata = generate_text_with_metadata(
+                prompt,
+                config,
+                log_context=summary_log_context,
+            )
         except Exception as exc:  # pragma: no cover - intentional resilience path
             update_project_stats(project_path, phase="summary", success=False, usage=None)
             last_error = exc

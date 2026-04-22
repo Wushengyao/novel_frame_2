@@ -7,13 +7,83 @@ import json
 import socket
 import ssl
 import time
+from pathlib import Path
+from uuid import uuid4
 from typing import Any
 from urllib import parse
 from urllib import error, request
 
+from common_utils import utc_now
+
 
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120
 OLLAMA_MIN_TIMEOUT_SECONDS = 900
+LLM_LOG_FILENAME = "llm_interactions.jsonl"
+SENSITIVE_CONFIG_KEYS = {"api_key", "api_base", "model_name", "model"}
+
+
+def _coerce_llm_log_enabled(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _resolve_log_path(config: dict[str, Any]) -> Path | None:
+    project_path = str(config.get("project_path") or "").strip()
+    if not project_path:
+        return None
+    path = Path(project_path)
+    if not path.is_absolute():
+        return None
+    return path / "llm_logs" / LLM_LOG_FILENAME
+
+
+def _mask_config_for_log(config: dict[str, Any]) -> dict[str, Any]:
+    masked = dict(config)
+    for key in SENSITIVE_CONFIG_KEYS:
+        if key in masked:
+            masked[key] = "***"
+    masked.pop("project_path", None)
+    return masked
+
+
+def _append_log_entry(
+    config: dict[str, Any],
+    *,
+    phase: str,
+    request_payload: dict[str, Any],
+    response_payload: dict[str, Any] | None = None,
+    response_text: str = "",
+    request_attempts: int,
+    log_context: dict[str, Any] | None,
+) -> None:
+    log_path = _resolve_log_path(config)
+    if log_path is None:
+        return
+
+    entry = {
+        "request_id": uuid4().hex,
+        "created_at": utc_now(),
+        "phase": phase,
+        "provider": config.get("model_provider", ""),
+        "model": config.get("model") or config.get("model_name"),
+        "attempts": request_attempts,
+        "request": request_payload,
+        "response": response_payload,
+        "response_text": response_text,
+        "config": _mask_config_for_log(config),
+    }
+    if log_context:
+        entry["log_context"] = log_context
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, ensure_ascii=False))
+        handle.write("\n")
 
 
 def _normalize_chat_url(api_base: str) -> str:
@@ -45,7 +115,7 @@ def _request_json(
     headers: dict[str, str],
     body: dict[str, Any],
     timeout: int,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int]:
     data = json.dumps(body).encode("utf-8")
 
     last_error: Exception | None = None
@@ -63,7 +133,7 @@ def _request_json(
         try:
             req = request.Request(endpoint, data=data, headers=headers, method="POST")
             with request.urlopen(req, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
+                return json.loads(response.read().decode("utf-8")), attempt + 1
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(
@@ -176,9 +246,15 @@ def _extract_gemini_usage(payload: dict[str, Any]) -> dict[str, int]:
         "thought_tokens": int(usage.get("thoughtsTokenCount", 0) or 0),
     }
 
-def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[str, Any]]:
+def generate_text_with_metadata(
+    prompt: str,
+    config: dict,
+    log_context: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
     """Generate text and return normalized usage metadata."""
     provider = (config.get("model_provider") or "openai_compatible").strip().lower()
+    should_log = _coerce_llm_log_enabled(config.get("log_llm_payload"))
+    phase = str((log_context or {}).get("phase", "")).strip() or "llm"
 
     if provider == "openai_compatible":
         api_base = config.get("api_base", "").strip()
@@ -201,12 +277,24 @@ def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[st
         }
         endpoint = _normalize_chat_url(api_base)
         headers = _build_openai_compatible_headers(api_key)
-        payload = _request_json(endpoint, headers, body, timeout)
-        return _extract_openai_text(payload), {
+        payload, request_attempts = _request_json(endpoint, headers, body, timeout)
+        response_text = _extract_openai_text(payload)
+        metadata = {
             "provider": provider,
             "model": model,
             "usage": _extract_openai_usage(payload),
         }
+        if should_log:
+            _append_log_entry(
+                config,
+                phase=phase,
+                request_payload=body,
+                response_payload=payload,
+                response_text=response_text,
+                request_attempts=request_attempts,
+                log_context=log_context,
+            )
+        return response_text, metadata
 
     if provider == "gemini":
         api_key = config.get("api_key", "")
@@ -248,17 +336,33 @@ def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[st
                 "responseMimeType": response_mime_type,
             },
         }
-        payload = _request_json(endpoint, headers, body, timeout)
-        return _extract_gemini_text(payload), {
+        payload, request_attempts = _request_json(endpoint, headers, body, timeout)
+        response_text = _extract_gemini_text(payload)
+        metadata = {
             "provider": provider,
             "model": model,
             "usage": _extract_gemini_usage(payload),
         }
+        if should_log:
+            _append_log_entry(
+                config,
+                phase=phase,
+                request_payload=body,
+                response_payload=payload,
+                response_text=response_text,
+                request_attempts=request_attempts,
+                log_context=log_context,
+            )
+        return response_text, metadata
 
     if provider == "grok":
         grok_config = dict(config)
         grok_config["api_base"] = grok_config.get("api_base", "").strip() or "https://api.x.ai/v1"
-        text, metadata = generate_text_with_metadata(prompt, {**grok_config, "model_provider": "openai_compatible"})
+        text, metadata = generate_text_with_metadata(
+            prompt,
+            {**grok_config, "model_provider": "openai_compatible"},
+            log_context=log_context,
+        )
         metadata["provider"] = "grok"
         return text, metadata
 
@@ -270,6 +374,7 @@ def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[st
         text, metadata = generate_text_with_metadata(
             prompt,
             {**deepseek_config, "model_provider": "openai_compatible"},
+            log_context=log_context,
         )
         metadata["provider"] = "deepseek"
         return text, metadata
@@ -283,6 +388,7 @@ def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[st
         text, metadata = generate_text_with_metadata(
             prompt,
             {**doubao_config, "model_provider": "openai_compatible"},
+            log_context=log_context,
         )
         metadata["provider"] = "doubao"
         return text, metadata
@@ -296,6 +402,7 @@ def generate_text_with_metadata(prompt: str, config: dict) -> tuple[str, dict[st
         text, metadata = generate_text_with_metadata(
             prompt,
             {**ollama_config, "model_provider": "openai_compatible"},
+            log_context=log_context,
         )
         metadata["provider"] = "ollama"
         return text, metadata

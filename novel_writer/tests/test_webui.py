@@ -510,6 +510,24 @@ class WebUiGuidedFlowTests(unittest.TestCase):
 
         self.assertEqual(captured["config"]["model_name"], "qwen2.5:14b")
 
+    def test_runtime_overrides_includes_log_llm_payload_when_checked(self) -> None:
+        overrides = webui._runtime_overrides_from_form(
+            {
+                "provider": "ollama",
+                "model_preset": "qwen2.5:14b",
+                "log_llm_payload": "1",
+            }
+        )
+        self.assertEqual(overrides["log_llm_payload"], "1")
+
+        overrides = webui._runtime_overrides_from_form(
+            {
+                "provider": "ollama",
+                "model_preset": "qwen2.5:14b",
+            }
+        )
+        self.assertNotIn("log_llm_payload", overrides)
+
     def test_continue_async_starts_followup_progression_job(self) -> None:
         session_payload = {
             "session_id": "session_auto",
