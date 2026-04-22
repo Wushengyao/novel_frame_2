@@ -71,6 +71,7 @@ API_KEYS_PATH = BASE_DIR / "api_keys.sh"
 PROJECT_DIR_PATTERN = re.compile(r"^novel_project_")
 MOJIBAKE_HINT_CHARS = set("闆皝绌归《鍙鍦鏄鐨勪簡鍚庡墠闂閿璇浠绗锛銆鈥€")
 WEBUI_SERVICE_NAME = os.getenv("NOVEL_WRITER_WEBUI_SERVICE", "novel-writer-webui.service")
+WEBUI_SERVICE_SCOPE = os.getenv("NOVEL_WRITER_WEBUI_SERVICE_SCOPE", "auto").strip().lower() or "auto"
 ADMIN_LOCALHOSTS = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 ADMIN_ACTION_STATUS_FILENAME = "admin_action_status.json"
 PUBLIC_PATHS = {"/login", "/healthz"}
@@ -419,6 +420,36 @@ def _run_checked_command(command: list[str], *, cwd: str | None = None, env: dic
     return stdout
 
 
+def _systemctl_scope_args(scope: str) -> list[str]:
+    return ["--user"] if scope == "user" else []
+
+
+def _systemctl_scope_env(scope: str) -> dict[str, str] | None:
+    if scope == "user":
+        return _systemd_user_command_env()
+    return None
+
+
+def _systemctl_query_scope(service_name: str, scope: str) -> bool:
+    command = ["systemctl", *_systemctl_scope_args(scope), "show", service_name, "--property=LoadState", "--value"]
+    try:
+        output = _run_checked_command(command, env=_systemctl_scope_env(scope))
+    except Exception:
+        return False
+    return str(output).strip().lower() not in {"", "not-found", "masked"}
+
+
+def _resolve_service_scope(service_name: str) -> str:
+    explicit_scope = WEBUI_SERVICE_SCOPE
+    if explicit_scope in {"user", "system"}:
+        return explicit_scope
+    if _systemctl_query_scope(service_name, "user"):
+        return "user"
+    if _systemctl_query_scope(service_name, "system"):
+        return "system"
+    return "user"
+
+
 def _client_can_manage_server(
     client_host: str,
     *,
@@ -432,9 +463,11 @@ def _client_can_manage_server(
 
 
 def _get_repo_admin_info() -> dict:
+    service_scope = _resolve_service_scope(WEBUI_SERVICE_NAME)
     info = {
         "repo_root": str(REPO_ROOT),
         "service_name": WEBUI_SERVICE_NAME,
+        "service_scope": service_scope,
         "git_available": bool(shutil.which("git")),
         "systemd_run_available": bool(shutil.which("systemd-run")),
         "systemctl_available": bool(shutil.which("systemctl")),
@@ -474,6 +507,7 @@ def _launch_admin_task(task: str) -> str:
         raise RuntimeError("不支持的管理操作。")
     if not shutil.which("systemd-run"):
         raise RuntimeError("当前环境缺少 systemd-run，无法从 Web UI 触发维护操作。")
+    service_scope = _resolve_service_scope(WEBUI_SERVICE_NAME)
     status_path = _admin_action_status_path()
     _write_admin_action_status(
         {
@@ -482,12 +516,13 @@ def _launch_admin_task(task: str) -> str:
             "message": "维护任务已排队，等待 systemd 启动。",
             "created_at": utc_now(),
             "updated_at": utc_now(),
+            "service_scope": service_scope,
         }
     )
     unit_name = f"novel-writer-admin-{task}-{uuid4().hex[:8]}"
     command = [
         "systemd-run",
-        "--user",
+        *_systemctl_scope_args(service_scope),
         "--collect",
         "--unit",
         unit_name,
@@ -499,18 +534,20 @@ def _launch_admin_task(task: str) -> str:
         str(REPO_ROOT),
         "--service-name",
         WEBUI_SERVICE_NAME,
+        "--service-scope",
+        service_scope,
         "--status-path",
         str(status_path),
     ]
     _run_checked_command(
         command,
         cwd=str(BASE_DIR),
-        env=_systemd_user_command_env(),
+        env=_systemctl_scope_env(service_scope),
     )
     return unit_name
 
 
-def _run_admin_task(task: str, *, repo_root: str, service_name: str, status_path: str) -> int:
+def _run_admin_task(task: str, *, repo_root: str, service_name: str, service_scope: str, status_path: str) -> int:
     repo_path = Path(repo_root).resolve()
     status_file = Path(status_path).resolve()
     status_file.parent.mkdir(parents=True, exist_ok=True)
@@ -521,6 +558,7 @@ def _run_admin_task(task: str, *, repo_root: str, service_name: str, status_path
             "status": status,
             "message": message,
             "updated_at": utc_now(),
+            "service_scope": service_scope,
         }
         payload.update(extra)
         status_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -532,8 +570,8 @@ def _run_admin_task(task: str, *, repo_root: str, service_name: str, status_path
     try:
         if task == "restart":
             _run_checked_command(
-                ["systemctl", "--user", "restart", service_name],
-                env=_systemd_user_command_env(),
+                ["systemctl", *_systemctl_scope_args(service_scope), "restart", service_name],
+                env=_systemctl_scope_env(service_scope),
             )
             write_status(
                 "succeeded",
@@ -558,8 +596,8 @@ def _run_admin_task(task: str, *, repo_root: str, service_name: str, status_path
             pull_output = _run_checked_command(["git", "-C", str(repo_path), "pull", "--ff-only"])
             after_commit = _run_checked_command(["git", "-C", str(repo_path), "rev-parse", "--short", "HEAD"])
             _run_checked_command(
-                ["systemctl", "--user", "restart", service_name],
-                env=_systemd_user_command_env(),
+                ["systemctl", *_systemctl_scope_args(service_scope), "restart", service_name],
+                env=_systemctl_scope_env(service_scope),
             )
             changed = before_commit != after_commit
             message = "代码已更新并重启 Web UI。" if changed else "代码已是最新版本，Web UI 已重启。"
@@ -1129,6 +1167,7 @@ def _render_admin_panel(
     branch = escape(repo_info.get("branch", "") or "未知")
     commit = escape(repo_info.get("commit", "") or "未知")
     upstream = escape(repo_info.get("upstream", "") or "未配置")
+    service_scope = escape(repo_info.get("service_scope", "") or "未知")
     repo_state = "有未提交改动" if repo_info.get("dirty") else "干净"
     if auth_settings.enabled:
         action_hint = "这些操作会影响整个 Web UI 服务。当前已启用登录鉴权，登录用户可远程执行。"
@@ -1181,6 +1220,7 @@ def _render_admin_panel(
       <p><strong>当前分支：</strong>{branch}</p>
       <p><strong>当前提交：</strong>{commit}</p>
       <p><strong>跟踪远端：</strong>{upstream}</p>
+      <p><strong>服务作用域：</strong>{service_scope}</p>
       <p><strong>仓库状态：</strong>{escape(repo_state)}</p>
       {notice_html}
       <div class="two-col">
@@ -3644,15 +3684,20 @@ def main() -> None:
     parser.add_argument("--admin-task", choices=("restart", "update"), help="Run an admin maintenance task and exit")
     parser.add_argument("--repo-root", default=str(REPO_ROOT), help=argparse.SUPPRESS)
     parser.add_argument("--service-name", default=WEBUI_SERVICE_NAME, help=argparse.SUPPRESS)
+    parser.add_argument("--service-scope", default=WEBUI_SERVICE_SCOPE, choices=("auto", "user", "system"), help=argparse.SUPPRESS)
     parser.add_argument("--status-path", default=str(_admin_action_status_path()), help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.admin_task:
+        service_scope = args.service_scope
+        if service_scope == "auto":
+            service_scope = _resolve_service_scope(args.service_name)
         raise SystemExit(
             _run_admin_task(
                 args.admin_task,
                 repo_root=args.repo_root,
                 service_name=args.service_name,
+                service_scope=service_scope,
                 status_path=args.status_path,
             )
         )

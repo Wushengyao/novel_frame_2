@@ -296,6 +296,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             return_value={
                 "repo_root": "/repo",
                 "service_name": "novel-writer-webui.service",
+                "service_scope": "user",
                 "git_available": True,
                 "systemd_run_available": True,
                 "systemctl_available": True,
@@ -314,6 +315,8 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("/admin/restart", projects_page.body)
         self.assertIn("/admin/update", projects_page.body)
         self.assertIn(f"版本 {DISPLAY_VERSION}", projects_page.body)
+        self.assertIn("服务作用域", projects_page.body)
+        self.assertIn("user", projects_page.body)
 
         project_page = self._get("/project/web")
         self.assertEqual(project_page.status, 200)
@@ -414,6 +417,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             return_value={
                 "repo_root": "/repo",
                 "service_name": "novel-writer-webui.service",
+                "service_scope": "user",
                 "git_available": True,
                 "systemd_run_available": True,
                 "systemctl_available": True,
@@ -435,6 +439,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             return_value={
                 "repo_root": "/repo",
                 "service_name": "novel-writer-webui.service",
+                "service_scope": "user",
                 "git_available": True,
                 "systemd_run_available": True,
                 "systemctl_available": True,
@@ -458,8 +463,12 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(env["XDG_RUNTIME_DIR"], runtime_dir)
         self.assertEqual(env["DBUS_SESSION_BUS_ADDRESS"], f"unix:path={runtime_dir}/bus")
 
+    def test_resolve_service_scope_falls_back_to_system_when_user_unit_missing(self) -> None:
+        with patch("webui._systemctl_query_scope", side_effect=lambda service_name, scope: scope == "system"):
+            self.assertEqual(webui._resolve_service_scope("novel-writer-webui.service"), "system")
+
     def test_launch_admin_task_uses_systemd_user_env(self) -> None:
-        with patch("webui._write_admin_action_status"), patch(
+        with patch("webui._resolve_service_scope", return_value="user"), patch("webui._write_admin_action_status"), patch(
             "webui._run_checked_command",
             return_value="queued",
         ) as mocked_run, patch("webui.shutil.which", return_value="/usr/bin/systemd-run"):
@@ -473,6 +482,35 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             kwargs["env"]["DBUS_SESSION_BUS_ADDRESS"],
             f"unix:path=/run/user/{os.getuid()}/bus",
         )
+
+    def test_launch_admin_task_uses_system_scope_without_user_flag(self) -> None:
+        with patch("webui._resolve_service_scope", return_value="system"), patch("webui._write_admin_action_status"), patch(
+            "webui._run_checked_command",
+            return_value="queued",
+        ) as mocked_run, patch("webui.shutil.which", return_value="/usr/bin/systemd-run"):
+            unit_name = webui._launch_admin_task("restart")
+
+        self.assertTrue(unit_name.startswith("novel-writer-admin-restart-"))
+        command, kwargs = mocked_run.call_args
+        self.assertNotIn("--user", command[0])
+        self.assertIsNone(kwargs["env"])
+
+    def test_run_admin_task_restart_uses_system_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            status_path = str(Path(temp_dir) / "admin_status.json")
+            with patch("webui._run_checked_command", return_value="ok") as mocked_run:
+                code = webui._run_admin_task(
+                    "restart",
+                    repo_root=temp_dir,
+                    service_name="novel-writer-webui.service",
+                    service_scope="system",
+                    status_path=status_path,
+                )
+
+        self.assertEqual(code, 0)
+        calls = mocked_run.call_args_list
+        self.assertEqual(calls[0].args[0], ["systemctl", "restart", "novel-writer-webui.service"])
+        self.assertIsNone(calls[0].kwargs["env"])
 
     def test_model_preset_submission_resolves_without_manual_model_name(self) -> None:
         overrides = webui._runtime_overrides_from_form(
