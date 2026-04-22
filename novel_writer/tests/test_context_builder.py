@@ -301,8 +301,8 @@ class ContextBuilderTests(unittest.TestCase):
                 "氧气瓶" in context["sections"]["retrieved_memory"]
                 or "异常信号" in context["sections"]["retrieved_memory"]
             )
-            self.assertIn("上一章刚完成", context["sections"]["retrieved_memory"])
-            self.assertIn("仍待推进", context["sections"]["retrieved_memory"])
+            self.assertNotIn("最近一次试探后气氛紧张", context["sections"]["retrieved_memory"])
+            self.assertIn("第三段他们决定去主控区外围。", context["sections"]["recent_scene"])
 
             progression_context = build_progression_context(
                 str(project_path),
@@ -321,7 +321,7 @@ class ContextBuilderTests(unittest.TestCase):
                 option_count=4,
                 planning_mode="volume",
             )
-            self.assertIn("检索到的相关记忆", progression_prompt)
+            self.assertIn("更早相关记忆", progression_prompt)
             self.assertIn("氧气瓶", progression_context["sections"]["retrieved_memory"])
 
     def test_summary_context_includes_completed_task_and_prompt_guides_next_goal_forward(self) -> None:
@@ -352,7 +352,7 @@ class ContextBuilderTests(unittest.TestCase):
 
             self.assertIn("本章写前任务卡", prompt)
             self.assertIn("叙事目标: 建立临时安全区", context["sections"]["completed_task"])
-            self.assertIn("不要直接重复任务卡里的原句", prompt)
+            self.assertIn("不要直接重复任务卡原句", prompt)
 
     def test_compact_prompts_stay_within_budget_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

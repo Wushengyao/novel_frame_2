@@ -19,14 +19,14 @@ from project_manager import (
 
 
 WRITER_SECTION_LIMITS = {
-    "author_intent": 600,
-    "chapter_task": 500,
-    "live_state": 900,
-    "retrieved_memory": 700,
-    "recent_scene": 2200,
-    "style_contract": 400,
-    "static_world": 500,
-    "static_characters": 700,
+    "author_intent": 520,
+    "chapter_task": 460,
+    "live_state": 860,
+    "retrieved_memory": 520,
+    "recent_scene": 1700,
+    "style_contract": 220,
+    "static_world": 420,
+    "static_characters": 620,
 }
 WRITER_SOFT_TOTAL_CHARS = 7000
 WRITER_HARD_TOTAL_CHARS = 8000
@@ -102,6 +102,18 @@ def _trim_text(text: str, max_chars: int) -> str:
     if max_chars <= 1:
         return content[:max_chars]
     return content[: max_chars - 1].rstrip() + "…"
+
+
+def _normalized_compare_text(text: object) -> str:
+    return re.sub(r"[\s\u3000,，.。:：;；!！?？\"“”'‘’()（）\-_/]+", "", str(text or "").strip())
+
+
+def _is_duplicateish(left: object, right: object) -> bool:
+    left_text = _normalized_compare_text(left)
+    right_text = _normalized_compare_text(right)
+    if not left_text or not right_text:
+        return False
+    return left_text in right_text or right_text in left_text
 
 
 def _json_block(value: object) -> str:
@@ -489,14 +501,14 @@ def _build_author_intent_block(author_intent: dict, *, max_chars: int) -> str:
     intent = normalize_author_intent(author_intent)
     lines = []
     if intent["premise"]:
-        lines.append(f"核心前提: {intent['premise']}")
-    if intent["long_arc"]:
-        lines.append(f"长期主线: {intent['long_arc']}")
+        lines.append(f"核心前提: {_trim_text(intent['premise'], 220)}")
+    if intent["long_arc"] and not _is_duplicateish(intent["premise"], intent["long_arc"]):
+        lines.append(f"长期主线: {_trim_text(intent['long_arc'], 180)}")
     if intent["tone_contract"]:
-        lines.append(f"语气约束: {intent['tone_contract']}")
+        lines.append(f"语气约束: {_trim_text(intent['tone_contract'], 110)}")
     if intent["must_haves"]:
         lines.append("必须保留:")
-        for item in intent["must_haves"]:
+        for item in intent["must_haves"][:3]:
             candidate = "\n".join(lines + [f"- {item}"])
             if len(candidate) > max_chars:
                 break
@@ -505,7 +517,7 @@ def _build_author_intent_block(author_intent: dict, *, max_chars: int) -> str:
         header = "\n".join(lines + ["不能破坏:"]) if lines else "不能破坏:"
         if len(header) <= max_chars:
             lines.append("不能破坏:")
-            for item in intent["must_not_break"]:
+            for item in intent["must_not_break"][:2]:
                 candidate = "\n".join(lines + [f"- {item}"])
                 if len(candidate) > max_chars:
                     break
@@ -514,21 +526,30 @@ def _build_author_intent_block(author_intent: dict, *, max_chars: int) -> str:
 
 
 def _build_style_contract_block(style: dict, author_intent: dict, *, max_chars: int) -> str:
+    intent = normalize_author_intent(author_intent)
     tone = str(style.get("tone", "") or "").strip()
     pov = str(style.get("pov", "") or "").strip()
     requirements = _normalize_string_list(style.get("requirements"), max_items=5)
-    creativity = str(author_intent.get("creativity_guidance", "") or "").strip()
+    creativity = str(intent.get("creativity_guidance", "") or "").strip()
     lines = []
-    if tone:
+    if tone and not _is_duplicateish(tone, intent.get("tone_contract", "")):
         lines.append(f"基调: {tone}")
     if pov:
         lines.append(f"视角: {pov}")
+    added_requirements = 0
     for requirement in requirements:
+        if _is_duplicateish(requirement, intent.get("tone_contract", "")):
+            continue
+        if any(_is_duplicateish(requirement, item) for item in intent.get("must_haves", [])):
+            continue
         candidate = "\n".join(lines + [f"要求: {requirement}"])
         if len(candidate) > max_chars:
             break
         lines.append(f"要求: {requirement}")
-    if creativity:
+        added_requirements += 1
+        if added_requirements >= 2:
+            break
+    if creativity and not any(_is_duplicateish(creativity, line) for line in lines):
         candidate = "\n".join(lines + [f"创作弹性: {creativity}"])
         if len(candidate) <= max_chars:
             lines.append(f"创作弹性: {creativity}")
@@ -893,26 +914,31 @@ def load_task_card(project_path: str, chapter_number: int) -> dict | None:
 
 
 def _build_chapter_task_block(task_card: dict, *, max_chars: int) -> str:
+    summary = str(task_card.get("summary", "") or "").strip()
+    goal = str(task_card.get("goal", "") or "").strip()
+    volume_goal = str(task_card.get("volume_goal", "") or "").strip()
+    guidance = str(task_card.get("writer_guidance", "") or "").strip()
     lines = []
     if task_card.get("title"):
         lines.append(f"标题: {task_card['title']}")
-    if task_card.get("summary"):
-        lines.append(f"本章会发生: {task_card['summary']}")
-    if task_card.get("goal"):
-        lines.append(f"叙事目标: {task_card['goal']}")
-    if task_card.get("volume_goal"):
-        candidate = "\n".join(lines + [f"阶段目标: {task_card['volume_goal']}"])
+    if summary:
+        lines.append(f"本章会发生: {summary}")
+    if goal and not _is_duplicateish(summary, goal):
+        lines.append(f"叙事目标: {goal}")
+    if volume_goal and not _is_duplicateish(summary, volume_goal) and not _is_duplicateish(goal, volume_goal):
+        candidate = "\n".join(lines + [f"阶段目标: {volume_goal}"])
         if len(candidate) <= max_chars:
-            lines.append(f"阶段目标: {task_card['volume_goal']}")
-    for item in task_card.get("key_events") or []:
+            lines.append(f"阶段目标: {volume_goal}")
+    for item in (task_card.get("key_events") or [])[:3]:
         candidate = "\n".join(lines + [f"- {item}"])
         if len(candidate) > max_chars:
             break
         lines.append(f"- {item}")
-    if task_card.get("writer_guidance"):
-        candidate = "\n".join(lines + [f"补充偏好: {task_card['writer_guidance']}"])
+    formulaic_guidance = goal and guidance.startswith(f"以“{goal}”为本章核心任务")
+    if guidance and not formulaic_guidance and not _is_duplicateish(guidance, summary) and not _is_duplicateish(guidance, goal):
+        candidate = "\n".join(lines + [f"补充偏好: {guidance}"])
         if len(candidate) <= max_chars:
-            lines.append(f"补充偏好: {task_card['writer_guidance']}")
+            lines.append(f"补充偏好: {guidance}")
     return _trim_text("\n".join(lines), max_chars)
 
 
@@ -954,24 +980,19 @@ def _build_live_state_block(plot_state: dict, *, max_chars: int, include_next_go
 
 
 def _build_recent_scene_block(project_path: str, chapter_count: int, recent_text: str, *, max_chars: int) -> str:
-    excerpt = select_recent_scene_window(recent_text, min_chars=1600, max_chars=max(900, max_chars - 420))
-    recent_summaries = load_recent_summary_payloads(project_path, chapter_count, limit=RECENT_SUMMARY_COUNT)
-    summary_lines = []
-    for payload in recent_summaries:
+    excerpt = select_recent_scene_window(recent_text, min_chars=1200, max_chars=max(700, max_chars))
+    if excerpt:
+        return _trim_text(excerpt, max_chars)
+
+    recent_summaries = load_recent_summary_payloads(project_path, chapter_count, limit=1)
+    if recent_summaries:
+        payload = recent_summaries[-1]
         location = str(payload.get("current_location", "") or "").strip()
         piece = f"第{payload['chapter_number']}章: {payload.get('chapter_summary', '')}"
         if location:
             piece += f" @ {location}"
-        summary_lines.append(piece)
-
-    lines = []
-    if summary_lines:
-        summary_block = "最近两章摘要:\n" + "\n".join(f"- {item}" for item in summary_lines)
-        if len(summary_block) < max_chars:
-            lines.append(summary_block)
-    if excerpt:
-        lines.append("最近场景窗口:\n" + excerpt)
-    return _trim_text("\n\n".join(lines), max_chars)
+        return _trim_text("- " + piece, max_chars)
+    return ""
 
 
 def _collect_summary_memory_candidates(project_path: str, chapter_count: int) -> list[dict]:
@@ -1029,29 +1050,7 @@ def _build_retrieved_memory_block(
     *,
     max_chars: int,
 ) -> str:
-    recent_payloads = load_recent_summary_payloads(project_path, chapter_count, limit=RECENT_SUMMARY_COUNT)
     lines = []
-    latest_payload = recent_payloads[-1] if recent_payloads else {}
-    if latest_payload:
-        latest_summary = _trim_text(str(latest_payload.get("chapter_summary", "") or "").strip(), 180)
-        if latest_summary:
-            lines.append(f"- 上一章刚完成: {latest_summary}")
-
-        carry_threads = _normalize_string_list(
-            list(latest_payload.get("open_threads") or []) + list(plot_state.get("open_threads") or []),
-            max_items=3,
-        )
-        if carry_threads:
-            candidate = "\n".join(lines + [f"- 仍待推进: {'；'.join(carry_threads)}"])
-            if len(candidate) <= max_chars:
-                lines.append(f"- 仍待推进: {'；'.join(carry_threads)}")
-
-        resolved_threads = _normalize_string_list(latest_payload.get("resolved_threads"), max_items=2)
-        if resolved_threads:
-            candidate = "\n".join(lines + [f"- 已解决勿回退: {'；'.join(resolved_threads)}"])
-            if len(candidate) <= max_chars:
-                lines.append(f"- 已解决勿回退: {'；'.join(resolved_threads)}")
-
     query_text = " ".join(
         part
         for part in (
@@ -1203,16 +1202,14 @@ def build_writer_context(
 
 def build_summary_context(project_path: str, project_data: dict, new_text: str) -> dict:
     plot_state = normalize_live_plot_state(project_data.get("plot_state"))
-    author_intent = normalize_author_intent(project_data.get("author_intent") or ensure_author_intent(project_path))
     chapter_count = safe_int(project_data.get("project", {}).get("chapter_count"), 0)
     completed_task = load_task_card(project_path, chapter_count) if chapter_count > 0 else None
     sections = {
-        "author_intent": _build_author_intent_block(author_intent, max_chars=520),
         "live_state": _build_live_state_block(plot_state, max_chars=900),
         "static_characters": _compact_characters_block(
             project_data.get("characters") or {},
             plot_state,
-            max_chars=700,
+            max_chars=320,
         ),
         "chapter_text": str(new_text or "").strip(),
     }
@@ -1267,13 +1264,13 @@ def build_progression_context(
         persist=False,
     )
     sections = {
-        "author_intent": _build_author_intent_block(author_intent, max_chars=700),
-        "chapter_task": _build_chapter_task_block(task_card, max_chars=560),
-        "live_state": _build_live_state_block(plot_state, max_chars=1000, include_next_goal=False),
+        "author_intent": _build_author_intent_block(author_intent, max_chars=560),
+        "chapter_task": _build_chapter_task_block(task_card, max_chars=480),
+        "live_state": _build_live_state_block(plot_state, max_chars=860, include_next_goal=False),
         "static_world": _compact_world_block(project_data.get("world") or {}, user_request, max_chars=500),
         "static_characters": _compact_characters_block(project_data.get("characters") or {}, plot_state, max_chars=700),
-        "recent_scene": _build_recent_scene_block(project_path, chapter_count, recent_text, max_chars=2200),
-        "style_contract": _build_style_contract_block(project_data.get("style") or {}, author_intent, max_chars=420),
+        "recent_scene": _build_recent_scene_block(project_path, chapter_count, recent_text, max_chars=1700),
+        "style_contract": _build_style_contract_block(project_data.get("style") or {}, author_intent, max_chars=200),
         "planning_mode": normalize_planning_mode(planning_mode),
         "user_request": str(user_request or "").strip() or "无额外要求。请仅基于当前状态给出下一章推进选项。",
         "option_count": max(1, int(option_count or 4)),
@@ -1284,7 +1281,7 @@ def build_progression_context(
         task_card,
         plot_state,
         sections["recent_scene"],
-        max_chars=600,
+        max_chars=420,
     )
     return {
         "task_card": task_card,

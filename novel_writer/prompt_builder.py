@@ -12,6 +12,17 @@ def _to_block(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)
 
 
+def _section_block(title: str, content: Any) -> str:
+    text = str(content or "").strip()
+    if not text:
+        return ""
+    return f"【{title}】\n{text}"
+
+
+def _join_blocks(*blocks: str) -> str:
+    return "\n\n".join(block for block in blocks if block)
+
+
 def _writer_volume_outline_block(volume: dict | None, chapter_outline: dict | None) -> str:
     source = volume if isinstance(volume, dict) else {}
     chapter = chapter_outline if isinstance(chapter_outline, dict) else {}
@@ -501,73 +512,34 @@ def build_progression_options_prompt(
 
     if isinstance(data, dict) and isinstance(data.get("sections"), dict):
         sections = data["sections"]
-        return f"""你是长篇连载小说的剧情推进顾问。请为下一章设计若干互斥但都合理的推进方案。
-
-【作者意图】
-{sections.get("author_intent", "")}
-
-【下一章任务卡】
-{sections.get("chapter_task", "")}
-
-【世界观速览】
-{sections.get("static_world", "")}
-
-【角色速览】
-{sections.get("static_characters", "")}
-
-【当前 live state】
-{sections.get("live_state", "")}
-
-【检索到的相关记忆】
-{sections.get("retrieved_memory", "无")}
-
-【最近场景与近两章摘要】
-{sections.get("recent_scene", "")}
-
-【文风契约】
-{sections.get("style_contract", "")}
-
-【当前 planning mode】
-{sections.get("planning_mode", planning_mode)}
-
-【用户这次想看的方向】
-{sections.get("user_request", user_request_block)}
-
-【需要给出的选项数】
-{sections.get("option_count", option_count)}
+        option_total = int(sections.get("option_count", option_count) or option_count)
+        prompt_body = _join_blocks(
+            "你是长篇连载小说的剧情推进顾问。请只为下一章设计若干互斥且都合理的推进方案。",
+            _section_block("作者意图", sections.get("author_intent", "")),
+            _section_block("下一章任务卡", sections.get("chapter_task", "")),
+            _section_block("世界观速览", sections.get("static_world", "")),
+            _section_block("角色速览", sections.get("static_characters", "")),
+            _section_block("当前 live state", sections.get("live_state", "")),
+            _section_block("更早相关记忆", sections.get("retrieved_memory", "")),
+            _section_block("最近场景", sections.get("recent_scene", "")),
+            _section_block("补充写作约束", sections.get("style_contract", "")),
+            _section_block("当前 planning mode", sections.get("planning_mode", planning_mode)),
+            _section_block("用户这次想看的方向", sections.get("user_request", user_request_block)),
+        )
+        return f"""{prompt_body}
 
 要求：
 1. 输出必须是合法 JSON
-2. 必须只针对下一章给方案，不要把两三章后的核心剧情提前塞进来
-3. 必须返回恰好 {int(sections.get("option_count", option_count) or option_count)} 个互斥选项
-4. 方案要尊重既有设定、最近正文、当前 live state 和下一章任务卡，只能细化和调整重心
-5. 每个选项都必须包含 `option_id`、`title`、`summary`、`why_now`、`key_events`、`writer_guidance`、`chapter_outline`、`recommended`
-6. `chapter_outline` 必须包含 `title`、`summary`、`goal`、`key_events`
-7. `key_events` 和 `chapter_outline.key_events` 都要给出 2 到 5 个条目
-8. 只能有一个选项 `recommended=true`，并且 `recommended_option_id` 必须与该选项一致
-9. 不要输出解释，不要输出 Markdown
+2. 只针对下一章给方案，不要把两三章后的核心剧情提前塞进来
+3. 必须返回恰好 {option_total} 个互斥选项，且只能有一个 `recommended=true`
+4. `recommended_option_id` 必须与唯一的推荐项一致
+5. 方案要尊重既有设定、当前状态、最近场景和下一章任务卡，只能细化或调整重心
+6. 每个选项都必须包含 `option_id`、`title`、`summary`、`why_now`、`key_events`、`writer_guidance`、`chapter_outline`、`recommended`
+7. `chapter_outline` 必须包含 `title`、`summary`、`goal`、`key_events`，两个 `key_events` 列表都给 2 到 5 个条目
+8. 不要输出解释，不要输出 Markdown
 
-输出 JSON：
-{{
-  "recommended_option_id": "option_1",
-  "options": [
-    {{
-      "option_id": "option_1",
-      "title": "",
-      "summary": "",
-      "why_now": "",
-      "key_events": [],
-      "writer_guidance": "",
-      "chapter_outline": {{
-        "title": "",
-        "summary": "",
-        "goal": "",
-        "key_events": []
-      }},
-      "recommended": true
-    }}
-  ]
-}}
+输出 JSON 骨架：
+{{"recommended_option_id":"option_1","options":[{{"option_id":"option_1","title":"","summary":"","why_now":"","key_events":["",""],"writer_guidance":"","chapter_outline":{{"title":"","summary":"","goal":"","key_events":["",""]}},"recommended":true}}]}}
 """
 
     return f"""你是长篇连载小说的剧情推进顾问。请为“下一章”设计若干互斥但都合理的推进方案，供用户二选一或多选一中的单选。
@@ -657,47 +629,27 @@ def build_writer_prompt(
             if chapter_count == 0
             else "这不是第一章，请延续已有状态、记忆与场景动势。"
         )
-        return f"""你是一名长篇小说写作助手。请续写下一章。
-
-【作者意图】
-{sections.get("author_intent", "")}
-
-【下一章任务卡】
-{sections.get("chapter_task", "")}
-
-【当前 live state】
-{sections.get("live_state", "")}
-
-【相关设定速览】
-【世界】
-{sections.get("static_world", "")}
-
-【角色】
-{sections.get("static_characters", "")}
-
-【检索到的相关记忆】
-{sections.get("retrieved_memory", "无")}
-
-【最近场景与近两章摘要】
-{sections.get("recent_scene", "")}
-
-【文风契约】
-{sections.get("style_contract", "")}
-
-【开篇说明】
-{opening_note}
+        prompt_body = _join_blocks(
+            "你是一名长篇小说写作助手。请续写下一章。",
+            _section_block("作者意图", sections.get("author_intent", "")),
+            _section_block("下一章任务卡", sections.get("chapter_task", "")),
+            _section_block("当前 live state", sections.get("live_state", "")),
+            _section_block("世界", sections.get("static_world", "")),
+            _section_block("角色", sections.get("static_characters", "")),
+            _section_block("更早相关记忆", sections.get("retrieved_memory", "")),
+            _section_block("最近场景", sections.get("recent_scene", "")),
+            _section_block("补充写作约束", sections.get("style_contract", "")),
+            _section_block("开篇说明", opening_note),
+        )
+        return f"""{prompt_body}
 
 要求：
-1. 人物不能 OOC，地点、时间、未解线程与已写正文必须一致
-2. 不遗忘伏笔，也不要把已解决的事情重新写成未解决
-3. 本章必须让人物关系、局势、线索、资源或地点状态至少出现一项新的可验证变化，不能只是在上一章同一问题上重复讨论、试探或犹豫
-4. 如果沿用同一地点、同一目标或同一冲突，也必须写出新的信息、新代价、新决定或新结果，避免章节原地打转
-5. 严格只写当前这一章，不要提前完成下一章或后续章节的大事件
-6. 任务卡是当前章节任务的最高优先级来源，但具体场景组织、细节与节奏要保持创造力与活力
-7. 如果结尾需要承接后续内容，可以留下明确悬念或过渡，但不要把后续章核心情节直接写完
-8. 输出纯正文
-9. 不要输出章标题、序号、小标题、Markdown 标题
-10. 字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读
+1. 人物、地点、时间、未解线程与已写正文必须一致；不要遗忘伏笔，也不要把已解决的事情重新写回未解决
+2. 本章必须产生至少一项新的可验证变化；若沿用同一地点、目标或冲突，也要写出新的信息、代价、决定或结果
+3. 严格只写当前这一章。任务卡是当前章节任务的最高优先级来源，不要提前完成下一章或后续章节的大事件
+4. 结尾可留下明确悬念或过渡，但不要把后续章核心情节直接写完
+5. 输出纯正文，不要章标题、序号、小标题、Markdown 标题
+6. 字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读
 """
 
     world = _to_block(data.get("world", {}))
@@ -768,48 +720,27 @@ def build_writer_prompt(
 def build_summary_prompt(data: dict, new_text: str) -> str:
     if isinstance(data, dict) and isinstance(data.get("sections"), dict):
         sections = data["sections"]
-        return f"""请基于新章节更新小说 live state。
-
-【作者意图】
-{sections.get("author_intent", "")}
-
-【已有 live state】
-{sections.get("live_state", "")}
-
-【角色速览】
-{sections.get("static_characters", "")}
-
-【本章写前任务卡】
-{sections.get("completed_task", "无")}
-
-【新章节】
-{sections.get("chapter_text", new_text)}
+        prompt_body = _join_blocks(
+            "请基于新章节更新小说 live state。",
+            _section_block("已有 live state", sections.get("live_state", "")),
+            _section_block("角色速览", sections.get("static_characters", "")),
+            _section_block("本章写前任务卡", sections.get("completed_task", "无")),
+            _section_block("新章节", sections.get("chapter_text", new_text)),
+        )
+        return f"""{prompt_body}
 
 要求：
 1. 输出必须是合法 JSON
-2. `current_location`、`current_time`、`current_arc` 必须根据本章结束时的状态明确更新
-3. `open_threads` 只保留仍未解决的问题，已解决的要写入 `resolved_threads`
-4. `active_characters` 只保留本章真正参与推进的角色名
+2. `current_location`、`current_time`、`current_arc` 以本章结束时的状态为准
+3. `open_threads` 只保留仍未解决的问题，已解决的写入 `resolved_threads`
+4. `active_characters` 只保留本章真正参与推进的角色
 5. `chapter_summary` 用 1 到 2 句话概括本章核心推进
-6. `next_chapter_goal` 要写“本章结束后最应该继续推进的下一步”。如果本章主要任务已经完成，不要直接重复任务卡里的原句，要反映新的状态、代价、线索或下一动作
-7. `retrieval_tags` 给出便于后续记忆检索的简短标签
+6. `next_chapter_goal` 写本章结束后最该继续推进的一步；如果本章主任务已完成，不要直接重复任务卡原句
+7. `retrieval_tags` 给出便于后续检索的简短标签
 8. 不要输出解释，不要输出 Markdown
 
-输出 JSON：
-{{
-  "chapter_summary": "",
-  "current_location": "",
-  "current_time": "",
-  "current_arc": "",
-  "recent_events": [],
-  "open_threads": [],
-  "resolved_threads": [],
-  "foreshadowing": [],
-  "character_updates": [],
-  "active_characters": [],
-  "retrieval_tags": [],
-  "next_chapter_goal": ""
-}}
+输出 JSON 骨架：
+{{"chapter_summary":"","current_location":"","current_time":"","current_arc":"","recent_events":[],"open_threads":[],"resolved_threads":[],"foreshadowing":[],"character_updates":[],"active_characters":[],"retrieval_tags":[],"next_chapter_goal":""}}
 """
 
     plot_state = _to_block(data.get("plot_state", {}))
