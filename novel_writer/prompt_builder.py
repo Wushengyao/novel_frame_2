@@ -386,6 +386,9 @@ def build_batch_chapter_plan_prompt(
 【当前 live state】
 {sections.get("live_state", "")}
 
+【检索到的相关记忆】
+{sections.get("retrieved_memory", "无")}
+
 【最近场景与近两章摘要】
 {sections.get("recent_scene", "")}
 
@@ -514,6 +517,9 @@ def build_progression_options_prompt(
 
 【当前 live state】
 {sections.get("live_state", "")}
+
+【检索到的相关记忆】
+{sections.get("retrieved_memory", "无")}
 
 【最近场景与近两章摘要】
 {sections.get("recent_scene", "")}
@@ -684,12 +690,14 @@ def build_writer_prompt(
 要求：
 1. 人物不能 OOC，地点、时间、未解线程与已写正文必须一致
 2. 不遗忘伏笔，也不要把已解决的事情重新写成未解决
-3. 严格只写当前这一章，不要提前完成下一章或后续章节的大事件
-4. 任务卡是当前章节任务的最高优先级来源，但具体场景组织、细节与节奏要保持创造力与活力
-5. 如果结尾需要承接后续内容，可以留下明确悬念或过渡，但不要把后续章核心情节直接写完
-6. 输出纯正文
-7. 不要输出章标题、序号、小标题、Markdown 标题
-8. 字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读
+3. 本章必须让人物关系、局势、线索、资源或地点状态至少出现一项新的可验证变化，不能只是在上一章同一问题上重复讨论、试探或犹豫
+4. 如果沿用同一地点、同一目标或同一冲突，也必须写出新的信息、新代价、新决定或新结果，避免章节原地打转
+5. 严格只写当前这一章，不要提前完成下一章或后续章节的大事件
+6. 任务卡是当前章节任务的最高优先级来源，但具体场景组织、细节与节奏要保持创造力与活力
+7. 如果结尾需要承接后续内容，可以留下明确悬念或过渡，但不要把后续章核心情节直接写完
+8. 输出纯正文
+9. 不要输出章标题、序号、小标题、Markdown 标题
+10. 字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读
 """
 
     world = _to_block(data.get("world", {}))
@@ -771,6 +779,9 @@ def build_summary_prompt(data: dict, new_text: str) -> str:
 【角色速览】
 {sections.get("static_characters", "")}
 
+【本章写前任务卡】
+{sections.get("completed_task", "无")}
+
 【新章节】
 {sections.get("chapter_text", new_text)}
 
@@ -780,8 +791,9 @@ def build_summary_prompt(data: dict, new_text: str) -> str:
 3. `open_threads` 只保留仍未解决的问题，已解决的要写入 `resolved_threads`
 4. `active_characters` 只保留本章真正参与推进的角色名
 5. `chapter_summary` 用 1 到 2 句话概括本章核心推进
-6. `retrieval_tags` 给出便于后续记忆检索的简短标签
-7. 不要输出解释，不要输出 Markdown
+6. `next_chapter_goal` 要写“本章结束后最应该继续推进的下一步”。如果本章主要任务已经完成，不要直接重复任务卡里的原句，要反映新的状态、代价、线索或下一动作
+7. `retrieval_tags` 给出便于后续记忆检索的简短标签
+8. 不要输出解释，不要输出 Markdown
 
 输出 JSON：
 {{

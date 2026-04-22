@@ -125,6 +125,34 @@ def _normalize_string_list(value: object, *, max_items: int) -> list[str]:
     return normalized
 
 
+def _synthesize_task_summary(
+    *,
+    title: str,
+    goal: str,
+    key_events: list[str],
+    source: str,
+) -> str:
+    events = _normalize_string_list(key_events, max_items=3)
+    if events:
+        candidate = "；".join(events[:2]).strip()
+        if candidate and candidate != goal:
+            return _trim_text(candidate, 220)
+
+    focus = str(goal or title or "").strip()
+    if not focus:
+        return ""
+
+    prefix_map = {
+        "chapter_outline": "本章会具体展开",
+        "progression_selected": "本章会沿着已选推进方案落实",
+        "volume_outline": "本章会围绕阶段任务推进",
+        "plot_state": "本章会围绕当前待办推进",
+        "freeform": "本章会围绕当前局势推进",
+    }
+    prefix = prefix_map.get(source, "本章会围绕以下重点推进")
+    return _trim_text(f"{prefix}“{focus}”，并让局势出现新的变化。", 220)
+
+
 def normalize_live_plot_state(plot_state: dict | None) -> dict:
     normalized = deepcopy(EMPTY_PLOT_STATE)
     if isinstance(plot_state, dict):
@@ -557,6 +585,13 @@ def _normalize_task_card_payload(
         normalized["summary"] = normalized["goal"]
     if not normalized["goal"]:
         normalized["goal"] = normalized["summary"]
+    if normalized["summary"] and normalized["summary"] == normalized["goal"]:
+        normalized["summary"] = _synthesize_task_summary(
+            title=normalized.get("title", ""),
+            goal=normalized.get("goal", ""),
+            key_events=normalized.get("key_events") or [],
+            source=normalized.get("source", ""),
+        )
     normalized["summary"] = _trim_text(normalized.get("summary", ""), 220)
     normalized["goal"] = _trim_text(normalized.get("goal", ""), 180)
     normalized["writer_guidance"] = _trim_text(normalized.get("writer_guidance", ""), 220)
@@ -994,29 +1029,62 @@ def _build_retrieved_memory_block(
     *,
     max_chars: int,
 ) -> str:
+    recent_payloads = load_recent_summary_payloads(project_path, chapter_count, limit=RECENT_SUMMARY_COUNT)
+    lines = []
+    latest_payload = recent_payloads[-1] if recent_payloads else {}
+    if latest_payload:
+        latest_summary = _trim_text(str(latest_payload.get("chapter_summary", "") or "").strip(), 180)
+        if latest_summary:
+            lines.append(f"- 上一章刚完成: {latest_summary}")
+
+        carry_threads = _normalize_string_list(
+            list(latest_payload.get("open_threads") or []) + list(plot_state.get("open_threads") or []),
+            max_items=3,
+        )
+        if carry_threads:
+            candidate = "\n".join(lines + [f"- 仍待推进: {'；'.join(carry_threads)}"])
+            if len(candidate) <= max_chars:
+                lines.append(f"- 仍待推进: {'；'.join(carry_threads)}")
+
+        resolved_threads = _normalize_string_list(latest_payload.get("resolved_threads"), max_items=2)
+        if resolved_threads:
+            candidate = "\n".join(lines + [f"- 已解决勿回退: {'；'.join(resolved_threads)}"])
+            if len(candidate) <= max_chars:
+                lines.append(f"- 已解决勿回退: {'；'.join(resolved_threads)}")
+
     query_text = " ".join(
         part
         for part in (
+            str(plot_state.get("main_plot", "") or "").strip(),
             str(task_card.get("summary", "") or "").strip(),
             str(task_card.get("goal", "") or "").strip(),
             str(task_card.get("writer_guidance", "") or "").strip(),
             str(plot_state.get("current_arc", "") or "").strip(),
             " ".join(plot_state.get("open_threads") or []),
+            " ".join(plot_state.get("foreshadowing") or []),
+            " ".join(plot_state.get("recent_events") or []),
+            " ".join(plot_state.get("character_updates") or []),
             recent_scene,
         )
         if part
     )
     query_keywords = _extract_keywords(query_text)
+    current_open_keywords = _extract_keywords(" ".join(plot_state.get("open_threads") or []))
     ranked = []
     for candidate in _collect_summary_memory_candidates(project_path, chapter_count):
-        score = _overlap_score(query_keywords, candidate.get("tags") or _extract_keywords(candidate.get("text", "")))
+        candidate_keywords = candidate.get("tags") or _extract_keywords(candidate.get("text", ""))
+        score = _overlap_score(query_keywords, candidate_keywords)
+        if current_open_keywords:
+            score += _overlap_score(current_open_keywords, candidate_keywords) * 2
+        if candidate.get("kind") == "arc":
+            score += 1
         if score <= 0:
             continue
-        ranked.append((score, candidate))
-    ranked.sort(key=lambda item: item[0], reverse=True)
+        recency = safe_int(candidate.get("chapter_number") or candidate.get("arc_index"), 0)
+        ranked.append((score, recency, candidate))
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
 
-    lines = []
-    for _, candidate in ranked[:RETRIEVED_MEMORY_LIMIT]:
+    for _, _, candidate in ranked[:RETRIEVED_MEMORY_LIMIT]:
         if candidate["kind"] == "chapter":
             label = f"第{candidate['chapter_number']}章记忆"
         else:
@@ -1136,6 +1204,8 @@ def build_writer_context(
 def build_summary_context(project_path: str, project_data: dict, new_text: str) -> dict:
     plot_state = normalize_live_plot_state(project_data.get("plot_state"))
     author_intent = normalize_author_intent(project_data.get("author_intent") or ensure_author_intent(project_path))
+    chapter_count = safe_int(project_data.get("project", {}).get("chapter_count"), 0)
+    completed_task = load_task_card(project_path, chapter_count) if chapter_count > 0 else None
     sections = {
         "author_intent": _build_author_intent_block(author_intent, max_chars=520),
         "live_state": _build_live_state_block(plot_state, max_chars=900),
@@ -1146,6 +1216,8 @@ def build_summary_context(project_path: str, project_data: dict, new_text: str) 
         ),
         "chapter_text": str(new_text or "").strip(),
     }
+    if completed_task:
+        sections["completed_task"] = _build_chapter_task_block(completed_task, max_chars=480)
     return {
         "sections": sections,
         "section_chars": {key: len(value) for key, value in sections.items() if value},
@@ -1206,6 +1278,14 @@ def build_progression_context(
         "user_request": str(user_request or "").strip() or "无额外要求。请仅基于当前状态给出下一章推进选项。",
         "option_count": max(1, int(option_count or 4)),
     }
+    sections["retrieved_memory"] = _build_retrieved_memory_block(
+        project_path,
+        chapter_count,
+        task_card,
+        plot_state,
+        sections["recent_scene"],
+        max_chars=600,
+    )
     return {
         "task_card": task_card,
         "sections": sections,

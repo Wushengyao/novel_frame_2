@@ -13,6 +13,7 @@ from context_builder import (
     build_chapter_outline_context,
     build_chapter_task_card,
     build_progression_context,
+    build_summary_context,
     build_writer_context,
     select_recent_scene_window,
 )
@@ -20,6 +21,7 @@ from prompt_builder import (
     build_batch_chapter_plan_prompt,
     build_chapter_outline_prompt,
     build_progression_options_prompt,
+    build_summary_prompt,
     build_writer_prompt,
 )
 from project_manager import load_json, load_project, save_json
@@ -151,6 +153,22 @@ class ContextBuilderTests(unittest.TestCase):
             saved = load_json(str(project_path / "task_cards" / "chapter_0001.json"))
             self.assertEqual(saved["goal"], task_card["goal"])
 
+    def test_freeform_task_card_synthesizes_distinct_summary_and_goal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="freeform", planning_mode="none")
+            project_data = load_project(str(project_path))
+
+            task_card = build_chapter_task_card(
+                str(project_path),
+                project_data,
+                {"volume": {}, "chapter": {}},
+                planning_mode="none",
+            )
+
+            self.assertEqual(task_card["goal"], "建立临时安全区")
+            self.assertNotEqual(task_card["summary"], task_card["goal"])
+            self.assertIn("建立临时安全区", task_card["summary"])
+
     def test_progression_selected_task_card_is_highest_priority_and_deduplicates_next_goal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp), project_id="selected")
@@ -206,6 +224,7 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertNotIn("下一目标", writer_context["sections"]["live_state"])
             self.assertNotIn("建立临时安全区", prompt)
             self.assertIn("完成一次谨慎的外出试探", prompt)
+            self.assertIn("新的可验证变化", prompt)
 
     def test_writer_context_retrieves_saved_memory_cards(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -282,6 +301,58 @@ class ContextBuilderTests(unittest.TestCase):
                 "氧气瓶" in context["sections"]["retrieved_memory"]
                 or "异常信号" in context["sections"]["retrieved_memory"]
             )
+            self.assertIn("上一章刚完成", context["sections"]["retrieved_memory"])
+            self.assertIn("仍待推进", context["sections"]["retrieved_memory"])
+
+            progression_context = build_progression_context(
+                str(project_path),
+                project_data,
+                next_context,
+                recent_text,
+                user_request="优先追查主控区附近的异常信号",
+                option_count=4,
+                planning_mode="volume",
+            )
+            progression_prompt = build_progression_options_prompt(
+                progression_context,
+                recent_text,
+                next_context,
+                user_request="优先追查主控区附近的异常信号",
+                option_count=4,
+                planning_mode="volume",
+            )
+            self.assertIn("检索到的相关记忆", progression_prompt)
+            self.assertIn("氧气瓶", progression_context["sections"]["retrieved_memory"])
+
+    def test_summary_context_includes_completed_task_and_prompt_guides_next_goal_forward(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="summary_task")
+            project = load_json(str(project_path / "project.json"))
+            project["chapter_count"] = 1
+            save_json(str(project_path / "project.json"), project)
+            save_json(
+                str(project_path / "task_cards" / "chapter_0001.json"),
+                {
+                    "chapter_number": 1,
+                    "planning_mode": "chapter",
+                    "source": "chapter_outline",
+                    "title": "死寂的隔离区",
+                    "summary": "三人确认避难点安全并完成最初分工。",
+                    "goal": "建立临时安全区",
+                    "key_events": ["封门", "分工", "检查设备"],
+                    "volume_title": "第一卷",
+                    "volume_goal": "建立据点",
+                    "writer_guidance": "",
+                },
+            )
+            project_data = load_project(str(project_path))
+
+            context = build_summary_context(str(project_path), project_data, "新章节正文")
+            prompt = build_summary_prompt(context, "新章节正文")
+
+            self.assertIn("本章写前任务卡", prompt)
+            self.assertIn("叙事目标: 建立临时安全区", context["sections"]["completed_task"])
+            self.assertIn("不要直接重复任务卡里的原句", prompt)
 
     def test_compact_prompts_stay_within_budget_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
