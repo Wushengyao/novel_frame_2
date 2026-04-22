@@ -464,6 +464,68 @@ def _compact_character_description(text: str, *, max_chars: int) -> str:
     return _trim_text("；".join(lines) or content, max_chars)
 
 
+def _split_compact_fragments(text: str) -> list[str]:
+    source = str(text or "").strip()
+    if not source:
+        return []
+    fragments = []
+    for part in re.split(r"[\n\r]+|[。！？!?；;]+", source):
+        cleaned = re.sub(r"^[\-\*\d\.\)\(、\s]+", "", part).strip("，,、；;：: ")
+        if cleaned:
+            fragments.append(cleaned)
+    return fragments
+
+
+def _is_low_signal_author_premise(text: str) -> bool:
+    normalized = _normalized_compare_text(text)
+    if not normalized:
+        return True
+    generic_markers = (
+        "由模型根据需求自动生成设定",
+        "长篇小说项目",
+        "structuredmemorynovelwritingproject",
+        "testproject",
+        "测试项目",
+    )
+    return any(marker in normalized for marker in generic_markers)
+
+
+def _summarize_author_premise(author_intent: dict, *, max_chars: int) -> str:
+    intent = normalize_author_intent(author_intent)
+    premise_source = str(intent.get("premise", "") or "").strip()
+    if _is_low_signal_author_premise(premise_source):
+        fallback = str(intent.get("long_arc", "") or "").strip()
+        if fallback:
+            premise_source = fallback
+
+    fragments = _split_compact_fragments(premise_source)
+    if not fragments:
+        return ""
+
+    selected: list[str] = []
+    for fragment in fragments:
+        compact = _trim_text(fragment, 80)
+        if any(_is_duplicateish(compact, existing) for existing in selected):
+            continue
+        candidate = "；".join(selected + [compact])
+        if len(candidate) > max_chars and selected:
+            break
+        selected.append(compact)
+        if len(selected) >= 2:
+            break
+
+    summary = "；".join(selected) if selected else _trim_text(fragments[0], max_chars)
+    if not summary:
+        return ""
+
+    normalized = _normalized_compare_text(summary)
+    if normalized.startswith("故事发生在") or normalized.startswith("小说故事聚焦于"):
+        prefix = "围绕"
+    else:
+        prefix = "本书围绕"
+    return _trim_text(f"{prefix}{summary}展开。", max_chars)
+
+
 def _active_character_names(plot_state: dict, characters: dict) -> list[str]:
     active = _normalize_string_list(plot_state.get("active_characters"), max_items=SUMMARY_LIST_LIMITS["active_characters"])
     if active:
@@ -500,28 +562,22 @@ def _compact_characters_block(characters: dict, plot_state: dict, *, max_chars: 
 def _build_author_intent_block(author_intent: dict, *, max_chars: int) -> str:
     intent = normalize_author_intent(author_intent)
     lines = []
-    if intent["premise"]:
-        lines.append(f"核心前提: {_trim_text(intent['premise'], 220)}")
-    if intent["long_arc"] and not _is_duplicateish(intent["premise"], intent["long_arc"]):
-        lines.append(f"长期主线: {_trim_text(intent['long_arc'], 180)}")
-    if intent["tone_contract"]:
-        lines.append(f"语气约束: {_trim_text(intent['tone_contract'], 110)}")
-    if intent["must_haves"]:
-        lines.append("必须保留:")
-        for item in intent["must_haves"][:3]:
-            candidate = "\n".join(lines + [f"- {item}"])
-            if len(candidate) > max_chars:
-                break
-            lines.append(f"- {item}")
-    if intent["must_not_break"]:
-        header = "\n".join(lines + ["不能破坏:"]) if lines else "不能破坏:"
-        if len(header) <= max_chars:
-            lines.append("不能破坏:")
-            for item in intent["must_not_break"][:2]:
-                candidate = "\n".join(lines + [f"- {item}"])
-                if len(candidate) > max_chars:
-                    break
-                lines.append(f"- {item}")
+    premise_summary = _summarize_author_premise(intent, max_chars=min(180, max_chars))
+    if premise_summary:
+        lines.append(f"写作核心: {premise_summary}")
+
+    emphasis_items = []
+    for item in intent["must_haves"]:
+        compact = _trim_text(item, 48)
+        if any(_is_duplicateish(compact, existing) for existing in emphasis_items):
+            continue
+        if premise_summary and _is_duplicateish(compact, premise_summary):
+            continue
+        emphasis_items.append(compact)
+        if len(emphasis_items) >= 2:
+            break
+    if emphasis_items:
+        lines.append(f"优先强调: {'；'.join(emphasis_items)}")
     return _trim_text("\n".join(lines), max_chars)
 
 

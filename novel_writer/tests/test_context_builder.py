@@ -226,6 +226,62 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertIn("完成一次谨慎的外出试探", prompt)
             self.assertIn("新的可验证变化", prompt)
 
+    def test_author_intent_block_is_rendered_as_compact_writer_facing_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="author_intent_compact")
+            project_data = load_project(str(project_path))
+            next_context = {
+                "volume": project_data["outlines"]["volumes"][0],
+                "chapter": project_data["outlines"]["volumes"][0]["chapters"][0],
+            }
+
+            context = build_writer_context(
+                str(project_path),
+                project_data,
+                next_context,
+                "最近正文",
+                planning_mode="chapter",
+            )
+            author_intent = context["sections"]["author_intent"]
+
+            self.assertIn("写作核心", author_intent)
+            self.assertIn("优先强调", author_intent)
+            self.assertNotIn("长期主线", author_intent)
+            self.assertNotIn("不能破坏", author_intent)
+            self.assertNotIn("从建立安全区逐步走向外部探索与长期生存", author_intent)
+
+    def test_author_intent_summary_falls_back_when_premise_is_low_signal_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="author_intent_fallback")
+            save_json(
+                str(project_path / "author_intent.json"),
+                {
+                    "premise": "由模型根据需求自动生成设定的长篇小说项目。",
+                    "long_arc": "男女主被困在摩天楼中合作求生、搜集物资并逐步建立安全区。",
+                    "tone_contract": "紧张中带温情 / 第三人称",
+                    "must_haves": ["维持生存压力"],
+                    "must_not_break": ["人物不能 OOC"],
+                    "creativity_guidance": "保持推进新鲜感。",
+                },
+            )
+            project_data = load_project(str(project_path))
+            next_context = {
+                "volume": project_data["outlines"]["volumes"][0],
+                "chapter": project_data["outlines"]["volumes"][0]["chapters"][0],
+            }
+
+            context = build_writer_context(
+                str(project_path),
+                project_data,
+                next_context,
+                "最近正文",
+                planning_mode="chapter",
+            )
+            author_intent = context["sections"]["author_intent"]
+
+            self.assertIn("摩天楼中合作求生", author_intent)
+            self.assertNotIn("自动生成设定的长篇小说项目", author_intent)
+
     def test_writer_context_retrieves_saved_memory_cards(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp), project_id="memory")
