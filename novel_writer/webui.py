@@ -393,10 +393,20 @@ def _read_admin_action_status() -> dict:
         return {}
 
 
-def _run_checked_command(command: list[str], *, cwd: str | None = None) -> str:
+def _systemd_user_command_env() -> dict[str, str]:
+    env = dict(os.environ)
+    runtime_dir = str(env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}").strip()
+    if runtime_dir:
+        env["XDG_RUNTIME_DIR"] = runtime_dir
+        env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime_dir}/bus")
+    return env
+
+
+def _run_checked_command(command: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None) -> str:
     completed = subprocess.run(
         command,
         cwd=cwd,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
@@ -491,7 +501,11 @@ def _launch_admin_task(task: str) -> str:
         "--status-path",
         str(status_path),
     ]
-    _run_checked_command(command, cwd=str(BASE_DIR))
+    _run_checked_command(
+        command,
+        cwd=str(BASE_DIR),
+        env=_systemd_user_command_env(),
+    )
     return unit_name
 
 
@@ -516,7 +530,10 @@ def _run_admin_task(task: str, *, repo_root: str, service_name: str, status_path
 
     try:
         if task == "restart":
-            _run_checked_command(["systemctl", "--user", "restart", service_name])
+            _run_checked_command(
+                ["systemctl", "--user", "restart", service_name],
+                env=_systemd_user_command_env(),
+            )
             write_status(
                 "succeeded",
                 "Web UI 已重启。请刷新页面重新连接。",
@@ -539,7 +556,10 @@ def _run_admin_task(task: str, *, repo_root: str, service_name: str, status_path
             before_commit = _run_checked_command(["git", "-C", str(repo_path), "rev-parse", "--short", "HEAD"])
             pull_output = _run_checked_command(["git", "-C", str(repo_path), "pull", "--ff-only"])
             after_commit = _run_checked_command(["git", "-C", str(repo_path), "rev-parse", "--short", "HEAD"])
-            _run_checked_command(["systemctl", "--user", "restart", service_name])
+            _run_checked_command(
+                ["systemctl", "--user", "restart", service_name],
+                env=_systemd_user_command_env(),
+            )
             changed = before_commit != after_commit
             message = "代码已更新并重启 Web UI。" if changed else "代码已是最新版本，Web UI 已重启。"
             write_status(

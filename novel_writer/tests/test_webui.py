@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import tempfile
 import threading
 import time
@@ -446,6 +447,29 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(response.status, 303)
         self.assertIn("/projects?notice=", response.getheader("Location"))
         mocked_launch.assert_called_once_with("update")
+
+    def test_systemd_user_command_env_sets_runtime_bus_defaults(self) -> None:
+        env = webui._systemd_user_command_env()
+        runtime_dir = f"/run/user/{os.getuid()}"
+
+        self.assertEqual(env["XDG_RUNTIME_DIR"], runtime_dir)
+        self.assertEqual(env["DBUS_SESSION_BUS_ADDRESS"], f"unix:path={runtime_dir}/bus")
+
+    def test_launch_admin_task_uses_systemd_user_env(self) -> None:
+        with patch("webui._write_admin_action_status"), patch(
+            "webui._run_checked_command",
+            return_value="queued",
+        ) as mocked_run, patch("webui.shutil.which", return_value="/usr/bin/systemd-run"):
+            unit_name = webui._launch_admin_task("restart")
+
+        self.assertTrue(unit_name.startswith("novel-writer-admin-restart-"))
+        _, kwargs = mocked_run.call_args
+        self.assertEqual(kwargs["cwd"], str(webui.BASE_DIR))
+        self.assertEqual(kwargs["env"]["XDG_RUNTIME_DIR"], f"/run/user/{os.getuid()}")
+        self.assertEqual(
+            kwargs["env"]["DBUS_SESSION_BUS_ADDRESS"],
+            f"unix:path=/run/user/{os.getuid()}/bus",
+        )
 
     def test_model_preset_submission_resolves_without_manual_model_name(self) -> None:
         overrides = webui._runtime_overrides_from_form(
