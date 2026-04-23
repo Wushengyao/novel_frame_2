@@ -112,30 +112,16 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                     "option_id": "option_1",
                     "title": "先探查走廊",
                     "summary": "三人离开隔离区短程试探。",
-                    "why_now": "外部信息缺口太大。",
                     "key_events": ["规划路线", "短程离开"],
                     "writer_guidance": "保持谨慎与紧张感。",
-                    "chapter_outline": {
-                        "title": "探查走廊",
-                        "summary": "完成第一次外出试探。",
-                        "goal": "获取走廊情报",
-                        "key_events": ["规划路线", "短程离开"],
-                    },
                     "recommended": True,
                 },
                 {
                     "option_id": CUSTOM_PROGRESSION_OPTION_ID,
                     "title": "空白自定义项",
                     "summary": "不采用现有候选方案，改由你自己定义。",
-                    "why_now": "用户已有更明确的章节灵感。",
                     "key_events": ["用户自定义本章推进", "系统保持状态与卷目标一致"],
                     "writer_guidance": "请把用户填写的创意作为本章主任务。",
-                    "chapter_outline": {
-                        "title": "由你填写",
-                        "summary": "由你填写这一章想看的情节。",
-                        "goal": "由你填写当前章目标。",
-                        "key_events": ["由你填写", "系统衔接"],
-                    },
                     "recommended": False,
                     "custom": True,
                 },
@@ -173,6 +159,8 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("project-layout", page.body)
         self.assertIn("当前章任务", page.body)
         self.assertIn("卷目标", page.body)
+        self.assertNotIn("为什么现在", page.body)
+        self.assertNotIn("本章纲要", page.body)
 
     def test_continue_guided_endpoint_creates_background_job(self) -> None:
         session = {
@@ -189,30 +177,16 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                     "option_id": "option_1",
                     "title": "先探查走廊",
                     "summary": "短程试探",
-                    "why_now": "获取情报",
                     "key_events": ["规划路线", "短程离开"],
                     "writer_guidance": "保持谨慎。",
-                    "chapter_outline": {
-                        "title": "探查走廊",
-                        "summary": "完成第一次外出试探。",
-                        "goal": "获取走廊情报",
-                        "key_events": ["规划路线", "短程离开"],
-                    },
                     "recommended": True,
                 },
                 {
                     "option_id": CUSTOM_PROGRESSION_OPTION_ID,
                     "title": "空白自定义项",
                     "summary": "由用户自己定义",
-                    "why_now": "用户已有更明确的章节灵感。",
                     "key_events": ["用户自定义本章推进", "系统保持状态与卷目标一致"],
                     "writer_guidance": "请把用户填写的创意作为本章主任务。",
-                    "chapter_outline": {
-                        "title": "由你填写",
-                        "summary": "由你填写",
-                        "goal": "由你填写",
-                        "key_events": ["由你填写", "系统衔接"],
-                    },
                     "recommended": False,
                     "custom": True,
                 },
@@ -259,15 +233,8 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                     "option_id": CUSTOM_PROGRESSION_OPTION_ID,
                     "title": "空白自定义项",
                     "summary": "由用户自己定义",
-                    "why_now": "用户已有更明确的章节灵感。",
                     "key_events": ["用户自定义本章推进", "系统保持状态与卷目标一致"],
                     "writer_guidance": "请把用户填写的创意作为本章主任务。",
-                    "chapter_outline": {
-                        "title": "由你填写",
-                        "summary": "由你填写",
-                        "goal": "由你填写",
-                        "key_events": ["由你填写", "系统衔接"],
-                    },
                     "recommended": False,
                     "custom": True,
                 }

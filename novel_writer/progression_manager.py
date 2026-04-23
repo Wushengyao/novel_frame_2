@@ -31,7 +31,6 @@ from runtime_config import sanitize_runtime_overrides
 DEFAULT_OPTION_COUNT = 4
 ALLOWED_OPTION_COUNTS = {3, 4, 5}
 SESSION_DIR_NAME = "progression_sessions"
-OPTION_OUTLINE_KEYS = ("title", "summary", "goal", "key_events")
 CUSTOM_PROGRESSION_OPTION_ID = "custom_user_option"
 
 
@@ -59,23 +58,12 @@ def _normalize_key_events(raw_key_events: object) -> list[str]:
 
 def _normalize_option(option: dict, fallback_id: str) -> dict:
     option_id = str(option.get("option_id") or fallback_id).strip() or fallback_id
-    chapter_outline = option.get("chapter_outline") or {}
-    if not isinstance(chapter_outline, dict):
-        chapter_outline = {}
-    normalized_outline = {
-        "title": str(chapter_outline.get("title", "") or "").strip(),
-        "summary": str(chapter_outline.get("summary", "") or "").strip(),
-        "goal": str(chapter_outline.get("goal", "") or "").strip(),
-        "key_events": _normalize_key_events(chapter_outline.get("key_events", [])),
-}
     return {
         "option_id": option_id,
         "title": str(option.get("title", "") or "").strip(),
         "summary": str(option.get("summary", "") or "").strip(),
-        "why_now": str(option.get("why_now", "") or "").strip(),
         "key_events": _normalize_key_events(option.get("key_events", [])),
         "writer_guidance": str(option.get("writer_guidance", "") or "").strip(),
-        "chapter_outline": normalized_outline,
         "recommended": bool(option.get("recommended")),
         "custom": bool(option.get("custom")),
     }
@@ -95,13 +83,10 @@ def normalize_progression_options_response(data: dict, option_count: int) -> dic
         if not isinstance(raw_option, dict):
             raise ValueError("progression option item must be an object")
         option = _normalize_option(raw_option, fallback_id=f"option_{index}")
-        if not option["title"] or not option["summary"] or not option["why_now"] or not option["writer_guidance"]:
+        if not option["title"] or not option["summary"] or not option["writer_guidance"]:
             raise ValueError(f"progression option {option['option_id']} is missing required fields")
         if len(option["key_events"]) < 2:
             raise ValueError(f"progression option {option['option_id']} must include at least 2 key_events")
-        outline = option["chapter_outline"]
-        if not outline["title"] or not outline["summary"] or not outline["goal"] or len(outline["key_events"]) < 2:
-            raise ValueError(f"progression option {option['option_id']} has invalid chapter_outline")
         if option["option_id"] in option_ids:
             raise ValueError("progression options contain duplicate option_id values")
         option_ids.add(option["option_id"])
@@ -131,18 +116,11 @@ def build_custom_progression_option() -> dict:
         "option_id": CUSTOM_PROGRESSION_OPTION_ID,
         "title": "空白自定义项",
         "summary": "不采用上面的候选方案，改由你自己定义这一章想看的创意和情节。",
-        "why_now": "当你已经有更明确的章节灵感，或者想临时换成自己的推进方案时，就选这一项。",
         "key_events": [
             "由你在下方填写这一章真正想发生的内容。",
             "系统会保留当前状态和卷目标作为上位约束。",
         ],
         "writer_guidance": "请把用户随后填写的自定义创意作为本章主任务。",
-        "chapter_outline": {
-            "title": "由你填写",
-            "summary": "由你填写这一章想看的情节。",
-            "goal": "由你填写当前章目标。",
-            "key_events": ["由你填写本章关键推进", "系统负责保持与当前状态衔接"],
-        },
         "recommended": False,
         "custom": True,
     }
@@ -387,6 +365,7 @@ def resolve_progression_selection(
             project_data,
             next_context,
             selected,
+            baseline_task,
             session_id=str(session.get("session_id", "") or "").strip(),
             option_id=selected["option_id"],
             planning_mode=planning_mode,

@@ -821,6 +821,7 @@ def build_progression_selected_task_card(
     project_data: dict,
     next_context: dict,
     selected_option: dict,
+    baseline_task: dict | None = None,
     *,
     session_id: str,
     option_id: str,
@@ -831,11 +832,30 @@ def build_progression_selected_task_card(
 ) -> dict:
     chapter = deepcopy(next_context.get("chapter") or {})
     volume = deepcopy(next_context.get("volume") or {})
+    baseline = deepcopy(baseline_task or {})
     chapter_number = max(1, safe_int(chapter.get("chapter_number"), safe_int(project_data.get("project", {}).get("chapter_count"), 0) + 1))
     chapter_outline = deepcopy(selected_option.get("chapter_outline") or {})
     feedback = str(selection_feedback or "").strip()
+    summary = (
+        str(selected_option.get("summary", "") or "").strip()
+        or str(baseline.get("summary", "") or "").strip()
+        or str(chapter_outline.get("summary", "") or "").strip()
+    )
+    goal = (
+        str(baseline.get("goal", "") or "").strip()
+        or str(chapter_outline.get("goal", "") or "").strip()
+        or summary
+    )
+    key_events = (
+        selected_option.get("key_events")
+        or baseline.get("key_events")
+        or chapter_outline.get("key_events")
+        or []
+    )
 
     guidance_parts = [str(selected_option.get("writer_guidance", "") or "").strip()]
+    if goal and not _is_duplicateish(summary, goal):
+        guidance_parts.append(f"本章仍需落在既定目标：{goal}")
     if feedback:
         guidance_parts.append(f"用户补充细化：{feedback}")
         guidance_parts.append("这些补充只能作为已选推进方案的细化与微调，不能推翻本章核心任务。")
@@ -845,10 +865,14 @@ def build_progression_selected_task_card(
             "chapter_number": chapter_number,
             "planning_mode": planning_mode,
             "source": "progression_selected",
-            "title": str(chapter_outline.get("title", "") or "").strip() or str(selected_option.get("title", "") or "").strip(),
-            "summary": str(chapter_outline.get("summary", "") or "").strip() or str(selected_option.get("summary", "") or "").strip(),
-            "goal": str(chapter_outline.get("goal", "") or "").strip() or str(selected_option.get("summary", "") or "").strip(),
-            "key_events": chapter_outline.get("key_events") or selected_option.get("key_events") or [],
+            "title": (
+                str(selected_option.get("title", "") or "").strip()
+                or str(baseline.get("title", "") or "").strip()
+                or str(chapter_outline.get("title", "") or "").strip()
+            ),
+            "summary": summary,
+            "goal": goal,
+            "key_events": key_events,
             "volume_title": str(volume.get("title", "") or "").strip(),
             "volume_goal": str(volume.get("story_goal", "") or "").strip(),
             "writer_guidance": "\n".join(part for part in guidance_parts if part),

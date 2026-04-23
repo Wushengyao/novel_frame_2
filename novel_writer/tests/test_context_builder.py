@@ -379,6 +379,8 @@ class ContextBuilderTests(unittest.TestCase):
             )
             self.assertIn("更早相关记忆", progression_prompt)
             self.assertIn("氧气瓶", progression_context["sections"]["retrieved_memory"])
+            self.assertNotIn("why_now", progression_prompt)
+            self.assertNotIn("chapter_outline", progression_prompt)
 
     def test_summary_context_includes_completed_task_and_prompt_guides_next_goal_forward(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

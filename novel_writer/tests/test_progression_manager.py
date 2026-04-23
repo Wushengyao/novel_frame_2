@@ -29,45 +29,24 @@ class ProgressionManagerTests(unittest.TestCase):
                     "option_id": "option_1",
                     "title": "A",
                     "summary": "A",
-                    "why_now": "A",
                     "key_events": ["1", "2"],
                     "writer_guidance": "A",
-                    "chapter_outline": {
-                        "title": "A",
-                        "summary": "A",
-                        "goal": "A",
-                        "key_events": ["1", "2"],
-                    },
                     "recommended": False,
                 },
                 {
                     "option_id": "option_2",
                     "title": "B",
                     "summary": "B",
-                    "why_now": "B",
                     "key_events": ["1", "2"],
                     "writer_guidance": "B",
-                    "chapter_outline": {
-                        "title": "B",
-                        "summary": "B",
-                        "goal": "B",
-                        "key_events": ["1", "2"],
-                    },
                     "recommended": False,
                 },
                 {
                     "option_id": "option_3",
                     "title": "C",
                     "summary": "C",
-                    "why_now": "C",
                     "key_events": ["1", "2"],
                     "writer_guidance": "C",
-                    "chapter_outline": {
-                        "title": "C",
-                        "summary": "C",
-                        "goal": "C",
-                        "key_events": ["1", "2"],
-                    },
                     "recommended": False,
                 },
             ]
@@ -93,15 +72,8 @@ class ProgressionManagerTests(unittest.TestCase):
                         "option_id": CUSTOM_PROGRESSION_OPTION_ID,
                         "title": "空白自定义项",
                         "summary": "由用户自己定义",
-                        "why_now": "用户已有明确创意",
                         "key_events": ["用户定义本章主要推进", "保持与当前状态一致"],
                         "writer_guidance": "请以用户随后填写的创意为准。",
-                        "chapter_outline": {
-                            "title": "由你填写",
-                            "summary": "由你填写",
-                            "goal": "由你填写",
-                            "key_events": ["用户填写", "系统衔接"],
-                        },
                         "recommended": False,
                         "custom": True,
                     }
@@ -170,15 +142,8 @@ class ProgressionManagerTests(unittest.TestCase):
                         "option_id": "option_1",
                         "title": "主动侦查",
                         "summary": "先外出试探",
-                        "why_now": "资源紧缺",
                         "key_events": ["试探通道", "收集情报"],
                         "writer_guidance": "让角色谨慎外出。",
-                        "chapter_outline": {
-                            "title": "试探通道",
-                            "summary": "三人开始试探外部路线。",
-                            "goal": "完成第一次谨慎侦查",
-                            "key_events": ["制定侦查计划", "短暂离开隔离区"],
-                        },
                         "recommended": True,
                     }
                 ],
@@ -200,8 +165,10 @@ class ProgressionManagerTests(unittest.TestCase):
             self.assertEqual(selection["session"]["status"], "selected")
             task_card = read_json(project_path / "task_cards" / "chapter_0001.json")
             self.assertEqual(task_card["source"], "progression_selected")
-            self.assertEqual(task_card["goal"], "完成第一次谨慎侦查")
+            self.assertEqual(task_card["summary"], "先外出试探")
+            self.assertEqual(task_card["goal"], "建立临时安全区")
             self.assertIn("用户补充细化", task_card["writer_guidance"])
+            self.assertIn("既定目标", task_card["writer_guidance"])
             self.assertEqual(task_card["derived_from"]["option_id"], "option_1")
             self.assertEqual(task_card["derived_from"]["baseline_source"], "chapter_outline")
             plot_state = read_json(project_path / "plot_state.json")
@@ -224,15 +191,8 @@ class ProgressionManagerTests(unittest.TestCase):
                         "option_id": CUSTOM_PROGRESSION_OPTION_ID,
                         "title": "空白自定义项",
                         "summary": "由用户自己定义",
-                        "why_now": "用户已有明确创意",
                         "key_events": ["用户定义本章主要推进", "保持与当前状态一致"],
                         "writer_guidance": "请以用户随后填写的创意为准。",
-                        "chapter_outline": {
-                            "title": "由你填写",
-                            "summary": "由你填写",
-                            "goal": "由你填写",
-                            "key_events": ["用户填写", "系统衔接"],
-                        },
                         "recommended": False,
                         "custom": True,
                     }

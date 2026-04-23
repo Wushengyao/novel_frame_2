@@ -1068,7 +1068,6 @@ def _render_progression_session(
         else:
             badge = '<span class="option-badge">推荐</span>' if option.get("recommended") else ""
         key_events = "".join(f"<li>{escape(item)}</li>" for item in option.get("key_events", []))
-        chapter_outline = option.get("chapter_outline") or {}
         card_class = "option-card custom-option-card" if option.get("custom") else "option-card"
         options_html.append(
             f"""
@@ -1079,8 +1078,6 @@ def _render_progression_session(
                 {badge}
               </div>
               <div class="muted">{escape(option.get('summary', ''))}</div>
-              <div class="muted">为什么现在：{escape(option.get('why_now', ''))}</div>
-              <div class="muted">本章纲要：{escape(chapter_outline.get('goal', '') or chapter_outline.get('summary', ''))}</div>
               <ul class="option-list">{key_events}</ul>
             </label>
             """
