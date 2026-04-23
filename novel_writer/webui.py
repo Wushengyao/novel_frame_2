@@ -795,6 +795,7 @@ def _enqueue_progression_job(
     runtime_config: dict,
     *,
     user_request: str = "",
+    objective_override: str = "",
     option_count: int = 4,
     runtime_overrides: dict | None = None,
     title: str | None = None,
@@ -821,6 +822,7 @@ def _enqueue_progression_job(
             str(project_path),
             runtime_config,
             user_request=user_request,
+            objective_override=objective_override,
             option_count=option_count,
             runtime_overrides=runtime_overrides,
             progress_callback=progress_callback,
@@ -1060,6 +1062,7 @@ def _render_progression_session(
 
     options_html = []
     recommended_option_id = str(session.get("recommended_option_id", "") or "").strip()
+    session_objective = str(session.get("objective", "") or "").strip()
     for index, option in enumerate(session.get("options", []), start=1):
         option_id = str(option.get("option_id", "") or "").strip()
         checked_attr = ' checked' if option_id == recommended_option_id else ""
@@ -1067,7 +1070,9 @@ def _render_progression_session(
             badge = '<span class="option-badge">自定义</span>'
         else:
             badge = '<span class="option-badge">推荐</span>' if option.get("recommended") else ""
-        key_events = "".join(f"<li>{escape(item)}</li>" for item in option.get("key_events", []))
+        plan_summary = str(option.get("plan_summary", "") or option.get("summary", "") or "").strip()
+        plan_steps = option.get("plan_steps") or option.get("key_events") or []
+        key_events = "".join(f"<li>{escape(item)}</li>" for item in plan_steps)
         card_class = "option-card custom-option-card" if option.get("custom") else "option-card"
         options_html.append(
             f"""
@@ -1077,7 +1082,7 @@ def _render_progression_session(
                 <strong>{index}. {escape(option.get('title', ''))}</strong>
                 {badge}
               </div>
-              <div class="muted">{escape(option.get('summary', ''))}</div>
+              <div class="muted">{escape(plan_summary)}</div>
               <ul class="option-list">{key_events}</ul>
             </label>
             """
@@ -1088,6 +1093,7 @@ def _render_progression_session(
     <div class="option-session-meta">
       <div class="muted">当前会话：{escape(session.get('session_id', ''))}</div>
       <div class="muted">目标第 {escape(str(session.get('target_chapter_number', '')))} 章</div>
+      <div class="muted">本组 plan 基于 objective：{escape(session_objective or '暂无')}</div>
     </div>
     <form method="post" action="/project/{escape(project_id)}/continue-guided">
       <fieldset{disabled_attr}>
@@ -1098,7 +1104,7 @@ def _render_progression_session(
         <label>补充修改 / 自定义创意
           <textarea name="progression_feedback" placeholder="如果你选了上面的空白自定义项，请在这里直接写这一章想看的创意与情节；如果你选的是普通方案，这里就作为微调补充。"></textarea>
         </label>
-        <div class="muted">选择“空白自定义项”后，这段输入会直接作为当前章的主任务；选择普通方案时，它只会作为微调补充。</div>
+        <div class="muted">选择“空白自定义项”后，这段输入会直接作为当前章的执行 plan；选择普通方案时，它只会作为微调补充，不能改写 objective。</div>
         <button type="submit">按所选方案续写下一章</button>
       </fieldset>
     </form>
@@ -1118,7 +1124,10 @@ def _render_effective_task_summary(task_card: dict | None) -> str:
         "freeform": "来自自由续写兜底任务",
     }
     source_label = source_label_map.get(source, source or "未知来源")
-    key_events = "".join(f"<li>{escape(item)}</li>" for item in task_card.get("key_events", []))
+    objective = str(task_card.get("objective", "") or task_card.get("goal", "") or "").strip()
+    plan_summary = str(task_card.get("plan_summary", "") or task_card.get("summary", "") or "").strip()
+    plan_steps = task_card.get("plan_steps") or task_card.get("key_events") or []
+    key_events = "".join(f"<li>{escape(item)}</li>" for item in plan_steps)
     derived = task_card.get("derived_from") or {}
     derived_text = ""
     if source == "progression_selected" and derived:
@@ -1132,16 +1141,16 @@ def _render_effective_task_summary(task_card: dict | None) -> str:
     <div class="task-summary-card">
       <div class="option-panel-head">
         <div>
-          <h3>有效当前章任务</h3>
+          <h3>有效当前章任务卡</h3>
           <div class="muted">{escape(source_label)}</div>
           {derived_text}
         </div>
         <span class="pill">第 {escape(str(task_card.get('chapter_number', '')))} 章</span>
       </div>
-      <p><strong>当前章目标：</strong>{escape(task_card.get("goal", "") or "暂无")}</p>
-      <p><strong>当前章摘要：</strong>{escape(task_card.get("summary", "") or "暂无")}</p>
+      <p><strong>当前章 objective：</strong>{escape(objective or "暂无")}</p>
+      <p><strong>当前章 plan：</strong>{escape(plan_summary or "暂无")}</p>
       <p><strong>卷目标：</strong>{escape(task_card.get("volume_goal", "") or "暂无")}</p>
-      <div class="muted"><strong>本章关键事件：</strong></div>
+      <div class="muted"><strong>计划步骤：</strong></div>
       <ul class="option-list">{key_events or '<li>暂无</li>'}</ul>
     </div>
     """
@@ -3225,7 +3234,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               </p>
               <div class="project-snapshot">
                 <p><strong>状态快照：</strong>{escape(snapshot_text)}</p>
-                <p><strong>当前章任务：</strong>{escape(effective_task.get("goal", "") or "暂无")}</p>
+                <p><strong>当前章 objective：</strong>{escape(effective_task.get("objective", "") or effective_task.get("goal", "") or "暂无")}</p>
                 <p><strong>卷目标：</strong>{escape(effective_task.get("volume_goal", "") or "暂无")}</p>
                 <p><strong>live-state 下一目标：</strong>{escape(plot_state.get("next_chapter_goal", "") or "暂无")}</p>
                 <p><strong>当前位置：</strong>{escape(plot_state.get("current_location", "") or "未知")}</p>
@@ -3354,6 +3363,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                       <input type="text" value="固定为下一章" disabled>
                     </label>
                   </div>
+                  <label>本章 objective（可修改）
+                    <textarea name="objective" placeholder="例如：建立临时安全区，并确认是否需要离开隔离区搜集物资。">{escape(effective_task.get("objective", "") or effective_task.get("goal", "") or "")}</textarea>
+                  </label>
                   <label>想看的方向 / 倾向
                     <textarea name="user_request" placeholder="例如：我想看一次更主动的外出搜集，但不要一下把大事件写完。"></textarea>
                   </label>
@@ -3521,6 +3533,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 project_id,
                 project_path,
                 runtime_config,
+                objective_override=(form.get("objective") or "").strip(),
                 user_request=(form.get("user_request") or "").strip(),
                 option_count=int(form.get("option_count") or "4"),
                 runtime_overrides=runtime_overrides,

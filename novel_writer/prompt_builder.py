@@ -529,15 +529,15 @@ def build_progression_options_prompt(
 2. 只针对下一章给方案，不要把两三章后的核心剧情提前塞进来
 3. 必须返回恰好 {option_total} 个互斥选项，且只能有一个 `recommended=true`
 4. `recommended_option_id` 必须与唯一的推荐项一致
-5. 方案要尊重既有设定、当前状态、最近场景和下一章任务卡，只能细化或调整重心
+5. 方案要尊重既有设定、当前状态、最近场景和下一章任务卡；先把任务卡里的 `objective` 当作硬约束，再基于它设计不同 plan
 6. 选项只改变这一章的切入角度、推进顺序和强调重点，不要另起一个与当前任务卡冲突的新目标
-7. 每个选项都必须包含 `option_id`、`title`、`summary`、`key_events`、`writer_guidance`、`recommended`
-8. `key_events` 给 2 到 5 个条目，写本章真正会发生的推进节点
-9. `summary` 要描述这一章会怎么推进；`writer_guidance` 只补充写法与强调点，不要偷偷改写章节主目标
+7. 每个选项都必须包含 `option_id`、`title`、`plan_summary`、`plan_steps`、`plan_guidance`、`recommended`
+8. `plan_steps` 给 2 到 5 个条目，写本章真正会发生的推进节点
+9. `plan_summary` 要描述这一章会怎么推进；`plan_guidance` 只补充写法与强调点，不要偷偷改写章节主目标
 10. 不要输出解释，不要输出 Markdown
 
 输出 JSON 骨架：
-{{"recommended_option_id":"option_1","options":[{{"option_id":"option_1","title":"","summary":"","key_events":["",""],"writer_guidance":"","recommended":true}}]}}
+{{"recommended_option_id":"option_1","options":[{{"option_id":"option_1","title":"","plan_summary":"","plan_steps":["",""],"plan_guidance":"","recommended":true}}]}}
 """
 
     return f"""你是长篇连载小说的剧情推进顾问。请为“下一章”设计若干互斥但都合理的推进方案，供用户二选一或多选一中的单选。
@@ -573,17 +573,17 @@ def build_progression_options_prompt(
 1. 输出必须是合法 JSON
 2. 必须只针对“下一章”给方案，不要把两三章后的核心剧情提前塞进来
 3. 必须返回恰好 {option_count} 个互斥选项，每个选项都应代表这一章的不同重心或不同推进路径
-4. 方案要尊重既有设定、最近正文、当前剧情状态和下一章上下文，不要推翻已有章纲，只能细化和调整重心
+4. 方案要尊重既有设定、最近正文、当前剧情状态和下一章上下文，不要推翻已有章纲；先把当前任务卡里的 `objective` 当作硬约束，再基于它设计不同 plan
 5. 选项只改变这一章怎么推进，不要另起一个与当前任务卡或章纲冲突的新目标
 6. 每个选项都必须包含：
    - `option_id`
    - `title`
-   - `summary`
-   - `key_events`
-   - `writer_guidance`
+   - `plan_summary`
+   - `plan_steps`
+   - `plan_guidance`
    - `recommended`
-7. `summary` 描述本章会怎么推进；`writer_guidance` 只补充写法、氛围和强调点，不要改写章节主目标
-8. `key_events` 要给出 2 到 5 个条目，写本章会实际发生的关键推进
+7. `plan_summary` 描述本章会怎么推进；`plan_guidance` 只补充写法、氛围和强调点，不要改写章节主目标
+8. `plan_steps` 要给出 2 到 5 个条目，写本章会实际发生的关键推进
 9. 只能有一个选项 `recommended=true`，并且 `recommended_option_id` 必须与该选项一致
 10. 不要输出解释，不要输出 Markdown
 
@@ -594,9 +594,9 @@ def build_progression_options_prompt(
     {{
       "option_id": "option_1",
       "title": "",
-      "summary": "",
-      "key_events": [],
-      "writer_guidance": "",
+      "plan_summary": "",
+      "plan_steps": [],
+      "plan_guidance": "",
       "recommended": true
     }}
   ]

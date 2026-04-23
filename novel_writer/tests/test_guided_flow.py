@@ -23,33 +23,33 @@ class GuidedFlowTests(unittest.TestCase):
                     {
                         "option_id": "option_1",
                         "title": "加固据点",
-                        "summary": "先留在隔离区内强化防线。",
-                        "key_events": ["检查门锁", "分配值守"],
-                        "writer_guidance": "让三人先做防御准备。",
+                        "plan_summary": "先留在隔离区内强化防线。",
+                        "plan_steps": ["检查门锁", "分配值守"],
+                        "plan_guidance": "让三人先做防御准备。",
                         "recommended": False,
                     },
                     {
                         "option_id": "option_2",
                         "title": "试探外部走廊",
-                        "summary": "谨慎离开隔离区进行首次短程侦查。",
-                        "key_events": ["规划撤退路线", "短暂外出试探"],
-                        "writer_guidance": "让三人完成一次短程试探，注意紧张感与配合。",
+                        "plan_summary": "谨慎离开隔离区进行首次短程侦查。",
+                        "plan_steps": ["规划撤退路线", "短暂外出试探"],
+                        "plan_guidance": "让三人完成一次短程试探，注意紧张感与配合。",
                         "recommended": True,
                     },
                     {
                         "option_id": "option_3",
                         "title": "修复设备",
-                        "summary": "先修复传感设备。",
-                        "key_events": ["拆开设备", "测试线路"],
-                        "writer_guidance": "把重点放在技术协作上。",
+                        "plan_summary": "先修复传感设备。",
+                        "plan_steps": ["拆开设备", "测试线路"],
+                        "plan_guidance": "把重点放在技术协作上。",
                         "recommended": False,
                     },
                     {
                         "option_id": "option_4",
                         "title": "内部磨合",
-                        "summary": "先强化信任。",
-                        "key_events": ["明确分工", "彼此试探"],
-                        "writer_guidance": "增加人物互动与心理描写。",
+                        "plan_summary": "先强化信任。",
+                        "plan_steps": ["明确分工", "彼此试探"],
+                        "plan_guidance": "增加人物互动与心理描写。",
                         "recommended": False,
                     },
                 ],
@@ -69,6 +69,7 @@ class GuidedFlowTests(unittest.TestCase):
                 session = generate_progression_options(
                     str(project_path),
                     runtime_config("chapter"),
+                    objective_override="建立临时安全区，并确认是否需要进一步深入走廊",
                     user_request="我想看一次更谨慎的外出试探",
                     option_count=4,
                 )
@@ -77,6 +78,7 @@ class GuidedFlowTests(unittest.TestCase):
             self.assertEqual(progression_call_kwargs["log_context"]["phase"], "outline")
             self.assertEqual(progression_call_kwargs["log_context"]["option_count"], 4)
             self.assertEqual(session["recommended_option_id"], "option_2")
+            self.assertEqual(session["objective"], "建立临时安全区，并确认是否需要进一步深入走廊")
             self.assertTrue(any(option.get("custom") for option in session["options"]))
             self.assertEqual(session["options"][-1]["option_id"], CUSTOM_PROGRESSION_OPTION_ID)
 
@@ -110,6 +112,7 @@ class GuidedFlowTests(unittest.TestCase):
             self.assertEqual(outlines["volumes"][0]["chapters"][0]["goal"], "建立临时安全区")
             task_card = read_json(project_path / "task_cards" / "chapter_0001.json")
             self.assertEqual(task_card["source"], "progression_selected")
+            self.assertEqual(task_card["objective"], "建立临时安全区，并确认是否需要进一步深入走廊")
             self.assertTrue((project_path / "snapshots" / "chapter_0001").exists())
 
     def test_cli_rejects_guided_batch_count_greater_than_one(self) -> None:

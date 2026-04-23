@@ -107,21 +107,22 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             "source_user_request": "先看试探",
             "runtime_overrides": {},
             "recommended_option_id": "option_1",
+            "objective": "建立临时安全区，并确认是否需要外出搜集物资",
             "options": [
                 {
                     "option_id": "option_1",
                     "title": "先探查走廊",
-                    "summary": "三人离开隔离区短程试探。",
-                    "key_events": ["规划路线", "短程离开"],
-                    "writer_guidance": "保持谨慎与紧张感。",
+                    "plan_summary": "三人离开隔离区短程试探。",
+                    "plan_steps": ["规划路线", "短程离开"],
+                    "plan_guidance": "保持谨慎与紧张感。",
                     "recommended": True,
                 },
                 {
                     "option_id": CUSTOM_PROGRESSION_OPTION_ID,
                     "title": "空白自定义项",
-                    "summary": "不采用现有候选方案，改由你自己定义。",
-                    "key_events": ["用户自定义本章推进", "系统保持状态与卷目标一致"],
-                    "writer_guidance": "请把用户填写的创意作为本章主任务。",
+                    "plan_summary": "不采用现有候选方案，改由你自己定义。",
+                    "plan_steps": ["用户自定义本章推进", "系统保持状态与卷目标一致"],
+                    "plan_guidance": "请把用户填写的创意作为本章执行 plan。",
                     "recommended": False,
                     "custom": True,
                 },
@@ -130,8 +131,10 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             "selected_option_id": "",
             "selection_feedback": "",
         }
+        called = {}
 
         def fake_generate(*args, **kwargs):
+            called["kwargs"] = kwargs
             (self.project_path / "progression_sessions").mkdir(exist_ok=True)
             (self.project_path / "progression_sessions" / "progression_session_generated.json").write_text(
                 json.dumps(session_payload, ensure_ascii=False, indent=2),
@@ -142,11 +145,15 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         with patch("webui.generate_progression_options", side_effect=fake_generate):
             response = self._post(
                 f"/project/web/progression-options",
-                "option_count=4&planning_mode=chapter&user_request=%E5%85%88%E7%9C%8B%E8%AF%95%E6%8E%A2",
+                "option_count=4&planning_mode=chapter&objective=%E5%BB%BA%E7%AB%8B%E4%B8%B4%E6%97%B6%E5%AE%89%E5%85%A8%E5%8C%BA%EF%BC%8C%E5%B9%B6%E7%A1%AE%E8%AE%A4%E6%98%AF%E5%90%A6%E9%9C%80%E8%A6%81%E5%A4%96%E5%87%BA%E6%90%9C%E9%9B%86%E7%89%A9%E8%B5%84&user_request=%E5%85%88%E7%9C%8B%E8%AF%95%E6%8E%A2",
             )
 
         self.assertEqual(response.status, 303)
         self.assertIn("/project/web", response.getheader("Location"))
+        self.assertEqual(
+            called["kwargs"]["objective_override"],
+            "建立临时安全区，并确认是否需要外出搜集物资",
+        )
         jobs = webui.JOB_REGISTRY.list_jobs(project_id="web", active_only=False, limit=8)
         progression_jobs = [job for job in jobs if job.get("kind") == "progression_options"]
         self.assertEqual(len(progression_jobs), 1)
@@ -157,7 +164,9 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("先探查走廊", page.body)
         self.assertIn("空白自定义项", page.body)
         self.assertIn("project-layout", page.body)
-        self.assertIn("当前章任务", page.body)
+        self.assertIn("有效当前章任务卡", page.body)
+        self.assertIn("本章 objective（可修改）", page.body)
+        self.assertIn("本组 plan 基于 objective", page.body)
         self.assertIn("卷目标", page.body)
         self.assertNotIn("为什么现在", page.body)
         self.assertNotIn("本章纲要", page.body)
@@ -176,17 +185,17 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                 {
                     "option_id": "option_1",
                     "title": "先探查走廊",
-                    "summary": "短程试探",
-                    "key_events": ["规划路线", "短程离开"],
-                    "writer_guidance": "保持谨慎。",
+                    "plan_summary": "短程试探",
+                    "plan_steps": ["规划路线", "短程离开"],
+                    "plan_guidance": "保持谨慎。",
                     "recommended": True,
                 },
                 {
                     "option_id": CUSTOM_PROGRESSION_OPTION_ID,
                     "title": "空白自定义项",
-                    "summary": "由用户自己定义",
-                    "key_events": ["用户自定义本章推进", "系统保持状态与卷目标一致"],
-                    "writer_guidance": "请把用户填写的创意作为本章主任务。",
+                    "plan_summary": "由用户自己定义",
+                    "plan_steps": ["用户自定义本章推进", "系统保持状态与卷目标一致"],
+                    "plan_guidance": "请把用户填写的创意作为本章执行 plan。",
                     "recommended": False,
                     "custom": True,
                 },
@@ -232,9 +241,9 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                 {
                     "option_id": CUSTOM_PROGRESSION_OPTION_ID,
                     "title": "空白自定义项",
-                    "summary": "由用户自己定义",
-                    "key_events": ["用户自定义本章推进", "系统保持状态与卷目标一致"],
-                    "writer_guidance": "请把用户填写的创意作为本章主任务。",
+                    "plan_summary": "由用户自己定义",
+                    "plan_steps": ["用户自定义本章推进", "系统保持状态与卷目标一致"],
+                    "plan_guidance": "请把用户填写的创意作为本章执行 plan。",
                     "recommended": False,
                     "custom": True,
                 }

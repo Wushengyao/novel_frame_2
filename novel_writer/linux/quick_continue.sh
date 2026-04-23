@@ -153,6 +153,10 @@ if [[ "$CONTINUE_MODE" == "guided" ]]; then
     --config "$TEMP_CONFIG"
     --option-count "$DEFAULT_GUIDED_OPTION_COUNT"
   )
+  GUIDED_OBJECTIVE="$(prompt_optional_value "Objective override (optional)" "")"
+  if [[ -n "$GUIDED_OBJECTIVE" ]]; then
+    OPTIONS_ARGS+=(--objective "$GUIDED_OBJECTIVE")
+  fi
   if [[ -n "$USER_REQUEST" ]]; then
     OPTIONS_ARGS+=(--user-request "$USER_REQUEST")
   fi

@@ -418,9 +418,8 @@ def _print_status(project_path: str) -> None:
         planning_mode=planning_mode,
         persist=False,
     )
-    print(f"Current Chapter Goal: {effective_task.get('goal', '')}")
-    if effective_task.get("summary"):
-        print(f"Current Chapter Summary: {effective_task.get('summary', '')}")
+    print(f"Current Chapter Objective: {effective_task.get('objective', '') or effective_task.get('goal', '')}")
+    print(f"Current Chapter Plan: {effective_task.get('plan_summary', '') or effective_task.get('summary', '')}")
     if effective_task.get("source"):
         print(f"Current Task Source: {effective_task.get('source', '')}")
     if effective_task.get("volume_goal"):
@@ -532,6 +531,7 @@ def main() -> None:
     options_parser = subparsers.add_parser("options", help="Generate guided next-chapter progression options")
     options_parser.add_argument("--project", required=True, help="Path to novel_project")
     options_parser.add_argument("--config", help="Optional config.json to override saved LLM settings")
+    options_parser.add_argument("--objective", default="", help="Optional override for the next chapter objective before generating plans")
     options_parser.add_argument("--user-request", default="", help="Optional preference for guided options")
     options_parser.add_argument("--option-count", type=int, default=4, choices=(3, 4, 5), help="How many model-generated options to generate; a blank custom option is always added")
     options_parser.add_argument(
@@ -736,12 +736,14 @@ def main() -> None:
         session = generate_progression_options(
             args.project,
             config,
+            objective_override=args.objective,
             user_request=args.user_request,
             option_count=args.option_count,
             runtime_overrides={"planning_mode": args.planning_mode} if args.planning_mode else None,
         )
         print(f"Session ID: {session.get('session_id', '')}")
         print(f"Target Chapter: {session.get('target_chapter_number', '')}")
+        print(f"Objective: {session.get('objective', '')}")
         print(f"Recommended Option: {session.get('recommended_option_id', '')}")
         for index, option in enumerate(session.get("options", []), start=1):
             if option.get("custom"):
@@ -749,20 +751,13 @@ def main() -> None:
             else:
                 marker = " [recommended]" if option.get("recommended") else ""
             print(f"Option {index} [{option.get('option_id', '')}]{marker}: {option.get('title', '')}")
-            print(f"  Summary: {option.get('summary', '')}")
-            print(f"  Why Now: {option.get('why_now', '')}")
-            print(f"  Key Events: {'; '.join(option.get('key_events', []))}")
-            print(f"  Writer Guidance: {option.get('writer_guidance', '')}")
-            outline = option.get("chapter_outline") or {}
-            print(
-                "  Chapter Outline: "
-                f"title={outline.get('title', '')}; "
-                f"goal={outline.get('goal', '')}"
-            )
+            print(f"  Plan Summary: {option.get('plan_summary', '') or option.get('summary', '')}")
+            print(f"  Plan Steps: {'; '.join(option.get('plan_steps', []) or option.get('key_events', []))}")
+            print(f"  Plan Guidance: {option.get('plan_guidance', '') or option.get('writer_guidance', '')}")
         print(
             "Tip: choose "
             f"`{CUSTOM_PROGRESSION_OPTION_ID}`"
-            " (or its option number) and pass `--progression-feedback` to write a fully custom chapter idea."
+            " (or its option number) and pass `--progression-feedback` to write a fully custom chapter plan."
         )
         return
 

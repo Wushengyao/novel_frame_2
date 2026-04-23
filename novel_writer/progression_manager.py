@@ -13,6 +13,7 @@ from context_builder import (
     build_custom_progression_task_card,
     build_progression_context,
     build_progression_selected_task_card,
+    override_task_card_objective,
     resolve_effective_chapter_task,
 )
 from llm_client import generate_text_with_metadata
@@ -58,12 +59,18 @@ def _normalize_key_events(raw_key_events: object) -> list[str]:
 
 def _normalize_option(option: dict, fallback_id: str) -> dict:
     option_id = str(option.get("option_id") or fallback_id).strip() or fallback_id
+    plan_summary = str(option.get("plan_summary", "") or option.get("summary", "") or "").strip()
+    plan_steps = _normalize_key_events(option.get("plan_steps") or option.get("key_events", []))
+    plan_guidance = str(option.get("plan_guidance", "") or option.get("writer_guidance", "") or "").strip()
     return {
         "option_id": option_id,
         "title": str(option.get("title", "") or "").strip(),
-        "summary": str(option.get("summary", "") or "").strip(),
-        "key_events": _normalize_key_events(option.get("key_events", [])),
-        "writer_guidance": str(option.get("writer_guidance", "") or "").strip(),
+        "plan_summary": plan_summary,
+        "plan_steps": plan_steps,
+        "plan_guidance": plan_guidance,
+        "summary": plan_summary,
+        "key_events": plan_steps,
+        "writer_guidance": plan_guidance,
         "recommended": bool(option.get("recommended")),
         "custom": bool(option.get("custom")),
     }
@@ -83,9 +90,9 @@ def normalize_progression_options_response(data: dict, option_count: int) -> dic
         if not isinstance(raw_option, dict):
             raise ValueError("progression option item must be an object")
         option = _normalize_option(raw_option, fallback_id=f"option_{index}")
-        if not option["title"] or not option["summary"] or not option["writer_guidance"]:
+        if not option["title"] or not option["plan_summary"] or not option["plan_guidance"]:
             raise ValueError(f"progression option {option['option_id']} is missing required fields")
-        if len(option["key_events"]) < 2:
+        if len(option["plan_steps"]) < 2:
             raise ValueError(f"progression option {option['option_id']} must include at least 2 key_events")
         if option["option_id"] in option_ids:
             raise ValueError("progression options contain duplicate option_id values")
@@ -115,12 +122,12 @@ def build_custom_progression_option() -> dict:
     return {
         "option_id": CUSTOM_PROGRESSION_OPTION_ID,
         "title": "空白自定义项",
-        "summary": "不采用上面的候选方案，改由你自己定义这一章想看的创意和情节。",
-        "key_events": [
+        "plan_summary": "不采用上面的候选方案，改由你自己定义这一章想看的创意和情节。",
+        "plan_steps": [
             "由你在下方填写这一章真正想发生的内容。",
-            "系统会保留当前状态和卷目标作为上位约束。",
+            "系统会保留当前 objective、剧情状态和卷目标作为上位约束。",
         ],
-        "writer_guidance": "请把用户随后填写的自定义创意作为本章主任务。",
+        "plan_guidance": "请把用户随后填写的自定义创意作为本章执行 plan，不要改写 objective。",
         "recommended": False,
         "custom": True,
     }
@@ -197,6 +204,7 @@ def generate_progression_options(
     config: dict,
     *,
     user_request: str = "",
+    objective_override: str = "",
     option_count: int = DEFAULT_OPTION_COUNT,
     runtime_overrides: dict | None = None,
     progress_callback=None,
@@ -215,12 +223,21 @@ def generate_progression_options(
     recent_text = get_last_chapter_text(project_path)
     if not recent_text:
         recent_text = "这是开篇前状态。请围绕第一章如何自然开场来给出推进选项。"
+    base_task = resolve_effective_chapter_task(
+        project_path,
+        project_data,
+        next_context,
+        planning_mode=planning_mode,
+        persist=False,
+    )
+    task_card = override_task_card_objective(base_task, objective_override)
     prompt_context = build_progression_context(
         project_path,
         project_data,
         next_context,
         recent_text,
         user_request=user_request,
+        task_card=task_card,
         option_count=count,
         planning_mode=planning_mode,
     )
@@ -255,6 +272,9 @@ def generate_progression_options(
     request_context = user_request.strip()
     if request_context:
         log_context["user_request"] = request_context[:280]
+    objective_context = str(task_card.get("objective", "") or task_card.get("goal", "") or "").strip()
+    if objective_context:
+        log_context["objective"] = objective_context[:180]
 
     try:
         response_text, metadata = generate_text_with_metadata(
@@ -285,6 +305,7 @@ def generate_progression_options(
         "target_chapter_number": current_chapter_count + 1,
         "planning_mode": planning_mode,
         "source_user_request": user_request.strip(),
+        "objective": objective_context,
         "runtime_overrides": sanitize_runtime_overrides(runtime_overrides),
         "recommended_option_id": normalized["recommended_option_id"],
         "options": normalized["options"] + [build_custom_progression_option()],
@@ -346,6 +367,9 @@ def resolve_progression_selection(
         planning_mode=planning_mode,
         persist=False,
     )
+    session_objective = str(session.get("objective", "") or "").strip()
+    if session_objective:
+        baseline_task = override_task_card_objective(baseline_task, session_objective)
     if selected.get("custom"):
         selected_task_card = build_custom_progression_task_card(
             project_path,

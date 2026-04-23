@@ -28,25 +28,25 @@ class ProgressionManagerTests(unittest.TestCase):
                 {
                     "option_id": "option_1",
                     "title": "A",
-                    "summary": "A",
-                    "key_events": ["1", "2"],
-                    "writer_guidance": "A",
+                    "plan_summary": "A",
+                    "plan_steps": ["1", "2"],
+                    "plan_guidance": "A",
                     "recommended": False,
                 },
                 {
                     "option_id": "option_2",
                     "title": "B",
-                    "summary": "B",
-                    "key_events": ["1", "2"],
-                    "writer_guidance": "B",
+                    "plan_summary": "B",
+                    "plan_steps": ["1", "2"],
+                    "plan_guidance": "B",
                     "recommended": False,
                 },
                 {
                     "option_id": "option_3",
                     "title": "C",
-                    "summary": "C",
-                    "key_events": ["1", "2"],
-                    "writer_guidance": "C",
+                    "plan_summary": "C",
+                    "plan_steps": ["1", "2"],
+                    "plan_guidance": "C",
                     "recommended": False,
                 },
             ]
@@ -67,13 +67,14 @@ class ProgressionManagerTests(unittest.TestCase):
                 "source_user_request": "",
                 "runtime_overrides": {},
                 "recommended_option_id": "option_1",
+                "objective": "建立临时安全区",
                 "options": [
                     {
                         "option_id": CUSTOM_PROGRESSION_OPTION_ID,
                         "title": "空白自定义项",
-                        "summary": "由用户自己定义",
-                        "key_events": ["用户定义本章主要推进", "保持与当前状态一致"],
-                        "writer_guidance": "请以用户随后填写的创意为准。",
+                        "plan_summary": "由用户自己定义",
+                        "plan_steps": ["用户定义本章主要推进", "保持与当前状态一致"],
+                        "plan_guidance": "请以用户随后填写的创意为准。",
                         "recommended": False,
                         "custom": True,
                     }
@@ -137,13 +138,14 @@ class ProgressionManagerTests(unittest.TestCase):
                 "source_user_request": "先侦查",
                 "runtime_overrides": {},
                 "recommended_option_id": "option_1",
+                "objective": "建立临时安全区，并确认是否需要离开隔离区搜集物资",
                 "options": [
                     {
                         "option_id": "option_1",
                         "title": "主动侦查",
-                        "summary": "先外出试探",
-                        "key_events": ["试探通道", "收集情报"],
-                        "writer_guidance": "让角色谨慎外出。",
+                        "plan_summary": "先外出试探",
+                        "plan_steps": ["试探通道", "收集情报"],
+                        "plan_guidance": "让角色谨慎外出。",
                         "recommended": True,
                     }
                 ],
@@ -165,10 +167,12 @@ class ProgressionManagerTests(unittest.TestCase):
             self.assertEqual(selection["session"]["status"], "selected")
             task_card = read_json(project_path / "task_cards" / "chapter_0001.json")
             self.assertEqual(task_card["source"], "progression_selected")
+            self.assertEqual(task_card["plan_summary"], "先外出试探")
             self.assertEqual(task_card["summary"], "先外出试探")
-            self.assertEqual(task_card["goal"], "建立临时安全区")
+            self.assertEqual(task_card["objective"], "建立临时安全区，并确认是否需要离开隔离区搜集物资")
+            self.assertEqual(task_card["goal"], "建立临时安全区，并确认是否需要离开隔离区搜集物资")
             self.assertIn("用户补充细化", task_card["writer_guidance"])
-            self.assertIn("既定目标", task_card["writer_guidance"])
+            self.assertIn("本章仍需完成 objective", task_card["writer_guidance"])
             self.assertEqual(task_card["derived_from"]["option_id"], "option_1")
             self.assertEqual(task_card["derived_from"]["baseline_source"], "chapter_outline")
             plot_state = read_json(project_path / "plot_state.json")
@@ -186,13 +190,14 @@ class ProgressionManagerTests(unittest.TestCase):
                 "source_user_request": "",
                 "runtime_overrides": {},
                 "recommended_option_id": "option_1",
+                "objective": "建立临时安全区，并确认是否需要外出搜集物资",
                 "options": [
                     {
                         "option_id": CUSTOM_PROGRESSION_OPTION_ID,
                         "title": "空白自定义项",
-                        "summary": "由用户自己定义",
-                        "key_events": ["用户定义本章主要推进", "保持与当前状态一致"],
-                        "writer_guidance": "请以用户随后填写的创意为准。",
+                        "plan_summary": "由用户自己定义",
+                        "plan_steps": ["用户定义本章主要推进", "保持与当前状态一致"],
+                        "plan_guidance": "请以用户随后填写的创意为准。",
                         "recommended": False,
                         "custom": True,
                     }
@@ -213,8 +218,9 @@ class ProgressionManagerTests(unittest.TestCase):
             task_card = read_json(project_path / "task_cards" / "chapter_0001.json")
             self.assertEqual(task_card["source"], "progression_selected")
             self.assertEqual(task_card["derived_from"]["option_id"], CUSTOM_PROGRESSION_OPTION_ID)
-            self.assertIn("主控区边缘搜集药品", task_card["summary"])
-            self.assertIn("用户自定义创意", task_card["writer_guidance"])
+            self.assertEqual(task_card["objective"], "建立临时安全区，并确认是否需要外出搜集物资")
+            self.assertIn("主控区边缘搜集药品", task_card["plan_summary"])
+            self.assertIn("用户自定义 plan", task_card["writer_guidance"])
 
 
 if __name__ == "__main__":

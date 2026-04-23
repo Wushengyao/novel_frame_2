@@ -379,8 +379,10 @@ class ContextBuilderTests(unittest.TestCase):
             )
             self.assertIn("更早相关记忆", progression_prompt)
             self.assertIn("氧气瓶", progression_context["sections"]["retrieved_memory"])
+            self.assertIn("本章 objective", progression_context["sections"]["chapter_task"])
             self.assertNotIn("why_now", progression_prompt)
             self.assertNotIn("chapter_outline", progression_prompt)
+            self.assertIn("plan_summary", progression_prompt)
 
     def test_summary_context_includes_completed_task_and_prompt_guides_next_goal_forward(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -409,7 +411,7 @@ class ContextBuilderTests(unittest.TestCase):
             prompt = build_summary_prompt(context, "新章节正文")
 
             self.assertIn("本章写前任务卡", prompt)
-            self.assertIn("叙事目标: 建立临时安全区", context["sections"]["completed_task"])
+            self.assertIn("本章 objective: 建立临时安全区", context["sections"]["completed_task"])
             self.assertIn("不要直接重复任务卡原句", prompt)
 
     def test_compact_prompts_stay_within_budget_targets(self) -> None:

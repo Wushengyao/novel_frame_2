@@ -126,6 +126,10 @@ try {
 			"--config", $tempConfig,
 			"--option-count", "$DefaultGuidedOptionCount"
 		)
+		$guidedObjective = Prompt-OptionalValue -PromptText "Objective override (optional)" -DefaultValue ""
+		if ($guidedObjective) {
+			$optionsArgs += @("--objective", $guidedObjective)
+		}
 		if ($UserRequest) {
 			$optionsArgs += @("--user-request", $UserRequest)
 		}

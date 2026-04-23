@@ -651,28 +651,32 @@ def _normalize_task_card_payload(
         "planning_mode": normalized_mode,
         "source": source,
         "title": str(task_card.get("title", "") or "").strip() or f"第 {chapter_number} 章任务",
-        "summary": str(task_card.get("summary", "") or "").strip(),
-        "goal": str(task_card.get("goal", "") or "").strip(),
-        "key_events": _normalize_string_list(task_card.get("key_events"), max_items=5),
+        "objective": str(task_card.get("objective", "") or task_card.get("goal", "") or "").strip(),
+        "plan_summary": str(task_card.get("plan_summary", "") or task_card.get("summary", "") or "").strip(),
+        "plan_steps": _normalize_string_list(task_card.get("plan_steps") or task_card.get("key_events"), max_items=5),
+        "plan_guidance": str(task_card.get("plan_guidance", "") or task_card.get("writer_guidance", "") or "").strip(),
         "volume_title": str(task_card.get("volume_title", "") or volume.get("title", "") or "").strip(),
         "volume_goal": str(task_card.get("volume_goal", "") or volume.get("story_goal", "") or "").strip(),
-        "writer_guidance": str(task_card.get("writer_guidance", "") or "").strip(),
     }
-    if not normalized["summary"]:
-        normalized["summary"] = normalized["goal"]
-    if not normalized["goal"]:
-        normalized["goal"] = normalized["summary"]
-    if normalized["summary"] and normalized["summary"] == normalized["goal"]:
-        normalized["summary"] = _synthesize_task_summary(
+    if not normalized["plan_summary"]:
+        normalized["plan_summary"] = normalized["objective"]
+    if not normalized["objective"]:
+        normalized["objective"] = normalized["plan_summary"]
+    if normalized["plan_summary"] and normalized["plan_summary"] == normalized["objective"]:
+        normalized["plan_summary"] = _synthesize_task_summary(
             title=normalized.get("title", ""),
-            goal=normalized.get("goal", ""),
-            key_events=normalized.get("key_events") or [],
+            goal=normalized.get("objective", ""),
+            key_events=normalized.get("plan_steps") or [],
             source=normalized.get("source", ""),
         )
-    normalized["summary"] = _trim_text(normalized.get("summary", ""), 220)
-    normalized["goal"] = _trim_text(normalized.get("goal", ""), 180)
-    normalized["writer_guidance"] = _trim_text(normalized.get("writer_guidance", ""), 220)
-    normalized["key_events"] = _normalize_string_list(normalized.get("key_events"), max_items=5)
+    normalized["objective"] = _trim_text(normalized.get("objective", ""), 180)
+    normalized["plan_summary"] = _trim_text(normalized.get("plan_summary", ""), 220)
+    normalized["plan_guidance"] = _trim_text(normalized.get("plan_guidance", ""), 220)
+    normalized["plan_steps"] = _normalize_string_list(normalized.get("plan_steps"), max_items=5)
+    normalized["goal"] = normalized["objective"]
+    normalized["summary"] = normalized["plan_summary"]
+    normalized["writer_guidance"] = normalized["plan_guidance"]
+    normalized["key_events"] = normalized["plan_steps"]
 
     if normalized["source"] == "progression_selected":
         derived = task_card.get("derived_from") or {}
@@ -683,6 +687,20 @@ def _normalize_task_card_payload(
             "baseline_source": str(derived.get("baseline_source", "") or "").strip(),
         }
     return normalized
+
+
+def override_task_card_objective(task_card: dict, objective: str) -> dict:
+    text = str(objective or "").strip()
+    if not text:
+        return deepcopy(task_card)
+    updated = deepcopy(task_card)
+    updated["objective"] = text
+    updated["goal"] = text
+    return _normalize_task_card_payload(
+        updated,
+        chapter_number=max(1, safe_int(updated.get("chapter_number"), 1)),
+        planning_mode=str(updated.get("planning_mode", "") or ""),
+    )
 
 
 def _build_baseline_task_card(
@@ -703,12 +721,12 @@ def _build_baseline_task_card(
             "planning_mode": normalized_mode,
             "source": "chapter_outline",
             "title": str(chapter.get("title", "") or "").strip() or f"第 {chapter_number} 章任务",
-            "summary": str(chapter.get("summary", "") or "").strip(),
-            "goal": str(chapter.get("goal", "") or "").strip(),
-            "key_events": _normalize_string_list(chapter.get("key_events"), max_items=5),
+            "objective": str(chapter.get("goal", "") or "").strip(),
+            "plan_summary": str(chapter.get("summary", "") or "").strip(),
+            "plan_steps": _normalize_string_list(chapter.get("key_events"), max_items=5),
             "volume_title": str(volume.get("title", "") or "").strip(),
             "volume_goal": str(volume.get("story_goal", "") or "").strip(),
-            "writer_guidance": "",
+            "plan_guidance": "",
         }
     else:
         chapter_summary = str(chapter.get("summary", "") or "").strip()
@@ -739,9 +757,9 @@ def _build_baseline_task_card(
             "planning_mode": normalized_mode,
             "source": source,
             "title": str(chapter.get("title", "") or "").strip() or f"第 {chapter_number} 章任务",
-            "summary": focus,
-            "goal": goal,
-            "key_events": [
+            "objective": goal,
+            "plan_summary": focus,
+            "plan_steps": [
                 "承接上一章留下的局势、情绪与未解问题。",
                 _trim_text(f"围绕“{focus}”形成当前章的主要推进。", 80),
                 "让人物关系、资源状态或外部局势出现至少一项可见变化。",
@@ -749,7 +767,7 @@ def _build_baseline_task_card(
             ],
             "volume_title": str(volume.get("title", "") or "").strip(),
             "volume_goal": str(volume.get("story_goal", "") or "").strip(),
-            "writer_guidance": f"以“{goal}”为本章核心任务，允许自由选择更有活力的推进方式。" if goal else "",
+            "plan_guidance": f"以“{goal}”为本章核心任务，允许自由选择更有活力的推进方式。" if goal else "",
         }
 
     return _normalize_task_card_payload(
@@ -809,10 +827,11 @@ def merge_task_card_guidance(task_card: dict, guidance: str, *, prefix: str = "�
         return deepcopy(task_card)
     merged = deepcopy(task_card)
     extra_line = f"{prefix}{extra}" if prefix else extra
-    base = str(merged.get("writer_guidance", "") or "").strip()
+    base = str(merged.get("plan_guidance", "") or merged.get("writer_guidance", "") or "").strip()
     if extra_line in base or extra in base:
         return merged
-    merged["writer_guidance"] = _trim_text("\n".join(part for part in (base, extra_line) if part), 220)
+    merged["plan_guidance"] = _trim_text("\n".join(part for part in (base, extra_line) if part), 220)
+    merged["writer_guidance"] = merged["plan_guidance"]
     return merged
 
 
@@ -836,29 +855,35 @@ def build_progression_selected_task_card(
     chapter_number = max(1, safe_int(chapter.get("chapter_number"), safe_int(project_data.get("project", {}).get("chapter_count"), 0) + 1))
     chapter_outline = deepcopy(selected_option.get("chapter_outline") or {})
     feedback = str(selection_feedback or "").strip()
-    summary = (
-        str(selected_option.get("summary", "") or "").strip()
-        or str(baseline.get("summary", "") or "").strip()
+    objective = (
+        str(baseline.get("objective", "") or baseline.get("goal", "") or "").strip()
+        or str(chapter_outline.get("goal", "") or "").strip()
+    )
+    plan_summary = (
+        str(selected_option.get("plan_summary", "") or selected_option.get("summary", "") or "").strip()
+        or str(baseline.get("plan_summary", "") or baseline.get("summary", "") or "").strip()
         or str(chapter_outline.get("summary", "") or "").strip()
     )
-    goal = (
-        str(baseline.get("goal", "") or "").strip()
-        or str(chapter_outline.get("goal", "") or "").strip()
-        or summary
-    )
-    key_events = (
-        selected_option.get("key_events")
+    plan_steps = (
+        selected_option.get("plan_steps")
+        or selected_option.get("key_events")
+        or baseline.get("plan_steps")
         or baseline.get("key_events")
         or chapter_outline.get("key_events")
         or []
     )
+    plan_guidance = str(
+        selected_option.get("plan_guidance", "")
+        or selected_option.get("writer_guidance", "")
+        or ""
+    ).strip()
 
-    guidance_parts = [str(selected_option.get("writer_guidance", "") or "").strip()]
-    if goal and not _is_duplicateish(summary, goal):
-        guidance_parts.append(f"本章仍需落在既定目标：{goal}")
+    guidance_parts = [plan_guidance]
+    if objective and not _is_duplicateish(plan_summary, objective):
+        guidance_parts.append(f"本章仍需完成 objective：{objective}")
     if feedback:
         guidance_parts.append(f"用户补充细化：{feedback}")
-        guidance_parts.append("这些补充只能作为已选推进方案的细化与微调，不能推翻本章核心任务。")
+        guidance_parts.append("这些补充只能作为已选 plan 的细化与微调，不能推翻本章 objective。")
 
     task_card = _normalize_task_card_payload(
         {
@@ -870,12 +895,12 @@ def build_progression_selected_task_card(
                 or str(baseline.get("title", "") or "").strip()
                 or str(chapter_outline.get("title", "") or "").strip()
             ),
-            "summary": summary,
-            "goal": goal,
-            "key_events": key_events,
+            "objective": objective or plan_summary,
+            "plan_summary": plan_summary,
+            "plan_steps": plan_steps,
             "volume_title": str(volume.get("title", "") or "").strip(),
             "volume_goal": str(volume.get("story_goal", "") or "").strip(),
-            "writer_guidance": "\n".join(part for part in guidance_parts if part),
+            "plan_guidance": "\n".join(part for part in guidance_parts if part),
             "derived_from": {
                 "session_id": session_id,
                 "option_id": option_id,
@@ -933,14 +958,17 @@ def build_custom_progression_task_card(
     custom_lines = _normalize_custom_progression_lines(custom_text)
     title_seed = custom_lines[0] if custom_lines else custom_text
     title = _trim_text(title_seed, 28) or str(baseline_task.get("title", "") or "").strip() or f"第 {chapter_number} 章自定义推进"
-    summary = _trim_text(custom_text, 220)
-    goal = _trim_text(custom_lines[0] if custom_lines else custom_text, 180)
+    objective = _trim_text(
+        str(baseline_task.get("objective", "") or baseline_task.get("goal", "") or "").strip(),
+        180,
+    ) or _trim_text(custom_lines[0] if custom_lines else custom_text, 180)
+    plan_summary = _trim_text(custom_text, 220)
 
     if len(custom_lines) >= 2:
-        key_events = [_trim_text(item, 70) for item in custom_lines[:4]]
+        plan_steps = [_trim_text(item, 70) for item in custom_lines[:4]]
     else:
-        focus = _trim_text(goal or summary, 48)
-        key_events = [
+        focus = _trim_text(objective or plan_summary, 48)
+        plan_steps = [
             _trim_text(f"围绕“{focus}”推进本章主要情节。", 70),
             "承接当前状态、人物关系与未解问题，保持前后连贯。",
             "让人物关系、局势或线索至少出现一项清晰变化。",
@@ -953,16 +981,16 @@ def build_custom_progression_task_card(
             "planning_mode": planning_mode,
             "source": "progression_selected",
             "title": title,
-            "summary": summary,
-            "goal": goal,
-            "key_events": key_events,
+            "objective": objective,
+            "plan_summary": plan_summary,
+            "plan_steps": plan_steps,
             "volume_title": str(volume.get("title", "") or baseline_task.get("volume_title", "") or "").strip(),
             "volume_goal": str(volume.get("story_goal", "") or baseline_task.get("volume_goal", "") or "").strip(),
-            "writer_guidance": "\n".join(
+            "plan_guidance": "\n".join(
                 [
-                    "本章采用用户自定义推进方案。",
-                    f"用户自定义创意：{summary}",
-                    "请优先落实这段创意，同时保持与当前状态、人物关系和卷目标一致。",
+                    "本章采用用户自定义 plan。",
+                    f"用户自定义 plan：{plan_summary}",
+                    "请优先落实这段 plan，同时保持与当前 objective、人物关系和卷目标一致。",
                 ]
             ),
             "derived_from": {
@@ -994,31 +1022,31 @@ def load_task_card(project_path: str, chapter_number: int) -> dict | None:
 
 
 def _build_chapter_task_block(task_card: dict, *, max_chars: int) -> str:
-    summary = str(task_card.get("summary", "") or "").strip()
-    goal = str(task_card.get("goal", "") or "").strip()
+    objective = str(task_card.get("objective", "") or task_card.get("goal", "") or "").strip()
+    plan_summary = str(task_card.get("plan_summary", "") or task_card.get("summary", "") or "").strip()
     volume_goal = str(task_card.get("volume_goal", "") or "").strip()
-    guidance = str(task_card.get("writer_guidance", "") or "").strip()
+    plan_guidance = str(task_card.get("plan_guidance", "") or task_card.get("writer_guidance", "") or "").strip()
     lines = []
     if task_card.get("title"):
         lines.append(f"标题: {task_card['title']}")
-    if summary:
-        lines.append(f"本章会发生: {summary}")
-    if goal and not _is_duplicateish(summary, goal):
-        lines.append(f"叙事目标: {goal}")
-    if volume_goal and not _is_duplicateish(summary, volume_goal) and not _is_duplicateish(goal, volume_goal):
+    if objective:
+        lines.append(f"本章 objective: {objective}")
+    if plan_summary and not _is_duplicateish(plan_summary, objective):
+        lines.append(f"执行计划: {plan_summary}")
+    if volume_goal and not _is_duplicateish(plan_summary, volume_goal) and not _is_duplicateish(objective, volume_goal):
         candidate = "\n".join(lines + [f"阶段目标: {volume_goal}"])
         if len(candidate) <= max_chars:
             lines.append(f"阶段目标: {volume_goal}")
-    for item in (task_card.get("key_events") or [])[:3]:
+    for item in (task_card.get("plan_steps") or task_card.get("key_events") or [])[:3]:
         candidate = "\n".join(lines + [f"- {item}"])
         if len(candidate) > max_chars:
             break
         lines.append(f"- {item}")
-    formulaic_guidance = goal and guidance.startswith(f"以“{goal}”为本章核心任务")
-    if guidance and not formulaic_guidance and not _is_duplicateish(guidance, summary) and not _is_duplicateish(guidance, goal):
-        candidate = "\n".join(lines + [f"补充偏好: {guidance}"])
+    formulaic_guidance = objective and plan_guidance.startswith(f"以“{objective}”为本章核心任务")
+    if plan_guidance and not formulaic_guidance and not _is_duplicateish(plan_guidance, plan_summary) and not _is_duplicateish(plan_guidance, objective):
+        candidate = "\n".join(lines + [f"计划补充: {plan_guidance}"])
         if len(candidate) <= max_chars:
-            lines.append(f"补充偏好: {guidance}")
+            lines.append(f"计划补充: {plan_guidance}")
     return _trim_text("\n".join(lines), max_chars)
 
 
@@ -1330,13 +1358,14 @@ def build_progression_context(
     recent_text: str,
     *,
     user_request: str,
+    task_card: dict | None = None,
     option_count: int,
     planning_mode: str,
 ) -> dict:
     plot_state = normalize_live_plot_state(project_data.get("plot_state"))
     author_intent = normalize_author_intent(project_data.get("author_intent") or ensure_author_intent(project_path))
     chapter_count = safe_int(project_data.get("project", {}).get("chapter_count"), 0)
-    task_card = resolve_effective_chapter_task(
+    effective_task = task_card or resolve_effective_chapter_task(
         project_path,
         project_data,
         next_context,
@@ -1345,7 +1374,7 @@ def build_progression_context(
     )
     sections = {
         "author_intent": _build_author_intent_block(author_intent, max_chars=560),
-        "chapter_task": _build_chapter_task_block(task_card, max_chars=480),
+        "chapter_task": _build_chapter_task_block(effective_task, max_chars=480),
         "live_state": _build_live_state_block(plot_state, max_chars=860, include_next_goal=False),
         "static_world": _compact_world_block(project_data.get("world") or {}, user_request, max_chars=500),
         "static_characters": _compact_characters_block(project_data.get("characters") or {}, plot_state, max_chars=700),
@@ -1358,13 +1387,13 @@ def build_progression_context(
     sections["retrieved_memory"] = _build_retrieved_memory_block(
         project_path,
         chapter_count,
-        task_card,
+        effective_task,
         plot_state,
         sections["recent_scene"],
         max_chars=420,
     )
     return {
-        "task_card": task_card,
+        "task_card": effective_task,
         "sections": sections,
         "section_chars": {key: len(str(value)) for key, value in sections.items() if value not in (None, "") and not isinstance(value, int)},
     }
