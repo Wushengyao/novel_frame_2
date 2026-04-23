@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
@@ -18,6 +19,7 @@ from context_builder import (
 )
 from llm_client import generate_text_with_metadata
 from project_manager import (
+    PLANNING_MODE_NONE,
     get_last_chapter_text,
     load_json,
     load_project,
@@ -25,7 +27,7 @@ from project_manager import (
     save_json,
     update_project_stats,
 )
-from prompt_builder import build_progression_options_prompt
+from prompt_builder import build_auto_objective_prompt, build_progression_options_prompt
 from runtime_config import sanitize_runtime_overrides
 
 
@@ -33,6 +35,16 @@ DEFAULT_OPTION_COUNT = 4
 ALLOWED_OPTION_COUNTS = {3, 4, 5}
 SESSION_DIR_NAME = "progression_sessions"
 CUSTOM_PROGRESSION_OPTION_ID = "custom_user_option"
+SELECTION_MODE_MANUAL = "manual"
+SELECTION_MODE_RECOMMENDED = "recommended"
+SELECTION_MODE_RANDOM = "random"
+ALLOWED_SELECTION_MODES = {
+    SELECTION_MODE_MANUAL,
+    SELECTION_MODE_RECOMMENDED,
+    SELECTION_MODE_RANDOM,
+}
+SELECTION_ORIGIN_USER = "user"
+SELECTION_ORIGIN_AUTO = "auto"
 
 
 def validate_option_count(option_count: object) -> int:
@@ -40,6 +52,19 @@ def validate_option_count(option_count: object) -> int:
     if count not in ALLOWED_OPTION_COUNTS:
         raise ValueError("option_count must be one of: 3, 4, 5.")
     return count
+
+
+def validate_selection_mode(selection_mode: object, *, allow_manual: bool = True) -> str:
+    mode = str(selection_mode or "").strip().lower()
+    if not mode:
+        return SELECTION_MODE_MANUAL if allow_manual else SELECTION_MODE_RECOMMENDED
+    if mode == SELECTION_MODE_MANUAL and not allow_manual:
+        raise ValueError("selection_mode must be one of: recommended, random.")
+    if mode not in ALLOWED_SELECTION_MODES:
+        if allow_manual:
+            raise ValueError("selection_mode must be one of: manual, recommended, random.")
+        raise ValueError("selection_mode must be one of: recommended, random.")
+    return mode
 
 
 def _session_dir(project_path: str) -> Path:
@@ -74,6 +99,10 @@ def _normalize_option(option: dict, fallback_id: str) -> dict:
         "recommended": bool(option.get("recommended")),
         "custom": bool(option.get("custom")),
     }
+
+
+def _non_custom_options(options: list[dict]) -> list[dict]:
+    return [option for option in options if not option.get("custom")]
 
 
 def normalize_progression_options_response(data: dict, option_count: int) -> dict:
@@ -131,6 +160,7 @@ def build_custom_progression_option() -> dict:
         "recommended": False,
         "custom": True,
     }
+
 
 def save_progression_session(project_path: str, session: dict) -> str:
     session_id = str(session.get("session_id", "") or "").strip()
@@ -197,6 +227,116 @@ def get_latest_active_progression_session(project_path: str) -> dict | None:
         if session.get("status") in {"pending", "selected"}:
             return session
     return None
+
+
+def auto_select_progression_option(session: dict, selection_mode: object) -> str:
+    mode = validate_selection_mode(selection_mode, allow_manual=False)
+    options = _non_custom_options(session.get("options") or [])
+    if not options:
+        raise ValueError("当前没有可用的模型推进选项可供自动选择。")
+    if mode == SELECTION_MODE_RECOMMENDED:
+        recommended_option_id = str(session.get("recommended_option_id", "") or "").strip()
+        if recommended_option_id:
+            return recommended_option_id
+        return str(options[0].get("option_id", "") or "").strip()
+    return str(random.choice(options).get("option_id", "") or "").strip()
+
+
+def generate_auto_chapter_objective(
+    project_path: str,
+    config: dict,
+    *,
+    user_request: str = "",
+    progress_callback=None,
+) -> str:
+    project_data = load_project(project_path)
+    planning_mode = resolve_planning_mode(config, project_data)
+    if planning_mode != PLANNING_MODE_NONE:
+        raise ValueError("auto objective generation only supports planning_mode=none")
+
+    target_chapter_number = safe_int(project_data["project"].get("chapter_count"), 0) + 1
+    emit_progress(progress_callback, "auto_objective_prepare", "正在为下一章提炼 objective")
+    project_data, next_context = get_next_context_for_mode(
+        project_path,
+        config,
+        planning_mode,
+        progress_callback=progress_callback,
+    )
+    recent_text = get_last_chapter_text(project_path)
+    if not recent_text:
+        recent_text = "这是开篇前状态。请围绕第一章如何自然开场来提炼 objective。"
+    base_task = resolve_effective_chapter_task(
+        project_path,
+        project_data,
+        next_context,
+        planning_mode=planning_mode,
+        persist=False,
+    )
+    prompt_context = build_progression_context(
+        project_path,
+        project_data,
+        next_context,
+        recent_text,
+        user_request=user_request,
+        task_card=base_task,
+        option_count=DEFAULT_OPTION_COUNT,
+        planning_mode=planning_mode,
+    )
+    prompt = build_auto_objective_prompt(
+        prompt_context,
+        recent_text,
+        next_context,
+        user_request=user_request,
+        planning_mode=planning_mode,
+    )
+    record_context_telemetry(
+        project_path,
+        "outline",
+        prompt_chars=len(prompt),
+        section_chars=prompt_context.get("section_chars"),
+        planning_mode=planning_mode,
+        extra={
+            "prompt_type": "auto_objective",
+            "target_chapter_number": target_chapter_number,
+        },
+    )
+
+    log_context = {
+        "phase": "outline",
+        "project_id": str(project_data["project"].get("project_id") or "").strip(),
+        "project_path": str(Path(project_path).resolve()),
+        "planning_mode": planning_mode,
+        "target_chapter_number": target_chapter_number,
+        "prompt_type": "auto_objective",
+    }
+    request_context = user_request.strip()
+    if request_context:
+        log_context["user_request"] = request_context[:280]
+
+    try:
+        response_text, metadata = generate_text_with_metadata(
+            prompt,
+            config,
+            log_context=log_context,
+        )
+        update_project_stats(
+            project_path,
+            phase="outline",
+            success=True,
+            usage=metadata.get("usage"),
+        )
+        objective_payload = extract_json_object(
+            response_text,
+            "Could not parse JSON from auto objective response.",
+        )
+        objective = str(objective_payload.get("objective", "") or "").strip()
+        if not objective:
+            raise ValueError("auto objective response missing objective")
+    except Exception:
+        update_project_stats(project_path, phase="outline", success=False, usage=None)
+        raise
+
+    return override_task_card_objective(base_task, objective).get("objective", "")
 
 
 def generate_progression_options(
@@ -310,8 +450,12 @@ def generate_progression_options(
         "recommended_option_id": normalized["recommended_option_id"],
         "options": normalized["options"] + [build_custom_progression_option()],
         "status": "pending",
+        "selection_mode": SELECTION_MODE_MANUAL,
+        "selection_origin": SELECTION_ORIGIN_USER,
         "selected_option_id": "",
         "selection_feedback": "",
+        "selected_at": "",
+        "auto_batch_request": "",
     }
     save_progression_session(project_path, session)
     log_success(
@@ -327,6 +471,9 @@ def resolve_progression_selection(
     option_ref: str,
     *,
     selection_feedback: str = "",
+    selection_mode: str = SELECTION_MODE_MANUAL,
+    selection_origin: str = SELECTION_ORIGIN_USER,
+    auto_batch_request: str = "",
 ) -> dict:
     session = ensure_fresh_progression_session(project_path, load_progression_session(project_path, session_id))
     if session.get("status") == "stale":
@@ -352,9 +499,17 @@ def resolve_progression_selection(
     if selected.get("custom") and not str(selection_feedback or "").strip():
         raise ValueError("选择空白自定义项后，必须填写你自己的创意与想看的情节。")
 
+    normalized_selection_mode = validate_selection_mode(selection_mode)
+    normalized_selection_origin = (
+        SELECTION_ORIGIN_AUTO if str(selection_origin or "").strip().lower() == SELECTION_ORIGIN_AUTO else SELECTION_ORIGIN_USER
+    )
     session["selected_option_id"] = selected["option_id"]
     session["selection_feedback"] = selection_feedback.strip()
     session["status"] = "selected"
+    session["selection_mode"] = normalized_selection_mode
+    session["selection_origin"] = normalized_selection_origin
+    session["selected_at"] = utc_now()
+    session["auto_batch_request"] = str(auto_batch_request or session.get("auto_batch_request", "") or "").strip()
     save_progression_session(project_path, session)
 
     project_data = load_project(project_path)

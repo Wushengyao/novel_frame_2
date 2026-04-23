@@ -167,6 +167,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("有效当前章任务卡", page.body)
         self.assertIn("本章 objective（可修改）", page.body)
         self.assertIn("本组 plan 基于 objective", page.body)
+        self.assertIn("选 plan 策略", page.body)
         self.assertIn("卷目标", page.body)
         self.assertNotIn("为什么现在", page.body)
         self.assertNotIn("本章纲要", page.body)
@@ -558,18 +559,20 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             "selection_feedback": "",
         }
 
-        with patch("webui.run_next_chapters", return_value=[str(self.project_path / "chapters" / "chapter_0001.md")]), patch(
+        with patch("webui.run_next_chapters", return_value=[str(self.project_path / "chapters" / "chapter_0001.md")]) as mocked_run_next_chapters, patch(
             "webui.generate_progression_options",
             return_value=session_payload,
         ):
             response = self._post(
                 "/project/web/continue",
-                "count=1&user_request=%E7%BB%A7%E7%BB%AD%E6%8E%A8%E8%BF%9B",
+                "count=1&selection_mode=random&user_request=%E7%BB%A7%E7%BB%AD%E6%8E%A8%E8%BF%9B",
             )
 
         self.assertEqual(response.status, 303)
         job_id = response.getheader("Location").rsplit("/", 1)[-1]
         self._wait_for_job_status(job_id)
+        _, run_kwargs = mocked_run_next_chapters.call_args
+        self.assertEqual(run_kwargs["selection_mode"], "random")
 
         jobs = webui.JOB_REGISTRY.list_jobs(project_id="web", active_only=False, limit=8)
         auto_jobs = [job for job in jobs if job.get("kind") == "progression_options_auto"]

@@ -4,13 +4,17 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from progression_manager import (
     CUSTOM_PROGRESSION_OPTION_ID,
+    SELECTION_MODE_RANDOM,
+    auto_select_progression_option,
     ensure_fresh_progression_session,
     normalize_progression_options_response,
     resolve_progression_selection,
     save_progression_session,
+    validate_selection_mode,
     validate_option_count,
 )
 
@@ -21,6 +25,28 @@ class ProgressionManagerTests(unittest.TestCase):
     def test_validate_option_count_rejects_unsupported_values(self) -> None:
         with self.assertRaises(ValueError):
             validate_option_count(2)
+
+    def test_validate_selection_mode_rejects_manual_for_auto_only_paths(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_selection_mode("manual", allow_manual=False)
+
+    @patch("progression_manager.random.choice")
+    def test_auto_select_progression_option_ignores_custom_option(self, mocked_choice) -> None:
+        mocked_choice.return_value = {"option_id": "option_2"}
+        session = {
+            "recommended_option_id": "option_1",
+            "options": [
+                {"option_id": "option_1", "custom": False},
+                {"option_id": "option_2", "custom": False},
+                {"option_id": CUSTOM_PROGRESSION_OPTION_ID, "custom": True},
+            ],
+        }
+
+        selected = auto_select_progression_option(session, SELECTION_MODE_RANDOM)
+
+        self.assertEqual(selected, "option_2")
+        random_candidates = mocked_choice.call_args.args[0]
+        self.assertEqual([item["option_id"] for item in random_candidates], ["option_1", "option_2"])
 
     def test_normalize_progression_options_requires_exactly_one_recommended(self) -> None:
         payload = {
@@ -160,11 +186,16 @@ class ProgressionManagerTests(unittest.TestCase):
                 "session_override",
                 "option_1",
                 selection_feedback="增加一点角色互相试探的对话",
+                selection_mode="manual",
+                selection_origin="user",
             )
 
             outlines = read_json(project_path / "outlines.json")
             self.assertEqual(outlines, original_outlines)
             self.assertEqual(selection["session"]["status"], "selected")
+            self.assertEqual(selection["session"]["selection_mode"], "manual")
+            self.assertEqual(selection["session"]["selection_origin"], "user")
+            self.assertTrue(selection["session"]["selected_at"])
             task_card = read_json(project_path / "task_cards" / "chapter_0001.json")
             self.assertEqual(task_card["source"], "progression_selected")
             self.assertEqual(task_card["plan_summary"], "先外出试探")
@@ -215,6 +246,10 @@ class ProgressionManagerTests(unittest.TestCase):
                 selection_feedback="这一章我想看他们冒险去主控区边缘搜集药品，并在途中爆发一次激烈争执。",
             )
 
+            session = read_json(project_path / "progression_sessions" / "progression_session_custom_apply.json")
+            self.assertEqual(session["selection_mode"], "manual")
+            self.assertEqual(session["selection_origin"], "user")
+            self.assertTrue(session["selected_at"])
             task_card = read_json(project_path / "task_cards" / "chapter_0001.json")
             self.assertEqual(task_card["source"], "progression_selected")
             self.assertEqual(task_card["derived_from"]["option_id"], CUSTOM_PROGRESSION_OPTION_ID)

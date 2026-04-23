@@ -164,12 +164,17 @@ try {
 		}
 	}
 	else {
+		$autoSelectionMode = Prompt-OptionalValue -PromptText "Auto plan selection mode (recommended/random)" -DefaultValue "recommended"
+		if ($autoSelectionMode -ne "random") {
+			$autoSelectionMode = "recommended"
+		}
 		$nextArgs = @(
 			(Join-Path $ProjectRoot "app.py"),
 			"next",
 			"--project", $ProjectPath,
 			"--config", $tempConfig,
-			"--count", "$ChapterCount"
+			"--count", "$ChapterCount",
+			"--selection-mode", $autoSelectionMode
 		)
 		if ($UserRequest) {
 			$nextArgs += @("--user-request", $UserRequest)

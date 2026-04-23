@@ -26,8 +26,15 @@ from outline_manager import (
     regenerate_volume_outline,
     sync_outline_progress,
 )
-from planning_service import plan_batch_chapters
-from progression_manager import CUSTOM_PROGRESSION_OPTION_ID, generate_progression_options, resolve_progression_selection
+from progression_manager import (
+    CUSTOM_PROGRESSION_OPTION_ID,
+    SELECTION_MODE_RECOMMENDED,
+    auto_select_progression_option,
+    generate_auto_chapter_objective,
+    generate_progression_options,
+    resolve_progression_selection,
+    validate_selection_mode,
+)
 from prompt_builder import build_writer_prompt
 from project_manager import (
     PLANNING_MODE_CHAPTER,
@@ -319,27 +326,16 @@ def run_next_chapters(
     config: dict,
     count: int,
     user_request: str = "",
+    *,
+    selection_mode: str = SELECTION_MODE_RECOMMENDED,
+    runtime_overrides: dict | None = None,
     progress_callback=None,
 ) -> list[str]:
     if count < 1:
         raise ValueError("count must be at least 1.")
-    starting_chapter_count = int(load_project(project_path)["project"].get("chapter_count", 0) or 0)
-    planning_mode, batch_plan = plan_batch_chapters(
-        project_path,
-        config,
-        count,
-        user_request,
-        progress_callback=progress_callback,
-    )
+    normalized_selection_mode = validate_selection_mode(selection_mode, allow_manual=False)
     chapter_paths = []
     for index in range(count):
-        target_chapter_number = starting_chapter_count + index + 1
-        plan_entry = batch_plan.get(target_chapter_number, {})
-        effective_request = (
-            str(plan_entry.get("user_request", "") or "").strip()
-            if plan_entry
-            else user_request
-        )
         emit_progress(
             progress_callback,
             "chapter_batch",
@@ -347,13 +343,47 @@ def run_next_chapters(
             current=index,
             total=count,
         )
+        planning_mode = normalize_planning_mode(config.get("planning_mode"))
+        objective_override = ""
+        if planning_mode == PLANNING_MODE_NONE:
+            objective_override = generate_auto_chapter_objective(
+                project_path,
+                config,
+                user_request=user_request,
+                progress_callback=progress_callback,
+            )
+        session = generate_progression_options(
+            project_path,
+            config,
+            user_request=user_request,
+            objective_override=objective_override,
+            runtime_overrides=runtime_overrides,
+            progress_callback=progress_callback,
+        )
+        option_ref = auto_select_progression_option(session, normalized_selection_mode)
+        selection = resolve_progression_selection(
+            project_path,
+            str(session.get("session_id", "") or "").strip(),
+            option_ref,
+            selection_mode=normalized_selection_mode,
+            selection_origin="auto",
+            auto_batch_request=user_request,
+        )
         chapter_paths.append(
             run_next_chapter(
                 project_path,
                 config,
-                user_request=effective_request,
-                chapter_outline_override=plan_entry.get("chapter_outline") if plan_entry else None,
-                planning_mode=planning_mode,
+                user_request="",
+                chapter_outline_override=None,
+                planning_mode=selection.get("planning_mode"),
+                log_context={
+                    "phase": "writer",
+                    "source": "run_next_chapters_auto",
+                    "auto_selection_mode": normalized_selection_mode,
+                    "progression_session": str(session.get("session_id", "") or "").strip(),
+                    "progression_option": option_ref,
+                    "auto_batch_request": user_request[:120],
+                },
                 progress_callback=progress_callback,
             )
         )
@@ -463,6 +493,12 @@ def main() -> None:
     next_parser.add_argument("--config", help="Optional config.json to override saved LLM settings")
     next_parser.add_argument("--count", type=int, default=1, help="Generate multiple chapters sequentially")
     next_parser.add_argument("--user-request", default="", help="Optional user preference for this batch")
+    next_parser.add_argument(
+        "--selection-mode",
+        default=SELECTION_MODE_RECOMMENDED,
+        choices=("recommended", "random"),
+        help="How automatic continuation chooses a plan for each chapter",
+    )
     next_parser.add_argument("--progression-session", default="", help="Guided progression session id")
     next_parser.add_argument("--progression-option", default="", help="Guided progression option number or option_id")
     next_parser.add_argument("--progression-feedback", default="", help="Optional refinement for the selected guided option")
@@ -583,6 +619,8 @@ def main() -> None:
                 config,
                 args.count,
                 user_request=args.user_request,
+                selection_mode=args.selection_mode,
+                runtime_overrides={"planning_mode": args.planning_mode} if args.planning_mode else None,
             )
         print(f"Generated chapters: {len(chapter_paths)}")
         for chapter_path in chapter_paths:

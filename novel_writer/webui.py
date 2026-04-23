@@ -29,10 +29,12 @@ from context_builder import resolve_effective_chapter_task
 from illustration_manager import get_illustration_record, illustrate_chapters, list_illustration_records
 from progression_manager import (
     CUSTOM_PROGRESSION_OPTION_ID,
+    SELECTION_MODE_RECOMMENDED,
     ensure_fresh_progression_session,
     generate_progression_options,
     get_latest_active_progression_session,
     load_progression_session,
+    validate_selection_mode,
 )
 from project_manager import (
     DEFAULT_PLANNING_MODE,
@@ -720,6 +722,26 @@ def _render_planning_mode_options(selected: str, *, include_project_default: boo
         selected_attr = ' selected' if normalized == value and not include_project_default else ""
         options.append(f'<option value="{value}"{selected_attr}>{_planning_mode_label(value)}</option>')
     return "".join(options)
+
+
+def _auto_selection_mode_label(mode: str) -> str:
+    return "随机模式" if str(mode or "").strip().lower() == "random" else "推荐模式"
+
+
+def _render_auto_selection_mode_options(selected: str) -> str:
+    normalized = validate_selection_mode(selected, allow_manual=False)
+    options = []
+    for value in ("recommended", "random"):
+        selected_attr = ' selected' if normalized == value else ""
+        options.append(f'<option value="{value}"{selected_attr}>{_auto_selection_mode_label(value)}</option>')
+    return "".join(options)
+
+
+def _auto_continue_help(mode: str) -> str:
+    normalized_mode = normalize_planning_mode(mode)
+    if normalized_mode == PLANNING_MODE_NONE:
+        return "自动续写时，每一章都会先提炼 objective，再生成多个 plan；你这次填写的目标 / 倾向会同时影响每章 objective 与 plan。"
+    return "自动续写时，每一章都会先围绕当前 objective 生成多个 plan，再按所选策略自动挑一个执行；你这次填写的目标 / 倾向只影响 plan，不改写 objective。"
 
 
 def _resolve_timeout_for_provider(provider: str, raw_value: object) -> int:
@@ -2589,6 +2611,17 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                   <label>续写章节数
                     <input type="number" name="count" value="1" min="1" max="20">
                   </label>
+                  <label>选 plan 策略
+                    <select name="selection_mode">
+                      {_render_auto_selection_mode_options(SELECTION_MODE_RECOMMENDED)}
+                    </select>
+                  </label>
+                </div>
+                <div class="muted">{escape(_auto_continue_help(normalize_planning_mode(project.get("planning_mode", DEFAULT_PLANNING_MODE))))}</div>
+                <label>想看的内容 / 情节走向
+                  <textarea name="user_request" placeholder="例如：先推进食堂据点建设，再增加一点轻松互怼的互动。"></textarea>
+                </label>
+                <div class="two-col">
                   <label>临时后端覆盖
                     <select name="provider">
                       <option value="">沿用项目设置</option>
@@ -2599,10 +2632,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                       <option value="ollama">ollama</option>
                     </select>
                   </label>
+                  <div></div>
                 </div>
-                <label>想看的内容 / 情节走向
-                  <textarea name="user_request" placeholder="例如：先推进食堂据点建设，再增加一点轻松互怼的互动。"></textarea>
-                </label>
                 <div class="two-col">
                   <label>模型名（可选）
                     <input type="text" name="model_name" placeholder="留空则沿用项目设置；切换后端时自动改为该后端默认模型 / Model ID">
@@ -2917,12 +2948,16 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             count = int(form.get("count") or "1")
             if count < 1:
                 raise RuntimeError("续写章节数必须至少为 1。")
-            runtime_config = _build_runtime_config(project_path, _runtime_overrides_from_form(form), api_keys)
+            selection_mode = validate_selection_mode(form.get("selection_mode"), allow_manual=False)
+            runtime_overrides = _runtime_overrides_from_form(form)
+            runtime_config = _build_runtime_config(project_path, runtime_overrides, api_keys)
             chapter_paths = run_next_chapters(
                 str(project_path),
                 runtime_config,
                 count,
                 user_request=(form.get("user_request") or "").strip(),
+                selection_mode=selection_mode,
+                runtime_overrides=runtime_overrides,
             )
             notice = f"续写完成，共生成 {count} 章。"
             if form.get("illustrate_generated"):
@@ -3257,10 +3292,13 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                     <label>续写章节数
                       <input type="number" name="count" value="1" min="1" max="20">
                     </label>
-                    <label>模式
-                      <input type="text" value="直接续写，可一次写多章" disabled>
+                    <label>选 plan 策略
+                      <select name="selection_mode">
+                        {_render_auto_selection_mode_options(SELECTION_MODE_RECOMMENDED)}
+                      </select>
                     </label>
                   </div>
+                  <div class="muted">{escape(_auto_continue_help(planning_mode))}</div>
                   <label>想看的内容 / 情节走向
                     <textarea name="user_request" placeholder="例如：先推进食堂据点建设，再增加一点轻松互怼的互动。"></textarea>
                   </label>
@@ -3451,6 +3489,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             count = int(form.get("count") or "1")
             if count < 1:
                 raise RuntimeError("续写章节数必须至少为 1。")
+            selection_mode = validate_selection_mode(form.get("selection_mode"), allow_manual=False)
             runtime_overrides = _runtime_overrides_from_form(form)
             runtime_config = _build_runtime_config(project_path, runtime_overrides, api_keys)
             job = JOB_REGISTRY.create_job(
@@ -3474,6 +3513,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 runtime_config,
                 count,
                 user_request=(form.get("user_request") or "").strip(),
+                selection_mode=selection_mode,
+                runtime_overrides=runtime_overrides,
                 progress_callback=progress_callback,
             )
             message = f"续写完成，共生成 {count} 章。"

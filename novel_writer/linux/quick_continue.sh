@@ -195,11 +195,16 @@ if [[ "$CONTINUE_MODE" == "guided" ]]; then
     NEXT_ARGS+=(--progression-feedback "$GUIDED_FEEDBACK")
   fi
 else
+  AUTO_SELECTION_MODE="$(prompt_optional_value "Auto plan selection mode (recommended/random)" "recommended")"
+  if [[ "$AUTO_SELECTION_MODE" != "random" ]]; then
+    AUTO_SELECTION_MODE="recommended"
+  fi
   NEXT_ARGS=(
     "$PYTHON_EXE" "$PROJECT_ROOT/app.py" next
     --project "$PROJECT_PATH"
     --config "$TEMP_CONFIG"
     --count "$CHAPTER_COUNT"
+    --selection-mode "$AUTO_SELECTION_MODE"
   )
 
   if [[ -n "$USER_REQUEST" ]]; then

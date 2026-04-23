@@ -487,6 +487,84 @@ def build_batch_chapter_plan_prompt(
 """
 
 
+def build_auto_objective_prompt(
+    data: dict,
+    recent_text: str,
+    next_context: dict,
+    *,
+    user_request: str = "",
+    planning_mode: str = "",
+) -> str:
+    project = _to_block(data.get("project", {}))
+    plot_state = _to_block(data.get("plot_state", {}))
+    current_volume = _to_block(next_context.get("volume", {}))
+    current_chapter = _to_block(next_context.get("chapter", {}))
+    user_request_block = user_request.strip() or "无额外要求。请仅基于当前状态提炼下一章 objective。"
+
+    if isinstance(data, dict) and isinstance(data.get("sections"), dict):
+        sections = data["sections"]
+        prompt_body = _join_blocks(
+            "你是长篇连载小说的章节规划助手。请只为下一章提炼一个清晰的 objective。",
+            _section_block("作者意图", sections.get("author_intent", "")),
+            _section_block("当前任务卡基线", sections.get("chapter_task", "")),
+            _section_block("世界观速览", sections.get("static_world", "")),
+            _section_block("角色速览", sections.get("static_characters", "")),
+            _section_block("当前 live state", sections.get("live_state", "")),
+            _section_block("更早相关记忆", sections.get("retrieved_memory", "")),
+            _section_block("最近场景", sections.get("recent_scene", "")),
+            _section_block("补充写作约束", sections.get("style_contract", "")),
+            _section_block("当前 planning mode", sections.get("planning_mode", planning_mode)),
+            _section_block("用户这次想看的方向", sections.get("user_request", user_request_block)),
+        )
+        return f"""{prompt_body}
+
+要求：
+1. 输出必须是合法 JSON
+2. 只生成“下一章”的 objective，不要把两三章后的目标提前写进来
+3. objective 必须是本章要完成的叙事任务，不要写成执行 plan、情绪要求或文风要求
+4. objective 要尊重当前 live state、最近场景、相关记忆和基线任务卡；若用户有额外意图，请自然吸收进本章任务
+5. objective 应当具体、可执行、可验证，长度尽量控制在 1 句话内
+6. 不要输出解释，不要输出 Markdown
+
+输出 JSON：
+{{"objective":""}}
+"""
+
+    return f"""你是长篇连载小说的章节规划助手。请只为下一章提炼一个清晰的 objective。
+
+【项目】{project}
+
+【当前剧情状态】{plot_state}
+
+【当前 planning mode】{planning_mode}
+
+【所属卷与待写章节上下文】
+{{
+  "volume": {current_volume},
+  "chapter": {current_chapter}
+}}
+
+【最近正文】
+{recent_text}
+
+【用户这次想看的方向】
+{user_request_block}
+
+要求：
+1. 输出必须是合法 JSON
+2. 只生成“下一章”的 objective，不要把两三章后的目标提前写进来
+3. objective 必须是本章要完成的叙事任务，不要写成执行 plan、情绪要求或文风要求
+4. objective 要尊重当前状态和最近正文；若用户有额外意图，请自然吸收进本章任务
+5. objective 应当具体、可执行、可验证，长度尽量控制在 1 句话内
+6. 不要输出解释，不要输出 Markdown
+
+输出 JSON：
+{{
+  "objective": ""
+}}
+"""
+
+
 def build_progression_options_prompt(
     data: dict,
     recent_text: str,
