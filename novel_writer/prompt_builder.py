@@ -904,3 +904,61 @@ def build_illustration_prompt(data: dict, chapter_text: str, user_request: str =
   "negative_prompt": ""
 }}
 """
+
+
+def build_chapter_polish_prompt(
+    data: dict,
+    chapter_text: str,
+    *,
+    polish_directions: list[str] | None = None,
+    custom_request: str = "",
+) -> str:
+    project = _to_block(data.get("project", {}))
+    world = _to_block(data.get("world", {}))
+    characters = _to_block(data.get("characters", {}))
+    plot_state = _to_block(data.get("plot_state", {}))
+    style = _to_block(data.get("style", {}))
+    author_intent = _to_block(data.get("author_intent", {}))
+    directions = polish_directions or ["基础润色"]
+    directions_block = "\n".join(f"- {item}" for item in directions if str(item or "").strip()) or "- 基础润色"
+    custom_request_block = custom_request.strip() or "无额外自定义要求。"
+
+    return f"""你是一名长篇小说章节润色助手。请对用户提供的已完成章节进行润色，并只输出润色后的完整章节正文。
+
+【项目】
+{project}
+
+【世界观】
+{world}
+
+【人物】
+{characters}
+
+【剧情状态】
+{plot_state}
+
+【文风】
+{style}
+
+【作者意图】
+{author_intent}
+
+【润色方向】
+{directions_block}
+
+【用户自定义润色要求】
+{custom_request_block}
+
+【原章节正文】
+{chapter_text.strip()}
+
+要求：
+1. 只输出润色后的完整章节正文，不要输出解释、标题说明、Markdown 代码块或修改清单
+2. 保留原章节的核心剧情事实、事件顺序、人物决定、信息结论和后续承接点
+3. 允许轻微补充过渡、动作、表情、环境、内心和对白，让桥段更顺、更有画面感
+4. 不得新增会影响后续剧情状态的事实、线索、设定、角色关系转折或重大道具
+5. 保持人物称谓、视角、基调、世界观规则和既有设定一致，不要让角色 OOC
+6. 如果要求“更长”，应优先扩写描写、节奏和互动，不要靠重复原句凑长度
+7. 如果要求“更欢乐”，应增加轻松互动或语言节奏，但不要破坏当前危机和人物处境
+8. 输出必须是正文文本本身，不能包裹 JSON，不能使用 Markdown fenced code block
+"""

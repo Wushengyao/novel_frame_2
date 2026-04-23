@@ -84,7 +84,7 @@ INIT_SECTION_KEYS = ("world", "characters", "plot_state", "style")
 CHAPTER_TITLE_PATTERN = re.compile(
     r"^\s*(?:#{1,6}\s*)?第[0-9零一二三四五六七八九十百千万两〇]+[章节卷回部篇]\s*[：:.-]?\s*.+$"
 )
-STATS_PHASES = ("init", "outline", "writer", "summary")
+STATS_PHASES = ("init", "outline", "writer", "summary", "polish")
 SNAPSHOT_DIR_NAME = "snapshots"
 SNAPSHOT_STATE_FILES = (
     "project.json",

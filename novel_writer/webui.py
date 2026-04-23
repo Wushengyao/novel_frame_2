@@ -27,6 +27,7 @@ from chapter_context import peek_next_context_for_mode
 from common_utils import utc_now
 from context_builder import resolve_effective_chapter_task
 from illustration_manager import get_illustration_record, illustrate_chapters, list_illustration_records
+from polish_manager import POLISH_PRESETS, run_chapter_polish
 from progression_manager import (
     CUSTOM_PROGRESSION_OPTION_ID,
     SELECTION_MODE_RECOMMENDED,
@@ -811,6 +812,26 @@ def _runtime_overrides_from_form(form: dict[str, str]) -> dict[str, str]:
     )
 
 
+def _polish_preset_ids_from_form(form: dict[str, str]) -> list[str]:
+    return [
+        preset["id"]
+        for preset in POLISH_PRESETS
+        if form.get(f"polish_preset_{preset['id']}")
+    ]
+
+
+def _render_polish_preset_checkboxes() -> str:
+    return "".join(
+        f"""
+        <label class="pill-check">
+          <input type="checkbox" name="polish_preset_{escape(preset['id'])}" value="1">
+          {escape(preset['label'])}
+        </label>
+        """
+        for preset in POLISH_PRESETS
+    )
+
+
 def _enqueue_progression_job(
     project_id: str,
     project_path: Path,
@@ -869,12 +890,33 @@ def _render_provider_options(selected: str = "") -> str:
     return "".join(options)
 
 
-def _render_runtime_override_fields(base_provider: str = "gemini", base_model: str = "") -> str:
+def _render_runtime_override_fields(
+    base_provider: str = "gemini",
+    base_model: str = "",
+    *,
+    include_planning_mode: bool = True,
+) -> str:
     effective_provider = _normalize_provider_for_ui(base_provider, default="gemini")
     initial_blank_label = _model_blank_label(
         effective_provider,
         base_model=base_model,
         provider_explicit=False,
+    )
+    planning_field_html = (
+        f"""
+      <label>Planning Mode
+        <select name="planning_mode">
+          {_render_planning_mode_options("", include_project_default=True)}
+        </select>
+      </label>
+        """
+        if include_planning_mode
+        else "<div></div>"
+    )
+    planning_help_html = (
+        '<div class="muted">留空则沿用项目设置。none 最自由，volume 更平衡，chapter 控制最强。</div>'
+        if include_planning_mode
+        else '<div class="muted">留空则沿用项目设置；这些覆盖只对本次调用生效。</div>'
     )
     return f"""
     <div class="two-col">
@@ -883,13 +925,9 @@ def _render_runtime_override_fields(base_provider: str = "gemini", base_model: s
           {_render_provider_options()}
         </select>
       </label>
-      <label>Planning Mode
-        <select name="planning_mode">
-          {_render_planning_mode_options("", include_project_default=True)}
-        </select>
-      </label>
+      {planning_field_html}
     </div>
-    <div class="muted">留空则沿用项目设置。none 最自由，volume 更平衡，chapter 控制最强。</div>
+    {planning_help_html}
     <div class="two-col">
       <label>模型预设
         <select
@@ -2083,6 +2121,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "continue-guided":
             self._handle_continue_guided_async(parts[1], form)
             return
+        if len(parts) == 5 and parts[0] == "project" and parts[2] == "chapter" and parts[4] == "polish":
+            self._handle_polish_chapter_async(parts[1], parts[3], form)
+            return
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "rollback":
             self._handle_rollback(parts[1], form)
             return
@@ -2782,10 +2823,27 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         project = load_json(str(project_path / "project.json"))
         project_name = _repair_display_text(project.get("name", project_id))
         chapters = _read_chapters(project_path)
+        chapter_text = chapter_file.read_text(encoding="utf-8")
         chapter_number = _chapter_number_from_slug(chapter_slug)
         current_index = next((idx for idx, chapter in enumerate(chapters) if chapter["slug"] == chapter_slug), -1)
         previous_chapter = chapters[current_index - 1] if current_index > 0 else None
         next_chapter = chapters[current_index + 1] if 0 <= current_index < len(chapters) - 1 else None
+        active_jobs = JOB_REGISTRY.list_jobs(project_id=project_id, active_only=True, limit=4)
+        blocking_jobs = [job for job in active_jobs if job.get("blocks_project", True)]
+        project_busy = bool(blocking_jobs)
+        busy_attr = " disabled" if project_busy else ""
+        busy_notice = (
+            '<div class="warning-box">当前项目有后台任务正在运行。为避免并发写入冲突，章节润色暂时禁用。</div>'
+            if project_busy
+            else ""
+        )
+        project_llm_config = project.get("llm_config") or {}
+        polish_runtime_fields_html = _render_runtime_override_fields(
+            str(project_llm_config.get("model_provider") or ""),
+            str(project_llm_config.get("model_name") or project_llm_config.get("model") or ""),
+            include_planning_mode=False,
+        )
+        polish_preset_html = _render_polish_preset_checkboxes()
         previous_link = (
             f'<a class="chapter-nav-link prev" href="/project/{escape(project_id)}/chapter/{escape(previous_chapter["slug"])}">← 上一章：{escape(previous_chapter["name"])}</a>'
             if previous_chapter
@@ -2820,7 +2878,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
           <section class="panel">
             <a href="/project/{escape(project_id)}">返回项目</a>
             <h2>{escape(chapter_file.name)}</h2>
-            <div class="chapter-view">{escape(chapter_file.read_text(encoding="utf-8"))}</div>
+            <div class="chapter-view">{escape(chapter_text)}</div>
             <div class="chapter-nav">
               {previous_link}
               {next_link}
@@ -2832,6 +2890,25 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <input type="hidden" name="to_chapter" value="{chapter_number if chapter_number is not None else 0}">
               <input type="hidden" name="return_to_chapter" value="{escape(chapter_slug)}">
               <button class="ghost-button" type="submit">回滚到本章并从这里继续写</button>
+            </form>
+          </section>
+          {busy_notice}
+          <section class="panel">
+            <h2>章节润色</h2>
+            <p class="muted">对当前章节做表达、节奏和细节层面的润色。完成后会直接覆盖本章正文，并在项目下自动备份原文。</p>
+            <form method="post" action="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}/polish">
+              <fieldset{busy_attr}>
+                <label>润色方向（可多选）
+                  <div class="button-row polish-preset-row">
+                    {polish_preset_html}
+                  </div>
+                </label>
+                <label>自定义润色要求（可选）
+                  <textarea name="polish_custom_request" placeholder="例如：多一点轻松互怼，但不要改变本章事件结果。"></textarea>
+                </label>
+                {polish_runtime_fields_html}
+                <button type="submit">开始润色本章</button>
+              </fieldset>
             </form>
           </section>
           <section class="panel">
@@ -3664,6 +3741,72 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 "message": message,
                 "result_url": "/project/" + urllib.parse.quote(project_id),
                 "result_label": "返回项目页",
+                "project_id": project_id,
+                "project_path": str(project_path.resolve()),
+            }
+
+        _start_background_job(job["id"], runner)
+        self._redirect("/job/" + urllib.parse.quote(job["id"]))
+
+    def _handle_polish_chapter_async(self, project_id: str, chapter_slug: str, form: dict[str, str]) -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+
+        api_keys = _load_api_keys()
+        try:
+            runtime_overrides = _runtime_overrides_from_form(form)
+            runtime_config = _build_runtime_config(project_path, runtime_overrides, api_keys)
+            preset_ids = _polish_preset_ids_from_form(form)
+            custom_request = (form.get("polish_custom_request") or "").strip()
+            job = JOB_REGISTRY.create_job(
+                kind="polish_chapter",
+                title=f"润色章节：{chapter_slug}",
+                project_id=project_id,
+                project_path=str(project_path.resolve()),
+            )
+        except Exception as exc:
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "/chapter/"
+                + urllib.parse.quote(chapter_slug)
+                + "?error="
+                + urllib.parse.quote(str(exc))
+            )
+            return
+
+        def runner(progress_callback):
+            result = run_chapter_polish(
+                str(project_path),
+                runtime_config,
+                chapter_slug,
+                preset_ids=preset_ids,
+                custom_request=custom_request,
+                progress_callback=progress_callback,
+            )
+            backup_label = ""
+            backup_path = Path(str(result.get("backup_path", "")))
+            try:
+                backup_label = str(backup_path.relative_to(project_path)).replace("\\", "/")
+            except ValueError:
+                backup_label = str(backup_path)
+            message = f"章节润色完成，原文已备份到 {backup_label}。"
+            if int(result.get("staled_progression_sessions", 0) or 0):
+                message += " 已让旧的下一章推进选项失效。"
+            result_url = (
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "/chapter/"
+                + urllib.parse.quote(chapter_slug)
+                + "?notice="
+                + urllib.parse.quote(message)
+            )
+            return {
+                "message": message,
+                "result_url": result_url,
+                "result_label": "打开章节",
                 "project_id": project_id,
                 "project_path": str(project_path.resolve()),
             }

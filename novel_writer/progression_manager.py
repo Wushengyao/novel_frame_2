@@ -229,6 +229,25 @@ def get_latest_active_progression_session(project_path: str) -> dict | None:
     return None
 
 
+def mark_active_progression_sessions_stale(project_path: str) -> int:
+    sessions_dir = _session_dir(project_path)
+    if not sessions_dir.exists():
+        return 0
+
+    stale_count = 0
+    for path in sorted(sessions_dir.glob("progression_*.json")):
+        try:
+            session = load_json(str(path))
+        except Exception:
+            continue
+        if session.get("status") not in {"pending", "selected"}:
+            continue
+        session["status"] = "stale"
+        save_progression_session(project_path, session)
+        stale_count += 1
+    return stale_count
+
+
 def auto_select_progression_option(session: dict, selection_mode: object) -> str:
     mode = validate_selection_mode(selection_mode, allow_manual=False)
     options = _non_custom_options(session.get("options") or [])

@@ -3,14 +3,21 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import webui
+from project_manager import load_json, save_json
 from web_auth import WebAuthSettings
 from webui import NovelWriterHandler, ThreadingHTTPServer
 from progression_manager import CUSTOM_PROGRESSION_OPTION_ID
@@ -628,6 +635,67 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(page.status, 200)
         self.assertIn("下一章推进选项正在后台生成", page.body)
         self.assertNotIn("为避免并发写入冲突", page.body)
+
+    def test_chapter_page_shows_polish_form(self) -> None:
+        (self.project_path / "chapters" / "chapter_0001.md").write_text(
+            "林宇推上储物箱。\n\n苏浅检查控制板。",
+            encoding="utf-8",
+        )
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 1
+        save_json(str(self.project_path / "project.json"), project)
+
+        page = self._get("/project/web/chapter/chapter_0001")
+
+        self.assertEqual(page.status, 200)
+        self.assertIn("章节润色", page.body)
+        self.assertIn("细节增强", page.body)
+        self.assertIn("更欢乐", page.body)
+        self.assertIn("自定义润色要求", page.body)
+        self.assertNotIn("Planning Mode", page.body)
+
+    def test_polish_chapter_endpoint_creates_background_job_with_runtime_overrides(self) -> None:
+        (self.project_path / "chapters" / "chapter_0001.md").write_text(
+            "林宇推上储物箱。\n\n苏浅检查控制板。",
+            encoding="utf-8",
+        )
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 1
+        save_json(str(self.project_path / "project.json"), project)
+
+        body = urllib.parse.urlencode(
+            {
+                "polish_preset_details": "1",
+                "polish_preset_longer": "1",
+                "polish_custom_request": "多一点轻松互怼",
+                "provider": "ollama",
+                "model_preset": "qwen2.5:14b",
+            }
+        )
+
+        with patch(
+            "webui.run_chapter_polish",
+            return_value={
+                "chapter_slug": "chapter_0001",
+                "backup_path": str(self.project_path / "polish_backups" / "chapter_0001" / "backup.md"),
+                "staled_progression_sessions": 0,
+            },
+        ) as mocked_polish:
+            response = self._post("/project/web/chapter/chapter_0001/polish", body)
+            self.assertEqual(response.status, 303)
+            location = response.getheader("Location")
+            self.assertTrue(location.startswith("/job/"))
+            job_id = location.rsplit("/", 1)[-1]
+            job = self._wait_for_job_status(job_id)
+
+        self.assertEqual(job["kind"], "polish_chapter")
+        polish_args = mocked_polish.call_args.args
+        polish_kwargs = mocked_polish.call_args.kwargs
+        self.assertEqual(polish_args[0], str(self.project_path))
+        self.assertEqual(polish_args[2], "chapter_0001")
+        self.assertEqual(polish_args[1]["model_name"], "qwen2.5:14b")
+        self.assertEqual(polish_kwargs["preset_ids"], ["details", "longer"])
+        self.assertEqual(polish_kwargs["custom_request"], "多一点轻松互怼")
 
 
 if __name__ == "__main__":
