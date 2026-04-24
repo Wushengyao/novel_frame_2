@@ -20,7 +20,9 @@ from context_builder import (
 from prompt_builder import (
     build_batch_chapter_plan_prompt,
     build_chapter_outline_prompt,
+    build_craft_brief_prompt,
     build_progression_options_prompt,
+    build_quality_review_prompt,
     build_summary_prompt,
     build_writer_prompt,
 )
@@ -63,6 +65,113 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertLess(len(trimmed["retrieved_memory"]), len(sections["retrieved_memory"]))
         self.assertLess(len(trimmed["recent_scene"]), len(sections["recent_scene"]))
         self.assertLessEqual(sum(len(value) for value in trimmed.values()), WRITER_HARD_TOTAL_CHARS)
+
+    def test_recent_craft_memory_and_brief_are_available_to_writer_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="craft_memory")
+            project = load_json(str(project_path / "project.json"))
+            project["chapter_count"] = 3
+            save_json(str(project_path / "project.json"), project)
+            for chapter_number in range(1, 4):
+                save_json(
+                    str(project_path / "summaries" / f"summary_{chapter_number:04d}.json"),
+                    {
+                        "chapter_summary": f"第{chapter_number}章完成一次谨慎试探。",
+                        "current_location": "隔离区",
+                        "current_time": f"第{chapter_number}天",
+                        "current_arc": "开篇阶段",
+                        "recent_events": [f"第{chapter_number}章试探外部"],
+                        "open_threads": [],
+                        "resolved_threads": [],
+                        "foreshadowing": [],
+                        "character_updates": [],
+                        "active_characters": ["林宇", "苏浅"],
+                        "retrieval_tags": ["试探", "隔离区"],
+                        "next_chapter_goal": "继续确认异常信号",
+                        "craft_notes": {
+                            "repeated_actions": ["三人在门后短暂停顿", "小心推门观察"],
+                            "recurring_gestures": ["林宇按住门把手", "苏浅压低声音"],
+                            "scene_type": "门口试探",
+                            "emotional_beat": "紧张观察后松一口气",
+                            "ending_pattern": "听到走廊尽头异常声响",
+                            "notable_phrasing": ["走廊外一片死寂"],
+                        },
+                    },
+                )
+            project_data = load_project(str(project_path))
+            next_context = {
+                "volume": project_data["outlines"]["volumes"][0],
+                "chapter": project_data["outlines"]["volumes"][0]["chapters"][0],
+            }
+            craft_brief = {
+                "chapter_hook": "开章让备用灯突然熄灭。",
+                "dramatic_question": "他们能否在不重复门口试探的情况下确认异常来源？",
+                "conflict_pressure": "电量下降，外部噪音逼近。",
+                "emotional_turn": "苏浅主动提出改变行动方式。",
+                "scene_movement": ["熄灯", "手势分工", "设备交叉验证"],
+                "sensory_palette": ["焦味", "冷光"],
+                "fresh_interaction_patterns": ["用设备读数与手势配合推进"],
+                "forbidden_repeats": ["不要再写三人在门后短暂停顿"],
+                "focus_notes": "让本章互动方式变化。",
+            }
+
+            context = build_writer_context(
+                str(project_path),
+                project_data,
+                next_context,
+                "上一章正文",
+                planning_mode="chapter",
+                craft_brief=craft_brief,
+            )
+            prompt = build_writer_prompt(context)
+
+            self.assertIn("三人在门后短暂停顿", context["sections"]["recent_craft_memory"])
+            self.assertIn("禁用重复", context["sections"]["craft_brief"])
+            self.assertIn("近期写法避让", prompt)
+            self.assertIn("本章创作蓝图", prompt)
+            self.assertIn("不要再写三人在门后短暂停顿", prompt)
+            self.assertLessEqual(sum(len(value) for value in context["sections"].values()), WRITER_HARD_TOTAL_CHARS)
+
+    def test_craft_brief_and_quality_review_prompts_expose_json_schemas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="quality_prompts")
+            project_data = load_project(str(project_path))
+            next_context = {
+                "volume": project_data["outlines"]["volumes"][0],
+                "chapter": project_data["outlines"]["volumes"][0]["chapters"][0],
+            }
+            context = build_writer_context(
+                str(project_path),
+                project_data,
+                next_context,
+                "",
+                planning_mode="chapter",
+            )
+
+            craft_prompt = build_craft_brief_prompt(context)
+            review_prompt = build_quality_review_prompt(context, "草稿正文", strict=True)
+
+            for key in (
+                "chapter_hook",
+                "dramatic_question",
+                "conflict_pressure",
+                "emotional_turn",
+                "scene_movement",
+                "sensory_palette",
+                "fresh_interaction_patterns",
+                "forbidden_repeats",
+            ):
+                self.assertIn(key, craft_prompt)
+            for key in (
+                "task_completion",
+                "reader_hook",
+                "scene_freshness",
+                "character_specificity",
+                "repetition_risk",
+                "continuity",
+            ):
+                self.assertIn(key, review_prompt)
+            self.assertIn("高质量模式", review_prompt)
 
     def test_update_plot_state_refreshes_live_state_and_generates_arc_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

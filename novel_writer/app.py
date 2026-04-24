@@ -37,6 +37,16 @@ from progression_manager import (
     validate_selection_mode,
 )
 from prompt_builder import build_writer_prompt
+from quality_manager import (
+    generate_craft_brief,
+    normalize_quality_config,
+    quality_mode_allows_rewrite,
+    quality_mode_uses_craft_brief,
+    quality_mode_uses_review,
+    quality_review_passed,
+    review_chapter_draft,
+    rewrite_chapter_draft,
+)
 from project_manager import (
     PLANNING_MODE_CHAPTER,
     PLANNING_MODE_NONE,
@@ -55,7 +65,13 @@ from project_manager import (
     save_chapter,
     update_project_stats,
 )
-from runtime_config import extract_llm_config, load_runtime_config
+from runtime_config import (
+    REVIEW_MODES,
+    WRITING_QUALITY_HIGH,
+    WRITING_QUALITY_MODES,
+    extract_llm_config,
+    load_runtime_config,
+)
 from state_updater import update_plot_state
 from version import APP_NAME, DISPLAY_VERSION
 
@@ -228,6 +244,7 @@ def run_next_chapter(
     )
 
     last_chapter = get_last_chapter_text(project_path)
+    writing_quality_mode, review_mode = normalize_quality_config(config)
     prompt_context = build_writer_context(
         project_path,
         project_data,
@@ -236,6 +253,23 @@ def run_next_chapter(
         user_request=user_request,
         planning_mode=effective_mode,
     )
+    if quality_mode_uses_craft_brief(writing_quality_mode):
+        craft_brief = generate_craft_brief(
+            project_path,
+            prompt_context,
+            config,
+            log_context=log_context_payload,
+            progress_callback=progress_callback,
+        )
+        prompt_context = build_writer_context(
+            project_path,
+            project_data,
+            next_context,
+            last_chapter,
+            user_request=user_request,
+            planning_mode=effective_mode,
+            craft_brief=craft_brief,
+        )
     prompt = build_writer_prompt(prompt_context)
     record_context_telemetry(
         project_path,
@@ -247,6 +281,8 @@ def run_next_chapter(
             "target_chapter_number": prompt_context.get("task_card", {}).get("chapter_number"),
             "prompt_soft_budget": 7000,
             "prompt_hard_budget": 8000,
+            "writing_quality_mode": writing_quality_mode,
+            "review_mode": review_mode,
         },
     )
 
@@ -270,6 +306,31 @@ def run_next_chapter(
         usage=metadata.get("usage"),
     )
     chapter_text = normalize_chapter_text(response_text)
+    if quality_mode_uses_review(writing_quality_mode):
+        review = review_chapter_draft(
+            project_path,
+            prompt_context,
+            chapter_text,
+            config,
+            attempt=1,
+            strict=writing_quality_mode == WRITING_QUALITY_HIGH,
+            log_context=log_context_payload,
+            progress_callback=progress_callback,
+        )
+        if quality_mode_allows_rewrite(writing_quality_mode, review_mode) and not quality_review_passed(review):
+            try:
+                rewritten_text = rewrite_chapter_draft(
+                    project_path,
+                    prompt_context,
+                    chapter_text,
+                    review,
+                    config,
+                    log_context=log_context_payload,
+                    progress_callback=progress_callback,
+                )
+                chapter_text = normalize_chapter_text(rewritten_text)
+            except Exception as exc:  # pragma: no cover - keep original draft if rewrite fails
+                log_warning(f"rewrite: failed; keeping original draft. reason={exc}")
     emit_progress(progress_callback, "chapter_save", "Saving chapter file")
     chapter_path = save_chapter(project_path, chapter_text)
     log_success(f"next_chapter: saved to {chapter_path}")
@@ -416,6 +477,8 @@ def _print_status(project_path: str) -> None:
     print(f"Provider: {llm_config.get('model_provider', '')}")
     print(f"Model: {llm_config.get('model_name') or llm_config.get('model', '')}")
     print(f"Planning Mode: {normalize_planning_mode(project.get('planning_mode'))}")
+    print(f"Writing Quality Mode: {llm_config.get('writing_quality_mode', 'balanced')}")
+    print(f"Review Mode: {llm_config.get('review_mode', 'auto')}")
     print(
         "Requests: "
         f"{total_stats.get('requests', 0)} "
@@ -507,6 +570,16 @@ def main() -> None:
         "--planning-mode",
         choices=(PLANNING_MODE_NONE, PLANNING_MODE_VOLUME, PLANNING_MODE_CHAPTER),
         help="Override planning mode for this run",
+    )
+    next_parser.add_argument(
+        "--writing-quality-mode",
+        choices=tuple(sorted(WRITING_QUALITY_MODES)),
+        help="Override writing quality pipeline for this run",
+    )
+    next_parser.add_argument(
+        "--review-mode",
+        choices=tuple(sorted(REVIEW_MODES)),
+        help="Override quality review behavior for this run",
     )
     next_parser.add_argument("--illustrate", action="store_true", help="Generate chapter illustrations")
     next_parser.add_argument("--illustration-request", default="", help="Optional extra art direction")
@@ -616,6 +689,19 @@ def main() -> None:
         config = extract_llm_config(args.config) if args.config else load_runtime_config(args.project)
         if args.planning_mode:
             config["planning_mode"] = args.planning_mode
+        if args.writing_quality_mode:
+            config["writing_quality_mode"] = args.writing_quality_mode
+        if args.review_mode:
+            config["review_mode"] = args.review_mode
+        runtime_overrides = {
+            key: value
+            for key, value in {
+                "planning_mode": args.planning_mode,
+                "writing_quality_mode": args.writing_quality_mode,
+                "review_mode": args.review_mode,
+            }.items()
+            if value
+        }
         if has_progression:
             chapter_paths = [
                 run_next_chapter_from_progression(
@@ -633,7 +719,7 @@ def main() -> None:
                 args.count,
                 user_request=args.user_request,
                 selection_mode=args.selection_mode,
-                runtime_overrides={"planning_mode": args.planning_mode} if args.planning_mode else None,
+                runtime_overrides=runtime_overrides or None,
             )
         print(f"Generated chapters: {len(chapter_paths)}")
         for chapter_path in chapter_paths:

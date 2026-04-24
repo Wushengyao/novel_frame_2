@@ -7,13 +7,63 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app import run_next_chapter_from_progression, run_next_chapters
+from app import run_next_chapter, run_next_chapter_from_progression, run_next_chapters
 from progression_manager import CUSTOM_PROGRESSION_OPTION_ID, generate_progression_options
 
 from tests.test_support import create_test_project, read_json, runtime_config
 
 
 class GuidedFlowTests(unittest.TestCase):
+    def _summary_payload(self, next_goal: str = "继续推进下一步") -> dict:
+        return {
+            "chapter_summary": "本章完成了当前推进。",
+            "recent_events": ["角色完成了当前推进。"],
+            "open_threads": ["仍有未解风险"],
+            "foreshadowing": ["后续风险会继续扩大"],
+            "character_updates": ["林宇承担了新的压力"],
+            "active_characters": ["林宇", "苏浅"],
+            "next_chapter_goal": next_goal,
+            "craft_notes": {
+                "repeated_actions": ["短暂停顿后观察环境"],
+                "recurring_gestures": ["压低声音确认彼此状态"],
+                "scene_type": "谨慎试探",
+                "emotional_beat": "紧张后达成共识",
+                "ending_pattern": "发现新的异常信号",
+                "notable_phrasing": ["走廊外一片死寂"],
+            },
+        }
+
+    def _craft_brief_payload(self) -> dict:
+        return {
+            "chapter_hook": "开章用异常冷光打破临时安全区的安稳。",
+            "dramatic_question": "三人能否在不暴露位置的前提下确认信号源？",
+            "conflict_pressure": "外部噪音逼近，内部设备电量不足。",
+            "emotional_turn": "林宇从单独承担风险转为接受苏浅的共同判断。",
+            "scene_movement": ["冷光异常", "低声争执", "无声协作", "带回一条新线索"],
+            "sensory_palette": ["冷白灯", "金属焦味", "远处震动"],
+            "fresh_interaction_patterns": ["用手势和设备读数交叉确认，而不是反复推门观察"],
+            "forbidden_repeats": ["不要再写三人在门后短暂停顿后小心推门"],
+            "focus_notes": "保持生存压力，同时让互动方式更有变化。",
+        }
+
+    def _review_payload(self, *, passed: bool, score: int = 8) -> dict:
+        scores = {
+            "task_completion": score,
+            "reader_hook": score,
+            "scene_freshness": score,
+            "character_specificity": score,
+            "repetition_risk": score,
+            "continuity": score,
+        }
+        return {
+            "scores": scores,
+            "passed": passed,
+            "strengths": ["任务清楚"],
+            "issues": [] if passed else ["开章钩子弱，动作和上一章接近"],
+            "revision_guidance": "" if passed else "换一个开场压力，减少推门和短暂停顿动作。",
+            "repeat_examples": [] if passed else ["短暂停顿后小心推门"],
+        }
+
     def test_guided_flow_generates_session_and_writes_next_chapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp), project_id="flow")
@@ -114,6 +164,119 @@ class GuidedFlowTests(unittest.TestCase):
             self.assertEqual(task_card["source"], "progression_selected")
             self.assertEqual(task_card["objective"], "建立临时安全区，并确认是否需要进一步深入走廊")
             self.assertTrue((project_path / "snapshots" / "chapter_0001").exists())
+
+    def test_light_quality_mode_only_writes_and_summarizes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="quality_light")
+
+            with patch(
+                "quality_manager.generate_text_with_metadata",
+            ) as mocked_quality_generate, patch(
+                "app.generate_text_with_metadata",
+                return_value=("轻量模式正文", {"usage": {}}),
+            ) as mocked_writer_generate, patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ) as mocked_state_generate:
+                chapter_path = run_next_chapter(
+                    str(project_path),
+                    runtime_config("chapter", writing_quality_mode="light"),
+                )
+
+            mocked_quality_generate.assert_not_called()
+            mocked_writer_generate.assert_called_once()
+            mocked_state_generate.assert_called_once()
+            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "轻量模式正文")
+            self.assertEqual(list((project_path / "craft_briefs").glob("*.json")), [])
+            self.assertEqual(list((project_path / "quality_reviews").glob("*.json")), [])
+
+    def test_balanced_quality_mode_generates_craft_brief_and_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="quality_balanced")
+
+            with patch(
+                "quality_manager.generate_text_with_metadata",
+                side_effect=[
+                    (json.dumps(self._craft_brief_payload(), ensure_ascii=False), {"usage": {}}),
+                    (json.dumps(self._review_payload(passed=True, score=8), ensure_ascii=False), {"usage": {}}),
+                ],
+            ) as mocked_quality_generate, patch(
+                "app.generate_text_with_metadata",
+                return_value=("平衡模式正文", {"usage": {}}),
+            ) as mocked_writer_generate, patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ):
+                chapter_path = run_next_chapter(
+                    str(project_path),
+                    runtime_config("chapter", writing_quality_mode="balanced"),
+                )
+
+            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "平衡模式正文")
+            mocked_writer_generate.assert_called_once()
+            phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
+            self.assertEqual(phases, ["craft_brief", "quality_review"])
+            craft_brief = read_json(project_path / "craft_briefs" / "chapter_0001.json")
+            review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")
+            self.assertEqual(craft_brief["chapter_hook"], self._craft_brief_payload()["chapter_hook"])
+            self.assertTrue(review["passed"])
+
+    def test_high_quality_mode_rewrites_once_when_auto_review_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="quality_high")
+
+            with patch(
+                "quality_manager.generate_text_with_metadata",
+                side_effect=[
+                    (json.dumps(self._craft_brief_payload(), ensure_ascii=False), {"usage": {}}),
+                    (json.dumps(self._review_payload(passed=False, score=4), ensure_ascii=False), {"usage": {}}),
+                    ("重写后的正文", {"usage": {}}),
+                ],
+            ) as mocked_quality_generate, patch(
+                "app.generate_text_with_metadata",
+                return_value=("原始正文", {"usage": {}}),
+            ), patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ):
+                chapter_path = run_next_chapter(
+                    str(project_path),
+                    runtime_config("chapter", writing_quality_mode="high", review_mode="auto"),
+                )
+
+            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "重写后的正文")
+            phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
+            self.assertEqual(phases, ["craft_brief", "quality_review", "rewrite"])
+            review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")
+            self.assertFalse(review["passed"])
+
+    def test_manual_review_mode_saves_report_without_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="quality_manual")
+
+            with patch(
+                "quality_manager.generate_text_with_metadata",
+                side_effect=[
+                    (json.dumps(self._craft_brief_payload(), ensure_ascii=False), {"usage": {}}),
+                    (json.dumps(self._review_payload(passed=False, score=4), ensure_ascii=False), {"usage": {}}),
+                ],
+            ) as mocked_quality_generate, patch(
+                "app.generate_text_with_metadata",
+                return_value=("人工审稿保留的原始正文", {"usage": {}}),
+            ), patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ):
+                chapter_path = run_next_chapter(
+                    str(project_path),
+                    runtime_config("chapter", writing_quality_mode="high", review_mode="manual"),
+                )
+
+            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "人工审稿保留的原始正文")
+            phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
+            self.assertEqual(phases, ["craft_brief", "quality_review"])
+            review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")
+            self.assertFalse(review["passed"])
 
     def test_cli_rejects_guided_batch_count_greater_than_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

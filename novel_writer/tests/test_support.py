@@ -16,10 +16,27 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def create_test_project(base_dir: Path, *, project_id: str = "test", planning_mode: str = "chapter") -> Path:
+def create_test_project(
+    base_dir: Path,
+    *,
+    project_id: str = "test",
+    planning_mode: str = "chapter",
+    writing_quality_mode: str = "light",
+    review_mode: str = "auto",
+) -> Path:
     project_path = base_dir / f"novel_project_{project_id}"
     project_path.mkdir(parents=True, exist_ok=True)
-    for name in ("chapters", "summaries", "arc_summaries", "task_cards", "illustrations", "audiobook", "snapshots"):
+    for name in (
+        "chapters",
+        "summaries",
+        "arc_summaries",
+        "task_cards",
+        "craft_briefs",
+        "quality_reviews",
+        "illustrations",
+        "audiobook",
+        "snapshots",
+    ):
         (project_path / name).mkdir(exist_ok=True)
 
     save_json(
@@ -44,6 +61,8 @@ def create_test_project(base_dir: Path, *, project_id: str = "test", planning_mo
                 "max_tokens": 4000,
                 "timeout": 900,
                 "planning_mode": planning_mode,
+                "writing_quality_mode": writing_quality_mode,
+                "review_mode": review_mode,
             },
         },
     )
@@ -155,7 +174,12 @@ def create_test_project(base_dir: Path, *, project_id: str = "test", planning_mo
     return project_path
 
 
-def runtime_config(planning_mode: str = "chapter") -> dict:
+def runtime_config(
+    planning_mode: str = "chapter",
+    *,
+    writing_quality_mode: str = "light",
+    review_mode: str = "auto",
+) -> dict:
     return {
         "model_provider": "ollama",
         "model": "llama3.2",
@@ -166,4 +190,6 @@ def runtime_config(planning_mode: str = "chapter") -> dict:
         "max_tokens": 4000,
         "timeout": 900,
         "planning_mode": planning_mode,
+        "writing_quality_mode": writing_quality_mode,
+        "review_mode": review_mode,
     }

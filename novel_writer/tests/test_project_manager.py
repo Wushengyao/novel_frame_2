@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from project_manager import _generate_initial_story_data, _prune_initial_supporting_characters
+from project_manager import _generate_initial_story_data, _prune_initial_supporting_characters, rollback_project, save_json
 from prompt_builder import build_init_prompt
+
+from tests.test_support import create_test_project, read_json
 
 
 class ProjectManagerTests(unittest.TestCase):
@@ -124,6 +128,50 @@ class ProjectManagerTests(unittest.TestCase):
 
         self.assertTrue(meta["used_llm"])
         self.assertEqual([item["name"] for item in data["characters"]["supporting"]], ["王建国"])
+
+    def test_rollback_removes_future_quality_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="rollback_quality")
+            project = read_json(project_path / "project.json")
+            project["chapter_count"] = 2
+            save_json(str(project_path / "project.json"), project)
+            for chapter_number in (1, 2):
+                (project_path / "chapters" / f"chapter_{chapter_number:04d}.md").write_text(
+                    f"第{chapter_number}章正文",
+                    encoding="utf-8",
+                )
+                save_json(
+                    str(project_path / "summaries" / f"summary_{chapter_number:04d}.json"),
+                    {
+                        "chapter_summary": f"第{chapter_number}章摘要",
+                        "current_location": "隔离区",
+                        "current_time": f"第{chapter_number}天",
+                        "current_arc": "开篇阶段",
+                        "recent_events": [f"事件{chapter_number}"],
+                        "open_threads": [],
+                        "resolved_threads": [],
+                        "foreshadowing": [],
+                        "character_updates": [],
+                        "active_characters": ["林宇"],
+                        "retrieval_tags": ["隔离区"],
+                        "next_chapter_goal": "继续推进",
+                    },
+                )
+                save_json(str(project_path / "task_cards" / f"chapter_{chapter_number:04d}.json"), {"chapter_number": chapter_number})
+                save_json(str(project_path / "craft_briefs" / f"chapter_{chapter_number:04d}.json"), {"chapter_hook": "hook"})
+                save_json(
+                    str(project_path / "quality_reviews" / f"chapter_{chapter_number:04d}_attempt_1.json"),
+                    {"passed": True},
+                )
+
+            result = rollback_project(str(project_path), 1)
+
+            self.assertIn("craft_briefs/chapter_0002.json", result["removed"]["craft_briefs"])
+            self.assertIn("quality_reviews/chapter_0002_attempt_1.json", result["removed"]["quality_reviews"])
+            self.assertTrue((project_path / "craft_briefs" / "chapter_0001.json").exists())
+            self.assertTrue((project_path / "quality_reviews" / "chapter_0001_attempt_1.json").exists())
+            self.assertFalse((project_path / "craft_briefs" / "chapter_0002.json").exists())
+            self.assertFalse((project_path / "quality_reviews" / "chapter_0002_attempt_1.json").exists())
 
 
 if __name__ == "__main__":

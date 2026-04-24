@@ -84,7 +84,17 @@ INIT_SECTION_KEYS = ("world", "characters", "plot_state", "style")
 CHAPTER_TITLE_PATTERN = re.compile(
     r"^\s*(?:#{1,6}\s*)?第[0-9零一二三四五六七八九十百千万两〇]+[章节卷回部篇]\s*[：:.-]?\s*.+$"
 )
-STATS_PHASES = ("init", "outline", "writer", "summary", "polish", "audiobook")
+STATS_PHASES = (
+    "init",
+    "outline",
+    "craft_brief",
+    "writer",
+    "quality_review",
+    "rewrite",
+    "summary",
+    "polish",
+    "audiobook",
+)
 SNAPSHOT_DIR_NAME = "snapshots"
 SNAPSHOT_STATE_FILES = (
     "project.json",
@@ -287,6 +297,8 @@ def _build_llm_config(config: dict) -> dict:
         "max_tokens": config.get("max_tokens", 4000),
         "timeout": config.get("timeout", 120),
         "planning_mode": normalize_planning_mode(config.get("planning_mode")),
+        "writing_quality_mode": config.get("writing_quality_mode", "balanced"),
+        "review_mode": config.get("review_mode", "auto"),
     }
 
 
@@ -661,6 +673,8 @@ def init_project(config_path: str, progress_callback=None) -> str:
     (project_path / "summaries").mkdir(exist_ok=True)
     (project_path / "arc_summaries").mkdir(exist_ok=True)
     (project_path / "task_cards").mkdir(exist_ok=True)
+    (project_path / "craft_briefs").mkdir(exist_ok=True)
+    (project_path / "quality_reviews").mkdir(exist_ok=True)
     (project_path / "illustrations").mkdir(exist_ok=True)
     (project_path / "audiobook").mkdir(exist_ok=True)
     log_success("init_project: base directories ready")
@@ -767,6 +781,8 @@ def load_project(project_path: str) -> dict:
         "summaries_path": str(base / "summaries"),
         "arc_summaries_path": str(base / "arc_summaries"),
         "task_cards_path": str(base / "task_cards"),
+        "craft_briefs_path": str(base / "craft_briefs"),
+        "quality_reviews_path": str(base / "quality_reviews"),
         "illustrations_path": str(base / "illustrations"),
         "audiobook_path": str(base / "audiobook"),
     }
@@ -941,6 +957,8 @@ def _delete_future_artifacts(project_path: str, keep_chapter_count: int) -> dict
         "summaries": [],
         "arc_summaries": [],
         "task_cards": [],
+        "craft_briefs": [],
+        "quality_reviews": [],
         "illustrations": [],
         "audiobook": [],
         "snapshots": [],
@@ -963,6 +981,19 @@ def _delete_future_artifacts(project_path: str, keep_chapter_count: int) -> dict
         if chapter_number is not None and chapter_number > keep_chapter_count:
             _remove_path(task_card_path)
             removed["task_cards"].append(str(task_card_path.relative_to(base)).replace("\\", "/"))
+
+    for craft_brief_path in sorted((base / "craft_briefs").glob("chapter_*.json")):
+        chapter_number = _parse_numbered_name(craft_brief_path.name, "chapter_", ".json")
+        if chapter_number is not None and chapter_number > keep_chapter_count:
+            _remove_path(craft_brief_path)
+            removed["craft_briefs"].append(str(craft_brief_path.relative_to(base)).replace("\\", "/"))
+
+    for review_path in sorted((base / "quality_reviews").glob("chapter_*_attempt_*.json")):
+        match = re.fullmatch(r"chapter_(\d{4})_attempt_\d+\.json", review_path.name)
+        chapter_number = int(match.group(1)) if match else None
+        if chapter_number is not None and chapter_number > keep_chapter_count:
+            _remove_path(review_path)
+            removed["quality_reviews"].append(str(review_path.relative_to(base)).replace("\\", "/"))
 
     for arc_summary_path in sorted((base / "arc_summaries").glob("arc_*.json")):
         arc_index = _parse_numbered_name(arc_summary_path.name, "arc_", ".json")

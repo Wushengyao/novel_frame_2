@@ -11,6 +11,7 @@ from context_builder import (
     SUMMARY_LIST_LIMITS,
     build_retrieval_tags,
     build_summary_context,
+    normalize_craft_notes,
     normalize_live_plot_state,
     write_arc_summary,
 )
@@ -57,6 +58,7 @@ def _normalize_summary(summary: dict, current_state: dict) -> dict:
         "active_characters": live_state.get("active_characters", []),
         "retrieval_tags": _normalize_list((summary or {}).get("retrieval_tags"), max_items=SUMMARY_LIST_LIMITS["retrieval_tags"]),
         "next_chapter_goal": str((summary or {}).get("next_chapter_goal", "") or "").strip(),
+        "craft_notes": normalize_craft_notes((summary or {}).get("craft_notes")),
     }
     if not normalized["chapter_summary"]:
         normalized["chapter_summary"] = "；".join(normalized["recent_events"][:2])[:280]
@@ -78,6 +80,7 @@ def _fallback_summary(new_text: str, current_state: dict) -> dict:
     if not fallback["current_arc"]:
         fallback["current_arc"] = current_state.get("current_arc", "")
     fallback["retrieval_tags"] = build_retrieval_tags(fallback)
+    fallback["craft_notes"] = normalize_craft_notes({})
     return fallback
 
 

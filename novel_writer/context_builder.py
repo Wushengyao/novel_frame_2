@@ -23,7 +23,9 @@ WRITER_SECTION_LIMITS = {
     "chapter_task": 460,
     "live_state": 860,
     "retrieved_memory": 520,
+    "recent_craft_memory": 620,
     "recent_scene": 1700,
+    "craft_brief": 760,
     "style_contract": 220,
     "static_world": 420,
     "static_characters": 620,
@@ -32,13 +34,16 @@ WRITER_SOFT_TOTAL_CHARS = 7000
 WRITER_HARD_TOTAL_CHARS = 8000
 WRITER_TOTAL_REDUCTION_ORDER = (
     "retrieved_memory",
+    "recent_craft_memory",
     "recent_scene",
+    "craft_brief",
     "live_state",
     "static_characters",
     "static_world",
 )
 
 RECENT_SUMMARY_COUNT = 2
+RECENT_CRAFT_MEMORY_COUNT = 3
 RETRIEVED_MEMORY_LIMIT = 3
 ARC_SUMMARY_SPAN = 5
 
@@ -199,6 +204,18 @@ def normalize_author_intent(author_intent: dict | None) -> dict:
     return normalized
 
 
+def normalize_craft_notes(craft_notes: dict | None) -> dict:
+    source = craft_notes if isinstance(craft_notes, dict) else {}
+    return {
+        "repeated_actions": _normalize_string_list(source.get("repeated_actions"), max_items=6),
+        "recurring_gestures": _normalize_string_list(source.get("recurring_gestures"), max_items=6),
+        "scene_type": str(source.get("scene_type", "") or "").strip(),
+        "emotional_beat": str(source.get("emotional_beat", "") or "").strip(),
+        "ending_pattern": str(source.get("ending_pattern", "") or "").strip(),
+        "notable_phrasing": _normalize_string_list(source.get("notable_phrasing"), max_items=6),
+    }
+
+
 def _format_bullets(title: str, items: list[str], *, max_chars: int) -> str:
     if not items or max_chars <= 0:
         return ""
@@ -301,6 +318,7 @@ def _normalize_summary_payload(summary: dict | None, *, chapter_number: int) -> 
         "active_characters": _normalize_string_list(source.get("active_characters"), max_items=SUMMARY_LIST_LIMITS["active_characters"]),
         "retrieval_tags": _normalize_string_list(source.get("retrieval_tags"), max_items=SUMMARY_LIST_LIMITS["retrieval_tags"]),
         "next_chapter_goal": str(source.get("next_chapter_goal", "") or "").strip(),
+        "craft_notes": normalize_craft_notes(source.get("craft_notes")),
     }
     if not payload["retrieval_tags"]:
         payload["retrieval_tags"] = build_retrieval_tags(payload)
@@ -1205,6 +1223,72 @@ def _build_retrieved_memory_block(
     return _trim_text("\n".join(lines), max_chars)
 
 
+def _build_recent_craft_memory_block(project_path: str, chapter_count: int, *, max_chars: int) -> str:
+    lines = []
+    for payload in load_recent_summary_payloads(project_path, chapter_count, limit=RECENT_CRAFT_MEMORY_COUNT):
+        notes = normalize_craft_notes(payload.get("craft_notes"))
+        fragments = []
+        scene_type = notes.get("scene_type", "")
+        emotional_beat = notes.get("emotional_beat", "")
+        ending_pattern = notes.get("ending_pattern", "")
+        if scene_type:
+            fragments.append(f"场景类型={scene_type}")
+        if emotional_beat:
+            fragments.append(f"情绪节拍={emotional_beat}")
+        if ending_pattern:
+            fragments.append(f"结尾方式={ending_pattern}")
+        repeated = (notes.get("repeated_actions") or []) + (notes.get("recurring_gestures") or [])
+        if repeated:
+            fragments.append(f"动作/姿态={'; '.join(repeated[:4])}")
+        phrasing = notes.get("notable_phrasing") or []
+        if phrasing:
+            fragments.append(f"常用措辞={'; '.join(phrasing[:3])}")
+        if not fragments:
+            continue
+        candidate = f"- 第{payload['chapter_number']}章写法记忆: " + "；".join(fragments)
+        next_block = "\n".join(lines + [candidate])
+        if len(next_block) > max_chars:
+            break
+        lines.append(candidate)
+    if not lines:
+        return ""
+    return _trim_text(
+        "\n".join(lines)
+        + "\n使用方式: 下一章要保留连续性，但避免机械复用这些动作、姿态、情绪节拍和结尾方式；如必须复用，需赋予新的功能、代价或关系变化。",
+        max_chars,
+    )
+
+
+def _build_craft_brief_block(craft_brief: dict | None, *, max_chars: int) -> str:
+    if not isinstance(craft_brief, dict):
+        return ""
+    lines = []
+    mapping = (
+        ("钩子", "chapter_hook"),
+        ("戏剧问题", "dramatic_question"),
+        ("冲突压力", "conflict_pressure"),
+        ("情绪转折", "emotional_turn"),
+        ("场景调度", "scene_movement"),
+        ("感官调色", "sensory_palette"),
+        ("新鲜互动", "fresh_interaction_patterns"),
+        ("禁用重复", "forbidden_repeats"),
+        ("补充", "focus_notes"),
+    )
+    for label, key in mapping:
+        value = craft_brief.get(key)
+        if isinstance(value, list):
+            text = "；".join(str(item).strip() for item in value if str(item).strip())
+        else:
+            text = str(value or "").strip()
+        if not text:
+            continue
+        candidate = "\n".join(lines + [f"{label}: {text}"])
+        if len(candidate) > max_chars:
+            break
+        lines.append(f"{label}: {text}")
+    return _trim_text("\n".join(lines), max_chars)
+
+
 def _reduce_sections_to_target(sections: dict[str, str], target_chars: int) -> dict[str, str]:
     trimmed = dict(sections)
     total = sum(len(value) for value in trimmed.values() if value)
@@ -1237,6 +1321,7 @@ def build_writer_context(
     *,
     user_request: str = "",
     planning_mode: str,
+    craft_brief: dict | None = None,
 ) -> dict:
     chapter_count = safe_int(project_data.get("project", {}).get("chapter_count"), 0)
     plot_state = normalize_live_plot_state(project_data.get("plot_state"))
@@ -1280,6 +1365,15 @@ def build_writer_context(
             project_data.get("characters") or {},
             plot_state,
             max_chars=WRITER_SECTION_LIMITS["static_characters"],
+        ),
+        "recent_craft_memory": _build_recent_craft_memory_block(
+            project_path,
+            chapter_count,
+            max_chars=WRITER_SECTION_LIMITS["recent_craft_memory"],
+        ),
+        "craft_brief": _build_craft_brief_block(
+            craft_brief,
+            max_chars=WRITER_SECTION_LIMITS["craft_brief"],
         ),
     }
     sections["recent_scene"] = _build_recent_scene_block(

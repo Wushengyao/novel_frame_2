@@ -682,6 +682,35 @@ def build_progression_options_prompt(
 """
 
 
+def build_craft_brief_prompt(data: dict) -> str:
+    sections = data.get("sections", {}) if isinstance(data, dict) else {}
+    prompt_body = _join_blocks(
+        "你是一名长篇小说创作总监。请在正式写正文前，为下一章设计一份短小但可执行的创作蓝图。",
+        _section_block("作者意图", sections.get("author_intent", "")),
+        _section_block("下一章任务卡", sections.get("chapter_task", "")),
+        _section_block("当前 live state", sections.get("live_state", "")),
+        _section_block("世界", sections.get("static_world", "")),
+        _section_block("角色", sections.get("static_characters", "")),
+        _section_block("更早相关记忆", sections.get("retrieved_memory", "")),
+        _section_block("近期写法避让", sections.get("recent_craft_memory", "")),
+        _section_block("最近场景", sections.get("recent_scene", "")),
+        _section_block("补充写作约束", sections.get("style_contract", "")),
+    )
+    return f"""{prompt_body}
+
+要求：
+1. 输出必须是合法 JSON
+2. 只设计当前这一章，不要改变任务卡的核心目标
+3. 蓝图要帮助正文更吸引人：开章钩子、戏剧问题、压力来源、人物选择、情绪转折都要具体
+4. `forbidden_repeats` 必须列出需要避开的上一章表层动作、姿态、句式或结尾套路
+5. `fresh_interaction_patterns` 要给出新的互动方式，不要只写“更细腻”“更紧张”这类抽象要求
+6. 不要输出解释，不要输出 Markdown
+
+输出 JSON 骨架：
+{{"chapter_hook":"","dramatic_question":"","conflict_pressure":"","emotional_turn":"","scene_movement":[],"sensory_palette":[],"fresh_interaction_patterns":[],"forbidden_repeats":[],"focus_notes":""}}
+"""
+
+
 def build_writer_prompt(
     data: dict,
     recent_text: str = "",
@@ -705,6 +734,8 @@ def build_writer_prompt(
             _section_block("世界", sections.get("static_world", "")),
             _section_block("角色", sections.get("static_characters", "")),
             _section_block("更早相关记忆", sections.get("retrieved_memory", "")),
+            _section_block("近期写法避让", sections.get("recent_craft_memory", "")),
+            _section_block("本章创作蓝图", sections.get("craft_brief", "")),
             _section_block("最近场景", sections.get("recent_scene", "")),
             _section_block("补充写作约束", sections.get("style_contract", "")),
             _section_block("开篇说明", opening_note),
@@ -715,9 +746,11 @@ def build_writer_prompt(
 1. 人物、地点、时间、未解线程与已写正文必须一致；不要遗忘伏笔，也不要把已解决的事情重新写回未解决
 2. 本章必须产生至少一项新的可验证变化；若沿用同一地点、目标或冲突，也要写出新的信息、代价、决定或结果
 3. 严格只写当前这一章。任务卡是当前章节任务的最高优先级来源，不要提前完成下一章或后续章节的大事件
-4. 结尾可留下明确悬念或过渡，但不要把后续章核心情节直接写完
-5. 输出纯正文，不要章标题、序号、小标题、Markdown 标题
-6. 字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读
+4. 如果提供了“近期写法避让”和“本章创作蓝图”，必须避开其中列出的表层重复；同类动作只有在产生新功能、新代价或新关系变化时才能使用
+5. 开章要尽快给读者一个具体钩子；场景推进要有压力、选择、结果，不要只在同一种姿态和情绪里反复停留
+6. 结尾可留下明确悬念或过渡，但不要把后续章核心情节直接写完
+7. 输出纯正文，不要章标题、序号、小标题、Markdown 标题
+8. 字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读
 """
 
     world = _to_block(data.get("world", {}))
@@ -785,6 +818,59 @@ def build_writer_prompt(
 """
 
 
+def build_quality_review_prompt(data: dict, draft_text: str, *, strict: bool = False) -> str:
+    sections = data.get("sections", {}) if isinstance(data, dict) else {}
+    threshold_note = "高质量模式：评分要严格，重复动作、无效拖延、弱钩子都应指出。" if strict else "平衡模式：重点识别明显问题。"
+    prompt_body = _join_blocks(
+        "你是一名长篇小说责任编辑。请审阅这章草稿是否完成任务、是否吸引人、是否重复上一章写法。",
+        _section_block("审稿模式", threshold_note),
+        _section_block("作者意图", sections.get("author_intent", "")),
+        _section_block("下一章任务卡", sections.get("chapter_task", "")),
+        _section_block("当前 live state", sections.get("live_state", "")),
+        _section_block("近期写法避让", sections.get("recent_craft_memory", "")),
+        _section_block("本章创作蓝图", sections.get("craft_brief", "")),
+        _section_block("最近场景", sections.get("recent_scene", "")),
+        _section_block("待审草稿", draft_text),
+    )
+    return f"""{prompt_body}
+
+要求：
+1. 输出必须是合法 JSON
+2. 六个分项分数都用 0 到 10，分数越高越好
+3. `repetition_risk` 的高分代表重复风险低、写法新鲜；低分代表动作/句式/场景结构复用明显
+4. `passed` 表示是否可以作为最终章节保存
+5. `revision_guidance` 必须具体指出需要如何改，不要泛泛而谈
+6. 不要输出解释，不要输出 Markdown
+
+输出 JSON 骨架：
+{{"scores":{{"task_completion":0,"reader_hook":0,"scene_freshness":0,"character_specificity":0,"repetition_risk":0,"continuity":0}},"passed":false,"strengths":[],"issues":[],"revision_guidance":"","repeat_examples":[]}}
+"""
+
+
+def build_rewrite_prompt(data: dict, draft_text: str, review_report: dict) -> str:
+    sections = data.get("sections", {}) if isinstance(data, dict) else {}
+    review_block = _to_block(review_report)
+    prompt_body = _join_blocks(
+        "你是一名长篇小说改稿助手。请根据审稿意见重写当前章节，并只输出重写后的完整正文。",
+        _section_block("作者意图", sections.get("author_intent", "")),
+        _section_block("下一章任务卡", sections.get("chapter_task", "")),
+        _section_block("当前 live state", sections.get("live_state", "")),
+        _section_block("近期写法避让", sections.get("recent_craft_memory", "")),
+        _section_block("本章创作蓝图", sections.get("craft_brief", "")),
+        _section_block("最近场景", sections.get("recent_scene", "")),
+        _section_block("审稿报告", review_block),
+        _section_block("原草稿", draft_text),
+    )
+    return f"""{prompt_body}
+
+要求：
+1. 保留已经正确完成的剧情目标和连续性
+2. 优先修复审稿报告中的低分项，尤其是重复动作、弱钩子、场景空转、人物反应泛化
+3. 不要写改稿说明，不要输出 JSON，不要输出 Markdown 标题
+4. 输出纯正文，字数建议仍在 3000 字以上、5000 字以下
+"""
+
+
 def build_summary_prompt(data: dict, new_text: str) -> str:
     if isinstance(data, dict) and isinstance(data.get("sections"), dict):
         sections = data["sections"]
@@ -805,10 +891,11 @@ def build_summary_prompt(data: dict, new_text: str) -> str:
 5. `chapter_summary` 用 1 到 2 句话概括本章核心推进
 6. `next_chapter_goal` 写本章结束后最该继续推进的一步；如果本章主任务已完成，不要直接重复任务卡原句
 7. `retrieval_tags` 给出便于后续检索的简短标签
-8. 不要输出解释，不要输出 Markdown
+8. `craft_notes` 记录本章已经用过的写法，供下一章避让重复；包括 repeated_actions、recurring_gestures、scene_type、emotional_beat、ending_pattern、notable_phrasing
+9. 不要输出解释，不要输出 Markdown
 
 输出 JSON 骨架：
-{{"chapter_summary":"","current_location":"","current_time":"","current_arc":"","recent_events":[],"open_threads":[],"resolved_threads":[],"foreshadowing":[],"character_updates":[],"active_characters":[],"retrieval_tags":[],"next_chapter_goal":""}}
+{{"chapter_summary":"","current_location":"","current_time":"","current_arc":"","recent_events":[],"open_threads":[],"resolved_threads":[],"foreshadowing":[],"character_updates":[],"active_characters":[],"retrieval_tags":[],"next_chapter_goal":"","craft_notes":{{"repeated_actions":[],"recurring_gestures":[],"scene_type":"","emotional_beat":"","ending_pattern":"","notable_phrasing":[]}}}}
 """
 
     plot_state = _to_block(data.get("plot_state", {}))
@@ -831,7 +918,15 @@ def build_summary_prompt(data: dict, new_text: str) -> str:
   "open_threads": [],
   "foreshadowing": [],
   "character_updates": [],
-  "next_chapter_goal": ""
+  "next_chapter_goal": "",
+  "craft_notes": {{
+    "repeated_actions": [],
+    "recurring_gestures": [],
+    "scene_type": "",
+    "emotional_beat": "",
+    "ending_pattern": "",
+    "notable_phrasing": []
+  }}
 }}
 """
 

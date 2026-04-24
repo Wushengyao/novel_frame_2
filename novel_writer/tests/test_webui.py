@@ -568,6 +568,54 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             )
 
         self.assertEqual(captured["config"]["model_name"], "qwen2.5:14b")
+        self.assertEqual(captured["config"]["writing_quality_mode"], "balanced")
+        self.assertEqual(captured["config"]["review_mode"], "auto")
+
+        with patch("webui.init_project", side_effect=fake_init_project):
+            webui._create_project(
+                {
+                    "provider": "ollama",
+                    "model_preset": "qwen2.5:14b",
+                    "story_request": "测试故事",
+                    "writing_quality_mode": "high",
+                    "review_mode": "manual",
+                },
+                {"OLLAMA_API_KEY": ""},
+            )
+
+        self.assertEqual(captured["config"]["writing_quality_mode"], "high")
+        self.assertEqual(captured["config"]["review_mode"], "manual")
+
+    def test_runtime_overrides_include_quality_and_review_modes(self) -> None:
+        overrides = webui._runtime_overrides_from_form(
+            {
+                "provider": "ollama",
+                "model_preset": "qwen2.5:14b",
+                "writing_quality_mode": "high",
+                "review_mode": "manual",
+            }
+        )
+
+        self.assertEqual(overrides["writing_quality_mode"], "high")
+        self.assertEqual(overrides["review_mode"], "manual")
+
+    def test_runtime_config_defaults_and_overrides_quality_modes(self) -> None:
+        project = load_json(str(self.project_path / "project.json"))
+        project["llm_config"].pop("writing_quality_mode", None)
+        project["llm_config"].pop("review_mode", None)
+        save_json(str(self.project_path / "project.json"), project)
+
+        config = webui._build_runtime_config(self.project_path, {}, {"OLLAMA_API_KEY": ""})
+        self.assertEqual(config["writing_quality_mode"], "balanced")
+        self.assertEqual(config["review_mode"], "auto")
+
+        config = webui._build_runtime_config(
+            self.project_path,
+            {"writing_quality_mode": "high", "review_mode": "manual"},
+            {"OLLAMA_API_KEY": ""},
+        )
+        self.assertEqual(config["writing_quality_mode"], "high")
+        self.assertEqual(config["review_mode"], "manual")
 
     def test_runtime_overrides_includes_log_llm_payload_when_checked(self) -> None:
         overrides = webui._runtime_overrides_from_form(

@@ -62,7 +62,14 @@ from project_manager import (
     rollback_project,
 )
 from runtime_config import (
+    DEFAULT_REVIEW_MODE,
+    DEFAULT_WRITING_QUALITY_MODE,
+    REVIEW_MODE_AUTO,
+    REVIEW_MODE_MANUAL,
     WEB_SELECTABLE_PROVIDERS,
+    WRITING_QUALITY_BALANCED,
+    WRITING_QUALITY_HIGH,
+    WRITING_QUALITY_LIGHT,
     api_key_for_provider as shared_api_key_for_provider,
     build_runtime_config as shared_build_runtime_config,
     default_api_base_for_provider as shared_default_api_base_for_provider,
@@ -70,6 +77,8 @@ from runtime_config import (
     default_timeout_for_provider as shared_default_timeout_for_provider,
     load_runtime_config as shared_load_runtime_config,
     load_model_presets as shared_load_model_presets,
+    normalize_review_mode,
+    normalize_writing_quality_mode,
     normalize_provider as shared_normalize_provider,
     provider_requires_api_key as shared_provider_requires_api_key,
     resolve_timeout_for_provider as shared_resolve_timeout_for_provider,
@@ -737,6 +746,47 @@ def _render_planning_mode_options(selected: str, *, include_project_default: boo
     return "".join(options)
 
 
+def _quality_mode_label(mode: str) -> str:
+    mapping = {
+        WRITING_QUALITY_LIGHT: "轻量：只增强写作提示",
+        WRITING_QUALITY_BALANCED: "平衡：蓝图 + 质检",
+        WRITING_QUALITY_HIGH: "高质量：严格质检 + 可重写",
+    }
+    return mapping.get(normalize_writing_quality_mode(mode), mapping[DEFAULT_WRITING_QUALITY_MODE])
+
+
+def _render_quality_mode_options(selected: str, *, include_project_default: bool = False) -> str:
+    normalized = normalize_writing_quality_mode(selected)
+    options = []
+    if include_project_default:
+        selected_attr = ' selected' if not selected else ""
+        options.append(f'<option value=""{selected_attr}>沿用项目设置</option>')
+    for value in (WRITING_QUALITY_LIGHT, WRITING_QUALITY_BALANCED, WRITING_QUALITY_HIGH):
+        selected_attr = ' selected' if normalized == value and not include_project_default else ""
+        options.append(f'<option value="{value}"{selected_attr}>{_quality_mode_label(value)}</option>')
+    return "".join(options)
+
+
+def _review_mode_label(mode: str) -> str:
+    mapping = {
+        REVIEW_MODE_AUTO: "自动：高质量失败时重写一次",
+        REVIEW_MODE_MANUAL: "手动：只保存质检报告",
+    }
+    return mapping.get(normalize_review_mode(mode), mapping[DEFAULT_REVIEW_MODE])
+
+
+def _render_review_mode_options(selected: str, *, include_project_default: bool = False) -> str:
+    normalized = normalize_review_mode(selected)
+    options = []
+    if include_project_default:
+        selected_attr = ' selected' if not selected else ""
+        options.append(f'<option value=""{selected_attr}>沿用项目设置</option>')
+    for value in (REVIEW_MODE_AUTO, REVIEW_MODE_MANUAL):
+        selected_attr = ' selected' if normalized == value and not include_project_default else ""
+        options.append(f'<option value="{value}"{selected_attr}>{_review_mode_label(value)}</option>')
+    return "".join(options)
+
+
 def _auto_selection_mode_label(mode: str) -> str:
     return "随机模式" if str(mode or "").strip().lower() == "random" else "推荐模式"
 
@@ -815,6 +865,8 @@ def _runtime_overrides_from_form(form: dict[str, str]) -> dict[str, str]:
             "provider": form.get("provider"),
             "model_name": _resolve_model_name_from_form(form),
             "planning_mode": form.get("planning_mode"),
+            "writing_quality_mode": form.get("writing_quality_mode"),
+            "review_mode": form.get("review_mode"),
             "temperature": form.get("temperature"),
             "max_tokens": form.get("max_tokens"),
             "timeout": form.get("timeout"),
@@ -907,6 +959,7 @@ def _render_runtime_override_fields(
     base_model: str = "",
     *,
     include_planning_mode: bool = True,
+    include_quality_fields: bool = True,
 ) -> str:
     effective_provider = _normalize_provider_for_ui(base_provider, default="gemini")
     initial_blank_label = _model_blank_label(
@@ -930,6 +983,25 @@ def _render_runtime_override_fields(
         if include_planning_mode
         else '<div class="muted">留空则沿用项目设置；这些覆盖只对本次调用生效。</div>'
     )
+    quality_fields_html = (
+        f"""
+    <div class="two-col">
+      <label>写作质量模式
+        <select name="writing_quality_mode">
+          {_render_quality_mode_options("", include_project_default=True)}
+        </select>
+      </label>
+      <label>审稿模式
+        <select name="review_mode">
+          {_render_review_mode_options("", include_project_default=True)}
+        </select>
+      </label>
+    </div>
+    <div class="muted">留空则沿用项目设置。平衡模式会先生成本章创作蓝图，写后保存质检报告；高质量模式在自动审稿失败时最多重写一次。</div>
+        """
+        if include_quality_fields
+        else ""
+    )
     return f"""
     <div class="two-col">
       <label>临时后端覆盖
@@ -940,6 +1012,7 @@ def _render_runtime_override_fields(
       {planning_field_html}
     </div>
     {planning_help_html}
+    {quality_fields_html}
     <div class="two-col">
       <label>模型预设
         <select
@@ -1000,6 +1073,8 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_cal
         "init_with_llm": True,
         "story_request": (form.get("story_request") or "").strip(),
         "planning_mode": normalize_planning_mode(form.get("planning_mode")),
+        "writing_quality_mode": normalize_writing_quality_mode(form.get("writing_quality_mode")),
+        "review_mode": normalize_review_mode(form.get("review_mode")),
         "model_provider": provider,
         "model_name": (resolved_model_name or _default_model_for_provider(provider)).strip(),
         "api_base": (form.get("api_base") or _default_api_base_for_provider(provider)).strip(),
@@ -2681,6 +2756,19 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                   </select>
                 </label>
                 <div class="muted">{escape(_planning_mode_help(DEFAULT_PLANNING_MODE))}</div>
+                <div class="two-col">
+                  <label>写作质量模式
+                    <select name="writing_quality_mode">
+                      {_render_quality_mode_options(DEFAULT_WRITING_QUALITY_MODE)}
+                    </select>
+                  </label>
+                  <label>审稿模式
+                    <select name="review_mode">
+                      {_render_review_mode_options(DEFAULT_REVIEW_MODE)}
+                    </select>
+                  </label>
+                </div>
+                <div class="muted">默认平衡模式会先生成短蓝图，写后保存质检报告；高质量模式可在自动审稿失败时重写一次。</div>
                 <button type="submit">创建项目</button>
               </form>
             </section>
@@ -2791,6 +2879,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <p><strong>请求：</strong>{stats.get("requests", 0)} 次</p>
               <p><strong>Token：</strong>{stats.get("total_tokens", 0)}</p>
               <p><strong>Planning:</strong>{escape(_planning_mode_label(project.get("planning_mode", DEFAULT_PLANNING_MODE)))}</p>
+              <p><strong>Quality:</strong>{escape(_quality_mode_label((project.get("llm_config") or {}).get("writing_quality_mode", DEFAULT_WRITING_QUALITY_MODE)))}</p>
+              <p><strong>Review:</strong>{escape(_review_mode_label((project.get("llm_config") or {}).get("review_mode", DEFAULT_REVIEW_MODE)))}</p>
             </section>
             <section class="panel">
               <h3>后台任务</h3>
@@ -2995,6 +3085,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             str(project_llm_config.get("model_provider") or ""),
             str(project_llm_config.get("model_name") or project_llm_config.get("model") or ""),
             include_planning_mode=False,
+            include_quality_fields=False,
         )
         polish_preset_html = _render_polish_preset_checkboxes()
         previous_link = (
@@ -3563,6 +3654,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 <p><strong>请求：</strong>{stats.get("requests", 0)} 次</p>
                 <p><strong>Token：</strong>{stats.get("total_tokens", 0)}</p>
                 <p><strong>Planning:</strong>{escape(_planning_mode_label(planning_mode))}</p>
+                <p><strong>Quality:</strong>{escape(_quality_mode_label(project_llm_config.get("writing_quality_mode", DEFAULT_WRITING_QUALITY_MODE)))}</p>
+                <p><strong>Review:</strong>{escape(_review_mode_label(project_llm_config.get("review_mode", DEFAULT_REVIEW_MODE)))}</p>
               </div>
             </section>
             <section class="panel">

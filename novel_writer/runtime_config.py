@@ -39,6 +39,22 @@ DEFAULT_API_BASES = {
 DEFAULT_TIMEOUTS = {
     "ollama": 900,
 }
+WRITING_QUALITY_LIGHT = "light"
+WRITING_QUALITY_BALANCED = "balanced"
+WRITING_QUALITY_HIGH = "high"
+DEFAULT_WRITING_QUALITY_MODE = WRITING_QUALITY_BALANCED
+WRITING_QUALITY_MODES = {
+    WRITING_QUALITY_LIGHT,
+    WRITING_QUALITY_BALANCED,
+    WRITING_QUALITY_HIGH,
+}
+REVIEW_MODE_AUTO = "auto"
+REVIEW_MODE_MANUAL = "manual"
+DEFAULT_REVIEW_MODE = REVIEW_MODE_AUTO
+REVIEW_MODES = {
+    REVIEW_MODE_AUTO,
+    REVIEW_MODE_MANUAL,
+}
 MODEL_PRESETS_PATH = Path(__file__).resolve().parent / "model_presets.json"
 DEFAULT_MODEL_PRESETS = {
     "gemini": [
@@ -72,6 +88,8 @@ RUNTIME_OVERRIDE_KEYS = (
     "max_tokens",
     "timeout",
     "planning_mode",
+    "writing_quality_mode",
+    "review_mode",
     "log_llm_payload",
 )
 
@@ -108,6 +126,20 @@ def default_api_base_for_provider(provider: str) -> str:
 def default_timeout_for_provider(provider: str) -> int:
     normalized = normalize_provider(provider, default="openai_compatible")
     return DEFAULT_TIMEOUTS.get(normalized, 120)
+
+
+def normalize_writing_quality_mode(mode: object, default: str = DEFAULT_WRITING_QUALITY_MODE) -> str:
+    normalized = str(mode or "").strip().lower()
+    if normalized in WRITING_QUALITY_MODES:
+        return normalized
+    return default
+
+
+def normalize_review_mode(mode: object, default: str = DEFAULT_REVIEW_MODE) -> str:
+    normalized = str(mode or "").strip().lower()
+    if normalized in REVIEW_MODES:
+        return normalized
+    return default
 
 
 def _normalize_model_preset_entry(entry: object) -> dict[str, str] | None:
@@ -198,6 +230,12 @@ def sanitize_runtime_overrides(overrides: dict | None) -> dict[str, str]:
         if key == "planning_mode":
             sanitized[key] = normalize_planning_mode(value, default=DEFAULT_PLANNING_MODE)
             continue
+        if key == "writing_quality_mode":
+            sanitized[key] = normalize_writing_quality_mode(value)
+            continue
+        if key == "review_mode":
+            sanitized[key] = normalize_review_mode(value)
+            continue
         sanitized[key] = str(value).strip()
     return sanitized
 
@@ -215,6 +253,8 @@ def _normalized_llm_config(raw: dict) -> dict:
         "max_tokens": raw.get("max_tokens", 4000),
         "timeout": resolve_timeout_for_provider(provider, raw.get("timeout", default_timeout_for_provider(provider))),
         "planning_mode": normalize_planning_mode(raw.get("planning_mode"), default=DEFAULT_PLANNING_MODE),
+        "writing_quality_mode": normalize_writing_quality_mode(raw.get("writing_quality_mode")),
+        "review_mode": normalize_review_mode(raw.get("review_mode")),
         "log_llm_payload": _coerce_bool(raw.get("log_llm_payload")),
     }
     return config
@@ -273,6 +313,12 @@ def build_runtime_config(project_path: str | Path, overrides: dict[str, object],
         "planning_mode": normalize_planning_mode(
             runtime_overrides.get("planning_mode") or project.get("planning_mode"),
             default=DEFAULT_PLANNING_MODE,
+        ),
+        "writing_quality_mode": normalize_writing_quality_mode(
+            runtime_overrides.get("writing_quality_mode") or saved.get("writing_quality_mode")
+        ),
+        "review_mode": normalize_review_mode(
+            runtime_overrides.get("review_mode") or saved.get("review_mode")
         ),
         "log_llm_payload": _coerce_bool(
             runtime_overrides.get("log_llm_payload"),
