@@ -20,10 +20,11 @@
   - `linux/quick_continue.sh`：Linux 下只负责续写已有项目
   - `linux/quick_rollback.sh`：Linux 下回滚到指定章节状态
 - API key 单独放在 `api_keys.sh`
+- ComfyUI、VoxCPM2 这类外部服务地址和本地路径放在 `external_services.json`
 - 参数优先直接写在脚本顶部的 `Editable Parameters` 区域
 - 脚本内部会按这些参数临时生成运行配置
 
-你仍然可以直接调用 `app.py` 的 `--config` 工作流，但这已经不是默认推荐方式。
+你仍然可以直接调用 `app.py` 的 `--config` 工作流，但这已经不是默认推荐方式。`config.json` 更适合一次性 LLM 运行配置；部署环境相关的外部接口建议统一放进 `external_services.json`。
 
 ## 目录结构
 
@@ -34,6 +35,8 @@ novel_writer/
   prompt_builder.py
   project_manager.py
   illustration_manager.py
+  external_services.py
+  external_services.example.json
   state_updater.py
   webui.py
   api_keys.sh
@@ -74,6 +77,7 @@ output/
     chapters/
     summaries/
     illustrations/
+    audiobook/
     snapshots/
 ```
 
@@ -127,7 +131,60 @@ ollama serve
 ollama pull llama3.2
 ```
 
-## 2. 初始化新项目
+## 2. 外部服务配置（部署迁移）
+
+外部服务统一由 [external_services.py](/home/wsy/novel_frame_2/novel_writer/external_services.py) 读取配置。首次部署时复制示例文件：
+
+```bash
+cd /home/wsy/novel_frame_2/novel_writer
+cp external_services.example.json external_services.json
+```
+
+`external_services.json` 已被 `.gitignore` 忽略，适合保存每台机器不同的 ComfyUI 地址、workflow 路径、checkpoint、VoxCPM2 环境路径等部署参数。如果你想把配置文件放到别处：
+
+```bash
+export NOVEL_EXTERNAL_SERVICES_CONFIG=/your/path/external_services.json
+```
+
+覆盖优先级：
+
+```text
+命令行参数 / Web 表单临时参数 > NOVEL_* 环境变量 > external_services.json > 项目中保存的历史配置 > 内置默认值和自动探测
+```
+
+常用配置片段：
+
+```json
+{
+  "comfyui": {
+    "api_base": "http://127.0.0.1:8188",
+    "root": "/home/wsy/ComfyUI_cu128_50XX/ComfyUI",
+    "workflow_template": "/home/wsy/ComfyUI_cu128_50XX/workflow/image_z_image_turbo (2).json",
+    "checkpoint": "illusious/illustrij_v21.safetensors",
+    "width": 1280,
+    "height": 1280,
+    "steps": 8,
+    "cfg": 1.0
+  },
+  "voxcpm2": {
+    "root": "/home/wsy/VoxCPM2",
+    "python": "/home/wsy/VoxCPM2/.venv/bin/python",
+    "model_id": "openbmb/VoxCPM2",
+    "device": "auto"
+  }
+}
+```
+
+说明：
+
+- `comfyui.api_base` 是 ComfyUI 的 HTTP API 地址
+- `comfyui.root` 用于自动寻找 `models/checkpoints/`
+- `comfyui.workflow_template` 可直接指定 workflow JSON
+- `voxcpm2.python` 是 VoxCPM2 虚拟环境里的 Python
+- `voxcpm2.root` 会自动加入 worker 的 `PYTHONPATH`
+- API key 仍然放在 `api_keys.sh`，不要写进 `external_services.json`
+
+## 3. 初始化新项目
 
 `linux/quick_start.sh` 现在只做一件事：初始化。
 
@@ -191,7 +248,7 @@ DEFAULT_OUTLINE_REQUEST=""
 
 通过脚本初始化时，新项目默认会创建在 [output](/home/wsy/novel_frame_2/novel_writer/output) 目录下。
 
-## 3. 续写已有项目
+## 4. 续写已有项目
 
 `linux/quick_continue.sh` 只负责续写。
 
@@ -258,7 +315,7 @@ DEFAULT_PROVIDER_OVERRIDE=""
 - 如果传了新的 provider，脚本会自动用 `api_keys.sh` 中对应的 key
 - 如果切到 `ollama`，则默认不要求 API key
 
-## 4. 回滚到指定章节
+## 5. 回滚到指定章节
 
 现在支持把项目回滚到“第 N 章写完后的状态”，回滚后可以直接继续 `continue`。
 
@@ -309,7 +366,7 @@ python3 app.py rollback --project ./output/novel_project_xxx --to-chapter 4
 - 旧项目如果之前还没有快照，系统会优先尝试用 `snapshots/` 恢复；缺失时会退化为用 `summary_xxxx.json` 做 best-effort 恢复
 - 对旧项目来说，只要升级后再继续写一次，系统就会先补当前状态快照，之后再回滚会更稳
 
-## 5. 重生成分卷 / 分章大纲
+## 6. 重生成分卷 / 分章大纲
 
 `linux/quick_outline.sh` 用来单独重生成大纲，支持写入你想看的剧情、节奏或限制条件。
 
@@ -358,7 +415,7 @@ DEFAULT_PROVIDER_OVERRIDE=""
 - 如果你先重生成了分卷大纲，再直接续写，系统会提示先同步分章大纲
 - 这样可以避免“卷纲已经换了，但章纲还是旧的”造成正文跑偏
 
-## 6. Web UI
+## 7. Web UI
 
 现在项目已经带了一个基础 Web UI，支持：
 
@@ -368,6 +425,7 @@ DEFAULT_PROVIDER_OVERRIDE=""
 - 直接在网页里续写
 - 在网页里新建项目
 - 用 ComfyUI 为章节生成插图并在网页中浏览
+- 用 VoxCPM2 为章节生成有声版并在网页中播放
 - 生成“下一章推进选项”，再按选项续写
 - 在页面里直接重启 Web UI，或拉取代码更新后自动重启
 
@@ -444,7 +502,7 @@ NOVEL_WRITER_AUTH_ENABLED=0
 
 然后重启 Web UI。
 
-## 7. ComfyUI 插图能力
+## 8. ComfyUI 插图能力
 
 现在项目支持把章节正文送入 ComfyUI 生成插图：
 
@@ -453,13 +511,13 @@ NOVEL_WRITER_AUTH_ENABLED=0
 - `windows/quick_illustrate.ps1` / `windows/quick_illustrate.bat`：Windows 下快速给章节配图
 - Web UI 项目页与章节页都可以直接触发插图生成
 
-默认会优先自动寻找同级目录中的 ComfyUI 安装，例如：
+推荐先在 `external_services.json` 中配置 ComfyUI。未配置时，系统会继续尝试自动寻找同级目录中的 ComfyUI 安装，例如：
 
 ```text
 ../ComfyUI_cu128_50XX/ComfyUI
 ```
 
-默认会尝试从 `ComfyUI/models/checkpoints/` 中挑选合适的 checkpoint；如果自动识别失败，可通过环境变量覆盖：
+默认会尝试从 `ComfyUI/models/checkpoints/` 中挑选合适的 checkpoint；如果自动识别失败，可在 `external_services.json` 中填写 `comfyui.checkpoint`，也可通过环境变量覆盖：
 
 - `NOVEL_COMFYUI_ROOT`
 - `NOVEL_COMFYUI_API_BASE`
@@ -484,7 +542,47 @@ python3 app.py next --project ./output/novel_project_xxx --config ./runtime_conf
 
 插图会保存到项目目录下的 `illustrations/chapter_xxxx/` 中，并生成对应的 `metadata.json` 记录提示词和生成参数。
 
-## 8. 默认模型与可覆盖项
+## 9. VoxCPM2 有声小说
+
+项目支持把章节拆分成旁白、对话和内心独白片段，再通过 VoxCPM2 worker 合成为 WAV。
+
+推荐先在 `external_services.json` 中配置：
+
+```json
+{
+  "voxcpm2": {
+    "root": "/home/wsy/VoxCPM2",
+    "python": "/home/wsy/VoxCPM2/.venv/bin/python",
+    "model_id": "openbmb/VoxCPM2",
+    "device": "auto",
+    "silence_ms": 260
+  }
+}
+```
+
+命令行示例：
+
+```bash
+python3 app.py audiobook --project ./output/novel_project_xxx --chapter latest
+```
+
+临时覆盖示例：
+
+```bash
+python3 app.py audiobook --project ./output/novel_project_xxx --chapter chapter_0001 --voxcpm-root /srv/VoxCPM2 --voxcpm-python /srv/VoxCPM2/.venv/bin/python --voxcpm-model-id /models/VoxCPM2
+```
+
+也可以用环境变量覆盖：
+
+- `NOVEL_VOXCPM2_ROOT`
+- `NOVEL_VOXCPM2_PYTHON`
+- `NOVEL_VOXCPM2_MODEL_ID`
+- `NOVEL_VOXCPM2_DEVICE`
+- `NOVEL_VOXCPM2_TIMEOUT_SECONDS`
+
+Web UI 的章节页和项目页也可以直接生成有声章节，并支持上传旁白或角色参考 WAV。生成结果会保存到项目目录下的 `audiobook/chapter_xxxx/`，并写入 `manifest.json`。
+
+## 10. 默认模型与可覆盖项
 
 脚本会为不同 provider 自动选择默认模型：
 
@@ -527,7 +625,7 @@ python3 app.py next --project ./output/novel_project_xxx --config ./runtime_conf
 - `NOVEL_TIMEOUT_OVERRIDE`
 - `NOVEL_API_KEY`
 
-## 9. 用户想看的内容
+## 11. 用户想看的内容
 
 现在有两种入口可以临时加入你的要求：
 
@@ -542,7 +640,7 @@ python3 app.py next --project ./output/novel_project_xxx --config ./runtime_conf
 
 如果不传，模型就按当前设定和剧情状态自由发挥。
 
-## 10. 统计信息
+## 12. 统计信息
 
 项目会在 `project.json` 中累计记录：
 
@@ -564,12 +662,13 @@ python3 app.py status --project <项目目录>
 
 即可看到这些统计信息和当前快照覆盖到第几章。
 
-## 11. 设计说明
+## 13. 设计说明
 
 当前方案相较之前更轻：
 
 - 你不需要维护多份 `config.*.json`
 - API key 不再混在项目配置里
+- ComfyUI、VoxCPM2 等外部接口有统一配置文件和封装模块，换机器部署时只改 `external_services.json`
 - `linux/quick_start.sh`、`linux/quick_outline.sh`、`linux/quick_continue.sh` 和 `linux/quick_rollback.sh` 职责清晰
 - 初始化先做分卷，再做分章，正文写作时会显式参考章纲，整体流程更稳
 - 状态快照和章节文件分离，方便回滚后从保留章节继续写新分支

@@ -4,17 +4,23 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
-import json
 import os
 import random
 import re
-import time
 from pathlib import Path
 from threading import Lock
 from typing import Any
-from urllib import error, parse, request
 
 from common_utils import emit_progress, extract_json_object, safe_int, utc_now
+from external_services import (
+    ComfyUIClient,
+    DEFAULT_COMFYUI_PREFERRED_CHECKPOINTS,
+    DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT,
+    DEFAULT_ILLUSTRATION_STYLE_PRESET,
+    DEFAULT_WORKFLOW_TEMPLATE_NAME,
+    load_service_config,
+    normalize_http_base,
+)
 from llm_client import generate_text_with_metadata
 from project_manager import load_json, load_project, save_json, update_project_stats
 from prompt_builder import build_illustration_prompt
@@ -25,23 +31,13 @@ LEGACY_DEFAULT_NEGATIVE_PROMPT = (
     "deformed body, duplicate, multiple views, split panels, comic page, text, watermark, logo, caption, "
     "jpeg artifacts, cropped, out of frame"
 )
-DEFAULT_NEGATIVE_PROMPT = ""
+DEFAULT_NEGATIVE_PROMPT = DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT
 LEGACY_DEFAULT_STYLE_PRESET = (
     "masterpiece, best quality, detailed light novel illustration, cinematic composition, expressive characters, "
     "rich environmental storytelling, dramatic winter atmosphere, soft volumetric lighting"
 )
-DEFAULT_STYLE_PRESET = (
-    "clean subject separation, layered depth, expressive body language, atmospheric perspective"
-)
-DEFAULT_WORKFLOW_TEMPLATE_NAME = "image_z_image_turbo (2).json"
-PREFERRED_CHECKPOINTS = (
-    "illusious/illustrij_v21.safetensors",
-    "illusious/illustrij_v20.safetensors",
-    "illusious/illustrij_v19.safetensors",
-    "illusious/illustrij_v18.safetensors",
-    "illusious/illustrij_v17.safetensors",
-    "illusious/prefectIllustriousXL_v70.safetensors",
-)
+DEFAULT_STYLE_PRESET = DEFAULT_ILLUSTRATION_STYLE_PRESET
+PREFERRED_CHECKPOINTS = DEFAULT_COMFYUI_PREFERRED_CHECKPOINTS
 
 PROJECT_STATS_LOCK = Lock()
 
@@ -304,42 +300,6 @@ def _compose_structured_positive_prompt(
     return "。".join(section for section in sections if section)
 
 
-def _normalize_api_base(value: str) -> str:
-    text = (value or "http://127.0.0.1:8188").strip().rstrip("/")
-    if not text.startswith(("http://", "https://")):
-        text = "http://" + text
-    return text
-
-
-def _request_json(url: str, *, payload: dict[str, Any] | None = None, timeout: int = 60, allow_404: bool = False) -> dict:
-    data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    headers = {"Content-Type": "application/json"} if payload is not None else {}
-    req = request.Request(url, data=data, headers=headers, method="POST" if payload is not None else "GET")
-    try:
-        with request.urlopen(req, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except error.HTTPError as exc:
-        if allow_404 and exc.code == 404:
-            return {}
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"ComfyUI request failed with HTTP {exc.code}: {detail}") from exc
-    except error.URLError as exc:
-        reason = getattr(exc, "reason", exc)
-        raise RuntimeError(f"Failed to connect to ComfyUI: {reason}") from exc
-
-
-def _request_bytes(url: str, *, timeout: int = 60) -> bytes:
-    try:
-        with request.urlopen(url, timeout=timeout) as response:
-            return response.read()
-    except error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"ComfyUI file download failed with HTTP {exc.code}: {detail}") from exc
-    except error.URLError as exc:
-        reason = getattr(exc, "reason", exc)
-        raise RuntimeError(f"Failed to download ComfyUI image: {reason}") from exc
-
-
 def _resolve_candidate_path(raw_path: str) -> Path | None:
     if not raw_path:
         return None
@@ -351,14 +311,16 @@ def _resolve_candidate_path(raw_path: str) -> Path | None:
     return None
 
 
-def _candidate_comfyui_roots() -> list[Path]:
+def _candidate_comfyui_roots(service_config: dict | None = None) -> list[Path]:
     base_dir = Path(__file__).resolve().parent
     workspace_root = base_dir.parent.parent
     candidates: list[Path] = []
     seen: set[str] = set()
+    service_config = service_config or {}
 
     for raw in (
         os.environ.get("NOVEL_COMFYUI_ROOT", ""),
+        str(service_config.get("root", "") or ""),
         str(workspace_root / "ComfyUI_cu128_50XX" / "ComfyUI"),
     ):
         path = _resolve_candidate_path(raw)
@@ -380,24 +342,32 @@ def _candidate_comfyui_roots() -> list[Path]:
     return candidates
 
 
-def _resolve_comfyui_root(saved_config: dict, overrides: dict) -> Path | None:
+def _resolve_comfyui_root(saved_config: dict, overrides: dict, service_overrides: dict, service_defaults: dict) -> Path | None:
     for raw in (
         overrides.get("comfyui_root", ""),
         os.environ.get("NOVEL_COMFYUI_ROOT", ""),
+        service_overrides.get("root", ""),
         saved_config.get("comfyui_root", ""),
+        service_defaults.get("root", ""),
     ):
         path = _resolve_candidate_path(str(raw))
         if path is not None:
             return path
-    for candidate in _candidate_comfyui_roots():
+    for candidate in _candidate_comfyui_roots(service_defaults):
         return candidate
     return None
 
 
-def _resolve_workflow_template_path(saved_config: dict, overrides: dict, comfyui_root: Path | None) -> str:
+def _resolve_workflow_template_path(
+    saved_config: dict,
+    overrides: dict,
+    service_overrides: dict,
+    comfyui_root: Path | None,
+) -> str:
     candidates = [
         str(overrides.get("workflow_template", "") or "").strip(),
         str(os.environ.get("NOVEL_COMFYUI_WORKFLOW_TEMPLATE", "") or "").strip(),
+        str(service_overrides.get("workflow_template", "") or "").strip(),
     ]
 
     if comfyui_root is not None:
@@ -421,14 +391,22 @@ def _relative_checkpoint_name(checkpoint_path: Path, checkpoints_dir: Path) -> s
     return _normalize_checkpoint_name(str(relative))
 
 
-def _find_default_checkpoint(comfyui_root: Path | None) -> str:
+def _preferred_checkpoints(service_config: dict | None = None) -> tuple[str, ...]:
+    raw_items = (service_config or {}).get("preferred_checkpoints")
+    if not isinstance(raw_items, list):
+        return tuple(PREFERRED_CHECKPOINTS)
+    items = [str(item or "").strip() for item in raw_items]
+    return tuple(item for item in items if item) or tuple(PREFERRED_CHECKPOINTS)
+
+
+def _find_default_checkpoint(comfyui_root: Path | None, service_config: dict | None = None) -> str:
     if comfyui_root is None:
         return ""
     checkpoints_dir = comfyui_root / "models" / "checkpoints"
     if not checkpoints_dir.exists():
         return ""
 
-    for name in PREFERRED_CHECKPOINTS:
+    for name in _preferred_checkpoints(service_config):
         path = checkpoints_dir / Path(name)
         if path.exists():
             return _normalize_checkpoint_name(name)
@@ -440,10 +418,17 @@ def _find_default_checkpoint(comfyui_root: Path | None) -> str:
     return ""
 
 
-def _resolve_checkpoint(saved_config: dict, overrides: dict, comfyui_root: Path | None) -> str:
+def _resolve_checkpoint(
+    saved_config: dict,
+    overrides: dict,
+    service_overrides: dict,
+    service_defaults: dict,
+    comfyui_root: Path | None,
+) -> str:
     raw_values = (
         str(overrides.get("checkpoint", "") or "").strip(),
         str(os.environ.get("NOVEL_COMFYUI_CHECKPOINT", "") or "").strip(),
+        str(service_overrides.get("checkpoint", "") or "").strip(),
         str(saved_config.get("checkpoint", "") or "").strip(),
     )
     checkpoints_dir = (comfyui_root / "models" / "checkpoints") if comfyui_root else None
@@ -456,7 +441,7 @@ def _resolve_checkpoint(saved_config: dict, overrides: dict, comfyui_root: Path 
             return _relative_checkpoint_name(candidate, checkpoints_dir)
         return _normalize_checkpoint_name(raw)
 
-    return _find_default_checkpoint(comfyui_root)
+    return _find_default_checkpoint(comfyui_root, service_defaults)
 
 
 def _extract_workflow_template_defaults(template_path: str) -> dict[str, Any]:
@@ -490,12 +475,14 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
     project = load_json(str(Path(project_path) / "project.json"))
     saved = project.get("illustration_config") or {}
     merged_overrides = overrides or {}
-    comfyui_root = _resolve_comfyui_root(saved, merged_overrides)
-    workflow_template = _resolve_workflow_template_path(saved, merged_overrides, comfyui_root)
+    service_defaults = load_service_config("comfyui", include_defaults=True)
+    service_overrides = load_service_config("comfyui", include_defaults=False)
+    comfyui_root = _resolve_comfyui_root(saved, merged_overrides, service_overrides, service_defaults)
+    workflow_template = _resolve_workflow_template_path(saved, merged_overrides, service_overrides, comfyui_root)
     workflow_defaults = _extract_workflow_template_defaults(workflow_template)
     saved_workflow_template = str(saved.get("workflow_template", "") or "").strip()
     saved_matches_template = bool(workflow_template and saved_workflow_template == workflow_template)
-    checkpoint = _resolve_checkpoint(saved, merged_overrides, comfyui_root)
+    checkpoint = _resolve_checkpoint(saved, merged_overrides, service_overrides, service_defaults, comfyui_root)
     saved_negative_prompt = str(saved.get("negative_prompt", "") or "").strip()
     if saved_negative_prompt == LEGACY_DEFAULT_NEGATIVE_PROMPT:
         saved_negative_prompt = ""
@@ -504,12 +491,13 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
         saved_style_preset = ""
 
     config = {
-        "comfyui_api_base": _normalize_api_base(
+        "comfyui_api_base": normalize_http_base(
             str(
                 merged_overrides.get("comfyui_api_base")
                 or os.environ.get("NOVEL_COMFYUI_API_BASE")
+                or service_overrides.get("api_base")
                 or saved.get("comfyui_api_base")
-                or "http://127.0.0.1:8188"
+                or service_defaults.get("api_base")
             )
         ),
         "comfyui_root": str(comfyui_root) if comfyui_root else "",
@@ -518,70 +506,89 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
         "width": safe_int(
             merged_overrides.get("width")
             or os.environ.get("NOVEL_COMFYUI_WIDTH")
+            or service_overrides.get("width")
             or (saved.get("width") if saved_matches_template else workflow_defaults.get("width")),
-            1280,
+            safe_int(service_defaults.get("width"), 1280),
         ),
         "height": safe_int(
             merged_overrides.get("height")
             or os.environ.get("NOVEL_COMFYUI_HEIGHT")
+            or service_overrides.get("height")
             or (saved.get("height") if saved_matches_template else workflow_defaults.get("height")),
-            1280,
+            safe_int(service_defaults.get("height"), 1280),
         ),
         "steps": safe_int(
             merged_overrides.get("steps")
             or os.environ.get("NOVEL_COMFYUI_STEPS")
+            or service_overrides.get("steps")
             or (saved.get("steps") if saved_matches_template else workflow_defaults.get("steps")),
-            8,
+            safe_int(service_defaults.get("steps"), 8),
         ),
         "cfg": _safe_float(
             merged_overrides.get("cfg")
             or os.environ.get("NOVEL_COMFYUI_CFG")
+            or service_overrides.get("cfg")
             or (saved.get("cfg") if saved_matches_template else workflow_defaults.get("cfg")),
-            1.0,
+            _safe_float(service_defaults.get("cfg"), 1.0),
         ),
         "sampler_name": str(
             merged_overrides.get("sampler_name")
             or os.environ.get("NOVEL_COMFYUI_SAMPLER")
+            or service_overrides.get("sampler_name")
             or (saved.get("sampler_name") if saved_matches_template else workflow_defaults.get("sampler_name"))
-            or "res_multistep"
+            or service_defaults.get("sampler_name")
+            or "euler"
         ).strip(),
         "scheduler": str(
             merged_overrides.get("scheduler")
             or os.environ.get("NOVEL_COMFYUI_SCHEDULER")
+            or service_overrides.get("scheduler")
             or (saved.get("scheduler") if saved_matches_template else workflow_defaults.get("scheduler"))
-            or "simple"
+            or service_defaults.get("scheduler")
+            or "normal"
         ).strip(),
         "timeout": safe_int(
-            merged_overrides.get("timeout") or os.environ.get("NOVEL_COMFYUI_TIMEOUT") or saved.get("timeout"),
-            600,
+            merged_overrides.get("timeout")
+            or os.environ.get("NOVEL_COMFYUI_TIMEOUT")
+            or service_overrides.get("timeout")
+            or saved.get("timeout"),
+            safe_int(service_defaults.get("timeout"), 600),
         ),
         "poll_interval": _safe_float(
             merged_overrides.get("poll_interval")
             or os.environ.get("NOVEL_COMFYUI_POLL_INTERVAL")
+            or service_overrides.get("poll_interval")
             or saved.get("poll_interval"),
-            1.5,
+            _safe_float(service_defaults.get("poll_interval"), 1.5),
         ),
         "negative_prompt": str(
             merged_overrides.get("negative_prompt")
             or os.environ.get("NOVEL_COMFYUI_NEGATIVE_PROMPT")
+            or service_overrides.get("negative_prompt")
             or saved_negative_prompt
+            or service_defaults.get("negative_prompt")
             or DEFAULT_NEGATIVE_PROMPT
         ).strip(),
         "style_preset": str(
             merged_overrides.get("style_preset")
             or os.environ.get("NOVEL_COMFYUI_STYLE_PRESET")
+            or service_overrides.get("style_preset")
             or saved_style_preset
+            or service_defaults.get("style_preset")
             or DEFAULT_STYLE_PRESET
         ).strip(),
         "seed": safe_int(
-            merged_overrides.get("seed") or os.environ.get("NOVEL_COMFYUI_SEED") or saved.get("seed"),
-            0,
+            merged_overrides.get("seed")
+            or os.environ.get("NOVEL_COMFYUI_SEED")
+            or service_overrides.get("seed")
+            or saved.get("seed"),
+            safe_int(service_defaults.get("seed"), 0),
         ),
     }
 
     if not config["workflow_template"] and not config["checkpoint"]:
         raise RuntimeError(
-            "未找到可用的 ComfyUI 工作流模板或 checkpoint。请确认 workflow/image_z_image_turbo (2).json 存在，或设置 NOVEL_COMFYUI_WORKFLOW_TEMPLATE。"
+            "未找到可用的 ComfyUI 工作流模板或 checkpoint。请确认 external_services.json 中的 comfyui.workflow_template / comfyui.checkpoint，或设置 NOVEL_COMFYUI_WORKFLOW_TEMPLATE。"
         )
     return config
 
@@ -878,43 +885,6 @@ def _build_workflow_from_template(
     return workflow
 
 
-def _queue_prompt(api_base: str, workflow: dict[str, Any]) -> str:
-    payload = _request_json(
-        f"{api_base}/prompt",
-        payload={"prompt": workflow, "client_id": f"novel-writer-{random.randint(1000, 9999)}"},
-        timeout=60,
-    )
-    prompt_id = str(payload.get("prompt_id", "")).strip()
-    if not prompt_id:
-        raise RuntimeError(f"ComfyUI 未返回 prompt_id: {payload}")
-    return prompt_id
-
-
-def _wait_for_prompt(api_base: str, prompt_id: str, timeout: int, poll_interval: float) -> dict:
-    deadline = time.time() + timeout
-    last_payload: dict[str, Any] = {}
-    while time.time() < deadline:
-        payload = _request_json(
-            f"{api_base}/history/{parse.quote(prompt_id)}",
-            timeout=max(10, int(poll_interval * 4)),
-            allow_404=True,
-        )
-        if payload:
-            item = payload.get(prompt_id) or {}
-            if item:
-                last_payload = item
-                status = item.get("status") or {}
-                status_str = str(status.get("status_str", "")).lower()
-                if item.get("outputs"):
-                    return item
-                if status.get("completed") and status_str not in {"error", "execution_error"}:
-                    return item
-                if status_str in {"error", "execution_error"}:
-                    raise RuntimeError(f"ComfyUI 生成失败: {json.dumps(status, ensure_ascii=False)}")
-        time.sleep(poll_interval)
-    raise RuntimeError(f"等待 ComfyUI 生成超时。prompt_id={prompt_id}，最后状态={last_payload}")
-
-
 def _collect_output_images(history_item: dict) -> list[dict]:
     images: list[dict] = []
     for node_output in (history_item.get("outputs") or {}).values():
@@ -922,17 +892,6 @@ def _collect_output_images(history_item: dict) -> list[dict]:
             if isinstance(image, dict) and image.get("filename"):
                 images.append(image)
     return images
-
-
-def _download_image(api_base: str, image_info: dict, timeout: int) -> bytes:
-    query = parse.urlencode(
-        {
-            "filename": image_info.get("filename", ""),
-            "subfolder": image_info.get("subfolder", ""),
-            "type": image_info.get("type", "output"),
-        }
-    )
-    return _request_bytes(f"{api_base}/view?{query}", timeout=timeout)
 
 
 def _chapter_record_dir(project_path: str, chapter_slug: str) -> Path:
@@ -1001,11 +960,15 @@ def _render_illustration_images(
             filename_prefix=filename_prefix,
         )
 
+    comfyui_client = ComfyUIClient(runtime_config["comfyui_api_base"])
     emit_progress(progress_callback, "illustration_queue", "正在提交到 ComfyUI")
-    prompt_id = _queue_prompt(runtime_config["comfyui_api_base"], workflow)
+    prompt_id = comfyui_client.queue_prompt(
+        workflow,
+        client_id=f"novel-writer-{random.randint(1000, 9999)}",
+        timeout=60,
+    )
     emit_progress(progress_callback, "illustration_wait", "ComfyUI 正在生成图片")
-    history_item = _wait_for_prompt(
-        runtime_config["comfyui_api_base"],
+    history_item = comfyui_client.wait_for_prompt(
         prompt_id,
         timeout=int(runtime_config["timeout"]),
         poll_interval=float(runtime_config["poll_interval"]),
@@ -1025,8 +988,7 @@ def _render_illustration_images(
         local_name = f"image_{index:02d}{suffix}"
         local_path = record_dir / local_name
         local_path.write_bytes(
-            _download_image(
-                runtime_config["comfyui_api_base"],
+            comfyui_client.download_image(
                 image_info,
                 timeout=max(30, int(runtime_config["timeout"])),
             )

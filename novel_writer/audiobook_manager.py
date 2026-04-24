@@ -2,26 +2,29 @@
 
 from __future__ import annotations
 
-import json
-import os
 import re
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from common_utils import emit_progress, utc_now
+from external_services import (
+    DEFAULT_EXTERNAL_SERVICES_CONFIG,
+    DEFAULT_VOXCPM2_MODEL_ID,
+    DEFAULT_VOXCPM2_PYTHON,
+    DEFAULT_VOXCPM2_ROOT,
+    VoxCPM2Service,
+    load_voxcpm2_runtime,
+    normalize_voxcpm2_runtime,
+)
 from project_manager import load_json, load_project, save_json
 
 
 AUDIOBOOK_DIR_NAME = "audiobook"
 VOICE_REFS_DIR_NAME = "voice_refs"
 VOICES_FILENAME = "voices.json"
-DEFAULT_VOXCPM2_ROOT = "/home/wsy/VoxCPM2"
-DEFAULT_VOXCPM2_PYTHON = "/home/wsy/VoxCPM2/.venv/bin/python"
-DEFAULT_VOXCPM2_MODEL_ID = "openbmb/VoxCPM2"
 NARRATOR_SPEAKER = "旁白"
 
 DEFAULT_SPLIT_CONFIG = {
@@ -30,20 +33,7 @@ DEFAULT_SPLIT_CONFIG = {
     "min_merge_chars": 24,
 }
 
-DEFAULT_AUDIOBOOK_RUNTIME = {
-    "voxcpm_root": DEFAULT_VOXCPM2_ROOT,
-    "voxcpm_python": DEFAULT_VOXCPM2_PYTHON,
-    "model_id": DEFAULT_VOXCPM2_MODEL_ID,
-    "device": "auto",
-    "load_denoiser": False,
-    "optimize": True,
-    "cfg_value": 2.0,
-    "inference_timesteps": 10,
-    "normalize": True,
-    "denoise": False,
-    "silence_ms": 260,
-    "timeout_seconds": 0,
-}
+DEFAULT_AUDIOBOOK_RUNTIME = normalize_voxcpm2_runtime(DEFAULT_EXTERNAL_SERVICES_CONFIG["voxcpm2"])
 
 NARRATOR_PRESETS = [
     {
@@ -683,33 +673,14 @@ def _worker_script_path() -> Path:
 
 
 def _resolve_worker_python(runtime: dict) -> str:
-    configured = str(runtime.get("voxcpm_python") or DEFAULT_VOXCPM2_PYTHON).strip()
-    if configured and Path(configured).exists():
-        return configured
-    return sys.executable
+    return VoxCPM2Service(runtime).worker_python()
 
 
 def _run_worker(request_path: Path, runtime: dict) -> subprocess.CompletedProcess:
-    command = [
-        _resolve_worker_python(runtime),
-        str(_worker_script_path()),
-        "--request",
-        str(request_path),
-    ]
-    env = os.environ.copy()
-    voxcpm_root = str(runtime.get("voxcpm_root") or DEFAULT_VOXCPM2_ROOT).strip()
-    if voxcpm_root:
-        src_path = str(Path(voxcpm_root) / "src")
-        env["PYTHONPATH"] = src_path + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    timeout_seconds = int(runtime.get("timeout_seconds") or 0)
-    return subprocess.run(
-        command,
-        cwd=str(Path(__file__).resolve().parent),
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=timeout_seconds if timeout_seconds > 0 else None,
-        check=False,
+    return VoxCPM2Service(runtime).run_worker(
+        request_path,
+        worker_script_path=_worker_script_path(),
+        cwd=Path(__file__).resolve().parent,
     )
 
 
@@ -745,8 +716,7 @@ def generate_audiobook_chapter(
     if not segments:
         raise RuntimeError("章节中没有可合成的文本片段。")
 
-    runtime = dict(DEFAULT_AUDIOBOOK_RUNTIME)
-    runtime.update(runtime_overrides or {})
+    runtime = load_voxcpm2_runtime(runtime_overrides)
     record_dir.mkdir(parents=True, exist_ok=True)
     segments_dir = record_dir / "segments"
     if force and record_dir.exists():

@@ -1,0 +1,45 @@
+{
+  "_note": "Copy this file to external_services.json, or set NOVEL_EXTERNAL_SERVICES_CONFIG=/path/to/your/services.json. Values here are deployment defaults; CLI/Web form fields can still override them for a single run.",
+  "version": 1,
+  "comfyui": {
+    "_note": "Text-to-image service. The app talks to ComfyUI through /prompt, /history and /view.",
+    "api_base": "http://127.0.0.1:8188",
+    "root": "/home/wsy/ComfyUI_cu128_50XX/ComfyUI",
+    "workflow_template": "/home/wsy/ComfyUI_cu128_50XX/workflow/image_z_image_turbo (2).json",
+    "checkpoint": "illusious/illustrij_v21.safetensors",
+    "width": 1280,
+    "height": 1280,
+    "steps": 8,
+    "cfg": 1.0,
+    "sampler_name": "res_multistep",
+    "scheduler": "simple",
+    "timeout": 600,
+    "poll_interval": 1.5,
+    "negative_prompt": "",
+    "style_preset": "clean subject separation, layered depth, expressive body language, atmospheric perspective",
+    "seed": 0,
+    "preferred_checkpoints": [
+      "illusious/illustrij_v21.safetensors",
+      "illusious/illustrij_v20.safetensors",
+      "illusious/illustrij_v19.safetensors",
+      "illusious/illustrij_v18.safetensors",
+      "illusious/illustrij_v17.safetensors",
+      "illusious/prefectIllustriousXL_v70.safetensors"
+    ]
+  },
+  "voxcpm2": {
+    "_note": "VoxCPM2 local worker. The main app stays standard-library-only and starts voxcpm2_audiobook_worker.py with this Python/runtime.",
+    "root": "/home/wsy/VoxCPM2",
+    "python": "/home/wsy/VoxCPM2/.venv/bin/python",
+    "model_id": "openbmb/VoxCPM2",
+    "device": "auto",
+    "load_denoiser": false,
+    "optimize": true,
+    "cfg_value": 2.0,
+    "inference_timesteps": 10,
+    "normalize": true,
+    "denoise": false,
+    "silence_ms": 260,
+    "timeout_seconds": 0
+  }
+}

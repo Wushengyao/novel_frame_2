@@ -1,5 +1,6 @@
 novel_writer/output/
 novel_writer/api_keys.sh
 novel_writer/webui_auth.env
+novel_writer/external_services.json
 novel_writer/__pycache__/
 *.pyc

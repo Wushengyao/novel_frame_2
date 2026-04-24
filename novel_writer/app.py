@@ -115,6 +115,43 @@ def _extract_illustration_workers(args: argparse.Namespace) -> int | None:
     return max(1, int(workers))
 
 
+def _add_audiobook_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--voxcpm-root", help="VoxCPM2 repository/root directory")
+    parser.add_argument("--voxcpm-python", help="Python executable for the VoxCPM2 environment")
+    parser.add_argument("--voxcpm-model-id", help="VoxCPM2 model id or local model path")
+    parser.add_argument("--voxcpm-device", help="VoxCPM2 device, for example auto/cuda/cpu")
+    parser.add_argument("--voxcpm-timeout-seconds", type=int, help="Worker timeout in seconds; 0 disables timeout")
+    parser.add_argument("--voxcpm-cfg-value", type=float, help="Default VoxCPM2 cfg_value")
+    parser.add_argument("--voxcpm-inference-timesteps", type=int, help="Default VoxCPM2 inference_timesteps")
+    parser.add_argument("--voxcpm-silence-ms", type=int, help="Silence inserted between segments")
+    parser.add_argument("--voxcpm-load-denoiser", action="store_true", help="Load VoxCPM2 denoiser")
+    parser.add_argument("--voxcpm-denoise", action="store_true", help="Denoise segments that use reference audio")
+    parser.add_argument("--voxcpm-no-optimize", action="store_true", help="Disable VoxCPM2 optimize mode")
+    parser.add_argument("--voxcpm-no-normalize", action="store_true", help="Disable output normalization")
+
+
+def _extract_audiobook_overrides(args: argparse.Namespace) -> dict:
+    mapping = {
+        "root": getattr(args, "voxcpm_root", None),
+        "python": getattr(args, "voxcpm_python", None),
+        "model_id": getattr(args, "voxcpm_model_id", None),
+        "device": getattr(args, "voxcpm_device", None),
+        "timeout_seconds": getattr(args, "voxcpm_timeout_seconds", None),
+        "cfg_value": getattr(args, "voxcpm_cfg_value", None),
+        "inference_timesteps": getattr(args, "voxcpm_inference_timesteps", None),
+        "silence_ms": getattr(args, "voxcpm_silence_ms", None),
+    }
+    if getattr(args, "voxcpm_load_denoiser", False):
+        mapping["load_denoiser"] = True
+    if getattr(args, "voxcpm_denoise", False):
+        mapping["denoise"] = True
+    if getattr(args, "voxcpm_no_optimize", False):
+        mapping["optimize"] = False
+    if getattr(args, "voxcpm_no_normalize", False):
+        mapping["normalize"] = False
+    return {key: value for key, value in mapping.items() if value not in (None, "")}
+
+
 def _launch_background_illustration_job(
     project_path: str,
     *,
@@ -630,6 +667,7 @@ def main() -> None:
     audiobook_parser.add_argument("--all", action="store_true", help="Generate audiobook WAV files for all chapters")
     audiobook_parser.add_argument("--force", action="store_true", help="Regenerate existing audiobook files")
     audiobook_parser.add_argument("--narrator-preset", default="", help="Narrator preset id to use")
+    _add_audiobook_arguments(audiobook_parser)
 
     status_parser = subparsers.add_parser("status", help="Show project status")
     status_parser.add_argument("--project", required=True, help="Path to novel_project")
@@ -817,6 +855,7 @@ def main() -> None:
             chapter_refs=chapter_refs,
             force=args.force,
             narrator_preset=args.narrator_preset,
+            runtime_overrides=_extract_audiobook_overrides(args) or None,
         )
         print(f"Processed audiobook chapters: {len(results)}")
         for result in results:

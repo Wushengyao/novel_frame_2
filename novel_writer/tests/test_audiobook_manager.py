@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -107,6 +109,62 @@ class AudiobookManagerTests(unittest.TestCase):
         self.assertEqual(captured["payload"]["chapter_slug"], "chapter_0001")
         self.assertGreaterEqual(len(captured["payload"]["segments"]), 3)
         self.assertIn("voice", captured["payload"]["segments"][0])
+
+    def test_generate_audiobook_chapter_uses_external_service_config(self) -> None:
+        service_config = Path(self.temp_dir.name) / "external_services.json"
+        service_config.write_text(
+            json.dumps(
+                {
+                    "voxcpm2": {
+                        "root": "/srv/VoxCPM2",
+                        "python": "/srv/VoxCPM2/.venv/bin/python",
+                        "model_id": "/models/VoxCPM2",
+                        "device": "cpu",
+                        "silence_ms": 120,
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        captured = {}
+
+        def fake_run_worker(request_path: Path, runtime: dict) -> subprocess.CompletedProcess:
+            payload = load_json(str(request_path))
+            captured["payload"] = payload
+            save_json(
+                payload["manifest_path"],
+                {
+                    "chapter_slug": payload["chapter_slug"],
+                    "generated_at": "2026-04-20T00:00:00+00:00",
+                    "status": "succeeded",
+                    "combined_audio": "audiobook/chapter_0001/chapter_0001.wav",
+                    "segment_count": len(payload["segments"]),
+                    "segments": payload["segments"],
+                },
+            )
+            return subprocess.CompletedProcess(["worker"], 0, stdout="ok", stderr="")
+
+        with patch.dict(
+            os.environ,
+            {
+                "NOVEL_EXTERNAL_SERVICES_CONFIG": str(service_config),
+                "NOVEL_VOXCPM2_ROOT": "",
+                "NOVEL_VOXCPM2_PYTHON": "",
+                "NOVEL_VOXCPM2_MODEL_ID": "",
+                "NOVEL_VOXCPM2_DEVICE": "",
+            },
+        ), patch(
+            "audiobook_manager._run_worker", side_effect=fake_run_worker
+        ):
+            generate_audiobook_chapter(self.project_path, "chapter_0001", force=True)
+
+        runtime = captured["payload"]["runtime"]
+        self.assertEqual(runtime["voxcpm_root"], "/srv/VoxCPM2")
+        self.assertEqual(runtime["voxcpm_python"], "/srv/VoxCPM2/.venv/bin/python")
+        self.assertEqual(runtime["model_id"], "/models/VoxCPM2")
+        self.assertEqual(runtime["device"], "cpu")
+        self.assertEqual(runtime["silence_ms"], 120)
 
     def test_rollback_removes_future_audiobook_records(self) -> None:
         create_state_snapshot(str(self.project_path), chapter_count=1, note="test checkpoint")
