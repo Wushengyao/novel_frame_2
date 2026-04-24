@@ -19,7 +19,7 @@ def read_json(path: Path) -> dict:
 def create_test_project(base_dir: Path, *, project_id: str = "test", planning_mode: str = "chapter") -> Path:
     project_path = base_dir / f"novel_project_{project_id}"
     project_path.mkdir(parents=True, exist_ok=True)
-    for name in ("chapters", "summaries", "arc_summaries", "task_cards", "illustrations", "snapshots"):
+    for name in ("chapters", "summaries", "arc_summaries", "task_cards", "illustrations", "audiobook", "snapshots"):
         (project_path / name).mkdir(exist_ok=True)
 
     save_json(

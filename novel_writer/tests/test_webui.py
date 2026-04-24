@@ -87,6 +87,43 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         conn.close()
         return response
 
+    def _post_multipart(
+        self,
+        path: str,
+        fields: dict[str, str],
+        files: dict[str, tuple[str, bytes, str]],
+    ) -> http.client.HTTPResponse:
+        boundary = "----novel-writer-test-boundary"
+        chunks: list[bytes] = []
+        for name, value in fields.items():
+            chunks.append(f"--{boundary}\r\n".encode("utf-8"))
+            chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+            chunks.append(str(value).encode("utf-8"))
+            chunks.append(b"\r\n")
+        for name, (filename, content, content_type) in files.items():
+            chunks.append(f"--{boundary}\r\n".encode("utf-8"))
+            chunks.append(
+                (
+                    f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+                    f"Content-Type: {content_type}\r\n\r\n"
+                ).encode("utf-8")
+            )
+            chunks.append(content)
+            chunks.append(b"\r\n")
+        chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+        body = b"".join(chunks)
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        conn.request(
+            "POST",
+            path,
+            body=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "Content-Length": str(len(body))},
+        )
+        response = conn.getresponse()
+        response.body = response.read().decode("utf-8", errors="replace")
+        conn.close()
+        return response
+
     def _get(self, path: str, *, headers: dict[str, str] | None = None) -> http.client.HTTPResponse:
         conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
         conn.request("GET", path, headers=headers or {})
@@ -653,6 +690,83 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("更欢乐", page.body)
         self.assertIn("自定义润色要求", page.body)
         self.assertNotIn("Planning Mode", page.body)
+
+    def test_chapter_page_shows_audiobook_player_when_manifest_exists(self) -> None:
+        (self.project_path / "chapters" / "chapter_0001.md").write_text(
+            "林宇推上储物箱。\n\n苏浅检查控制板。",
+            encoding="utf-8",
+        )
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 1
+        save_json(str(self.project_path / "project.json"), project)
+        audio_dir = self.project_path / "audiobook" / "chapter_0001"
+        audio_dir.mkdir(parents=True)
+        (audio_dir / "chapter_0001.wav").write_bytes(b"fake wav")
+        save_json(
+            str(audio_dir / "manifest.json"),
+            {
+                "chapter_slug": "chapter_0001",
+                "generated_at": "2026-04-20T00:00:00+00:00",
+                "combined_audio": "audiobook/chapter_0001/chapter_0001.wav",
+                "segment_count": 2,
+                "segments": [],
+            },
+        )
+
+        page = self._get("/project/web/chapter/chapter_0001")
+
+        self.assertEqual(page.status, 200)
+        self.assertIn("本章有声小说", page.body)
+        self.assertIn("/project/web/audiobook-file/chapter_0001/chapter_0001.wav", page.body)
+
+    def test_audiobook_endpoint_accepts_reference_upload_and_creates_job(self) -> None:
+        (self.project_path / "chapters" / "chapter_0001.md").write_text(
+            "林宇说：“我们先检查门。”",
+            encoding="utf-8",
+        )
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 1
+        save_json(str(self.project_path / "project.json"), project)
+
+        with patch(
+            "webui.generate_audiobook_chapters",
+            return_value=[
+                {
+                    "chapter_slug": "chapter_0001",
+                    "combined_audio": "audiobook/chapter_0001/chapter_0001.wav",
+                    "reused": False,
+                }
+            ],
+        ) as mocked_generate:
+            response = self._post_multipart(
+                "/project/web/audiobook",
+                {
+                    "chapter_slug": "chapter_0001",
+                    "narrator_preset": "calm_male",
+                    "character_voice_name": "林宇",
+                    "character_prompt_text": "这是参考文本",
+                    "force": "1",
+                },
+                {
+                    "character_reference_audio": ("linyu.wav", b"RIFF....WAVE", "audio/wav"),
+                },
+            )
+            self.assertEqual(response.status, 303)
+            location = response.getheader("Location")
+            self.assertTrue(location.startswith("/job/"))
+            job_id = location.rsplit("/", 1)[-1]
+            job = self._wait_for_job_status(job_id)
+
+        self.assertEqual(job["kind"], "audiobook")
+
+        _, kwargs = mocked_generate.call_args
+        self.assertEqual(kwargs["chapter_refs"], ["chapter_0001"])
+        self.assertEqual(kwargs["narrator_preset"], "calm_male")
+        self.assertTrue(kwargs["force"])
+
+        voices = load_json(str(self.project_path / "audiobook" / "voices.json"))
+        self.assertTrue(voices["character_voices"]["林宇"]["reference_audio"].startswith("audiobook/voice_refs/"))
+        self.assertEqual(voices["character_voices"]["林宇"]["prompt_text"], "这是参考文本")
 
     def test_polish_chapter_endpoint_creates_background_job_with_runtime_overrides(self) -> None:
         (self.project_path / "chapters" / "chapter_0001.md").write_text(

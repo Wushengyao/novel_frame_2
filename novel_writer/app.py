@@ -17,6 +17,7 @@ from chapter_context import get_next_context_for_mode, peek_next_context_for_mod
 from common_utils import emit_progress, utc_now
 from console_logger import log_error, log_info, log_success, log_warning
 from context_builder import build_writer_context, resolve_effective_chapter_task
+from audiobook_manager import chapter_refs_for_all, generate_audiobook_chapters
 from illustration_manager import illustrate_chapters, illustrate_project_assets
 from llm_client import generate_text_with_metadata
 from outline_manager import (
@@ -545,6 +546,18 @@ def main() -> None:
     assets_parser.add_argument("--force", action="store_true", help="Regenerate existing assets")
     _add_illustration_arguments(assets_parser)
 
+    audiobook_parser = subparsers.add_parser("audiobook", help="Generate audiobook WAV files for chapters")
+    audiobook_parser.add_argument("--project", required=True, help="Path to novel_project")
+    audiobook_parser.add_argument("--chapter", default="latest", help="Chapter slug/path to synthesize")
+    audiobook_parser.add_argument(
+        "--chapter-ref",
+        action="append",
+        help="Explicit chapter slug/path. Can be passed multiple times",
+    )
+    audiobook_parser.add_argument("--all", action="store_true", help="Generate audiobook WAV files for all chapters")
+    audiobook_parser.add_argument("--force", action="store_true", help="Regenerate existing audiobook files")
+    audiobook_parser.add_argument("--narrator-preset", default="", help="Narrator preset id to use")
+
     status_parser = subparsers.add_parser("status", help="Show project status")
     status_parser.add_argument("--project", required=True, help="Path to novel_project")
 
@@ -706,6 +719,27 @@ def main() -> None:
                 print(f"- {image.get('relative_path', '')}")
         return
 
+    if args.command == "audiobook":
+        log_info("cli: audiobook")
+        chapter_refs = list(args.chapter_ref or [])
+        if args.all:
+            chapter_refs = chapter_refs_for_all(args.project)
+        elif not chapter_refs:
+            chapter_refs = [args.chapter]
+        results = generate_audiobook_chapters(
+            args.project,
+            chapter_refs=chapter_refs,
+            force=args.force,
+            narrator_preset=args.narrator_preset,
+        )
+        print(f"Processed audiobook chapters: {len(results)}")
+        for result in results:
+            state = "reused" if result.get("reused") else "generated"
+            print(f"{state}: {result.get('chapter_slug', '')}")
+            if result.get("combined_audio"):
+                print(f"- {result.get('combined_audio', '')}")
+        return
+
     if args.command == "status":
         log_info("cli: status")
         _print_status(args.project)
@@ -728,6 +762,7 @@ def main() -> None:
             f"chapters={len(removed.get('chapters', []))}, "
             f"summaries={len(removed.get('summaries', []))}, "
             f"illustrations={len(removed.get('illustrations', []))}, "
+            f"audiobook={len(removed.get('audiobook', []))}, "
             f"snapshots={len(removed.get('snapshots', []))}"
         )
         _print_status(args.project)

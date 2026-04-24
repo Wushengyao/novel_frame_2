@@ -84,7 +84,7 @@ INIT_SECTION_KEYS = ("world", "characters", "plot_state", "style")
 CHAPTER_TITLE_PATTERN = re.compile(
     r"^\s*(?:#{1,6}\s*)?第[0-9零一二三四五六七八九十百千万两〇]+[章节卷回部篇]\s*[：:.-]?\s*.+$"
 )
-STATS_PHASES = ("init", "outline", "writer", "summary", "polish")
+STATS_PHASES = ("init", "outline", "writer", "summary", "polish", "audiobook")
 SNAPSHOT_DIR_NAME = "snapshots"
 SNAPSHOT_STATE_FILES = (
     "project.json",
@@ -662,6 +662,7 @@ def init_project(config_path: str, progress_callback=None) -> str:
     (project_path / "arc_summaries").mkdir(exist_ok=True)
     (project_path / "task_cards").mkdir(exist_ok=True)
     (project_path / "illustrations").mkdir(exist_ok=True)
+    (project_path / "audiobook").mkdir(exist_ok=True)
     log_success("init_project: base directories ready")
 
     emit_progress(progress_callback, "init_story", "Generating initial story data")
@@ -767,6 +768,7 @@ def load_project(project_path: str) -> dict:
         "arc_summaries_path": str(base / "arc_summaries"),
         "task_cards_path": str(base / "task_cards"),
         "illustrations_path": str(base / "illustrations"),
+        "audiobook_path": str(base / "audiobook"),
     }
 
 
@@ -940,6 +942,7 @@ def _delete_future_artifacts(project_path: str, keep_chapter_count: int) -> dict
         "arc_summaries": [],
         "task_cards": [],
         "illustrations": [],
+        "audiobook": [],
         "snapshots": [],
     }
 
@@ -974,6 +977,14 @@ def _delete_future_artifacts(project_path: str, keep_chapter_count: int) -> dict
             if chapter_number is not None and chapter_number > keep_chapter_count:
                 _remove_path(record_dir)
                 removed["illustrations"].append(str(record_dir.relative_to(base)).replace("\\", "/"))
+
+    audiobook_dir = base / "audiobook"
+    if audiobook_dir.exists():
+        for record_dir in sorted(audiobook_dir.glob("chapter_*")):
+            chapter_number = _parse_numbered_name(record_dir.name, "chapter_", "")
+            if chapter_number is not None and chapter_number > keep_chapter_count:
+                _remove_path(record_dir)
+                removed["audiobook"].append(str(record_dir.relative_to(base)).replace("\\", "/"))
 
     snapshots_dir = base / SNAPSHOT_DIR_NAME
     if snapshots_dir.exists():
@@ -1018,6 +1029,7 @@ def rollback_project(project_path: str, to_chapter: int) -> dict:
                 "chapters": [],
                 "summaries": [],
                 "illustrations": [],
+                "audiobook": [],
                 "snapshots": [],
             },
         }

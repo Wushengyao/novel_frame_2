@@ -15,6 +15,8 @@ import threading
 import time
 import traceback
 import urllib.parse
+from email.parser import BytesParser
+from email.policy import default as email_policy_default
 from html import escape
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -23,6 +25,16 @@ from pathlib import Path
 from uuid import uuid4
 
 from app import run_next_chapter_from_progression, run_next_chapters
+from audiobook_manager import (
+    UploadedVoiceFile,
+    audiobook_file_path,
+    ensure_voice_config,
+    generate_audiobook_chapters,
+    get_audiobook_record,
+    list_audiobook_records,
+    narrator_preset_options,
+    save_uploaded_voice_reference,
+)
 from chapter_context import peek_next_context_for_mode
 from common_utils import utc_now
 from context_builder import resolve_effective_chapter_task
@@ -1041,6 +1053,94 @@ def _illustration_overrides_from_form(form: dict[str, str]) -> dict:
     return {key: value for key, value in mapping.items() if value}
 
 
+def _render_narrator_preset_options(project_path: Path, selected: str = "") -> str:
+    config = ensure_voice_config(str(project_path))
+    active = selected or str(config.get("selected_narrator_id") or "")
+    options = []
+    for preset in narrator_preset_options(str(project_path)):
+        value = str(preset.get("id") or "").strip()
+        if not value:
+            continue
+        selected_attr = ' selected' if value == active else ""
+        label = str(preset.get("label") or value).strip()
+        options.append(f'<option value="{escape(value)}"{selected_attr}>{escape(label)}</option>')
+    return "".join(options)
+
+
+def _project_character_names(project_path: Path) -> list[str]:
+    data = load_project(str(project_path))
+    characters = data.get("characters") or {}
+    names = []
+    for group in ("protagonists", "supporting"):
+        for character in characters.get(group) or []:
+            name = str(character.get("name", "") or "").strip()
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def _render_character_voice_options(project_path: Path) -> str:
+    names = _project_character_names(project_path)
+    options = ['<option value="">不上传角色参考音频</option>']
+    for name in names:
+        options.append(f'<option value="{escape(name)}">{escape(name)}</option>')
+    return "".join(options)
+
+
+def _audiobook_audio_url(project_id: str, record: dict) -> str:
+    chapter_slug = str(record.get("chapter_slug", "") or "")
+    combined = str(record.get("combined_audio", "") or "")
+    file_name = Path(combined).name
+    if not chapter_slug or not file_name:
+        return ""
+    return (
+        f"/project/{urllib.parse.quote(project_id)}/audiobook-file/"
+        f"{urllib.parse.quote(chapter_slug)}/{urllib.parse.quote(file_name)}"
+    )
+
+
+def _render_audiobook_player(project_id: str, record: dict | None) -> str:
+    if not record:
+        return "<p>当前还没有本章有声版本。</p>"
+    audio_url = _audiobook_audio_url(project_id, record)
+    if not audio_url:
+        return "<p>当前还没有本章有声版本。</p>"
+    duration = record.get("combined_duration_seconds", 0)
+    duration_text = f"{duration} 秒" if duration else "未知时长"
+    return f"""
+    <div class="audiobook-player">
+      <audio controls src="{escape(audio_url)}"></audio>
+      <div class="muted">
+        {escape(str(record.get("segment_count", len(record.get("segments", [])) or 0)))} 个片段，
+        {escape(duration_text)}，
+        {escape(record.get("generated_at", ""))}
+      </div>
+    </div>
+    """
+
+
+def _render_audiobook_records(project_id: str, records: list[dict]) -> str:
+    if not records:
+        return "<p>当前还没有有声章节。</p>"
+    items = []
+    for record in records[:6]:
+        chapter_slug = str(record.get("chapter_slug", "") or "")
+        audio_url = _audiobook_audio_url(project_id, record)
+        if not chapter_slug or not audio_url:
+            continue
+        items.append(
+            f"""
+            <div class="audio-record">
+              <div><strong>{escape(chapter_slug)}</strong></div>
+              <audio controls src="{escape(audio_url)}"></audio>
+              <div class="muted">{escape(str(record.get("segment_count", len(record.get("segments", [])) or 0)))} 个片段</div>
+              <a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}">打开章节</a>
+            </div>
+            """
+        )
+    return "".join(items) or "<p>当前还没有有声章节。</p>"
+
+
 def _job_status_label(status: str) -> str:
     mapping = {
         "queued": "排队中",
@@ -1579,6 +1679,17 @@ def _render_page(
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 12px;
     }}
+    audio {{
+      width: 100%;
+    }}
+    .audio-record, .audiobook-player {{
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border-radius: 16px;
+      border: 1px solid rgba(124, 91, 62, 0.15);
+      background: rgba(255,255,255,0.56);
+    }}
     .thumb {{
       display: grid;
       gap: 8px;
@@ -2086,6 +2197,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if len(parts) == 5 and parts[0] == "project" and parts[2] == "illustration-file":
             self._handle_illustration_file(parts[1], parts[3], parts[4])
             return
+        if len(parts) == 5 and parts[0] == "project" and parts[2] == "audiobook-file":
+            self._handle_audiobook_file(parts[1], parts[3], parts[4])
+            return
 
         self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -2130,14 +2244,53 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "illustrate":
             self._handle_illustrate_async(parts[1], form)
             return
+        if len(parts) == 3 and parts[0] == "project" and parts[2] == "audiobook":
+            self._handle_audiobook_async(parts[1], form)
+            return
 
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def _read_form(self) -> dict[str, str]:
         length = int(self.headers.get("Content-Length", "0") or 0)
-        raw = self.rfile.read(length).decode("utf-8")
+        raw_bytes = self.rfile.read(length)
+        self._uploaded_files = {}
+        content_type = str(self.headers.get("Content-Type", "") or "")
+        if content_type.lower().startswith("multipart/form-data"):
+            return self._read_multipart_form(raw_bytes, content_type)
+
+        raw = raw_bytes.decode("utf-8")
         parsed = urllib.parse.parse_qs(raw, keep_blank_values=True)
         return {key: values[0] for key, values in parsed.items()}
+
+    def _read_multipart_form(self, raw_bytes: bytes, content_type: str) -> dict[str, str]:
+        message = BytesParser(policy=email_policy_default).parsebytes(
+            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8") + raw_bytes
+        )
+        form: dict[str, str] = {}
+        files: dict[str, UploadedVoiceFile] = {}
+        for part in message.iter_parts():
+            disposition = part.get("Content-Disposition", "")
+            if "form-data" not in disposition:
+                continue
+            name = part.get_param("name", header="content-disposition")
+            if not name:
+                continue
+            payload = part.get_payload(decode=True) or b""
+            filename = part.get_filename()
+            if filename:
+                files[str(name)] = UploadedVoiceFile(
+                    filename=filename,
+                    content=payload,
+                    content_type=str(part.get_content_type() or ""),
+                )
+            else:
+                charset = part.get_content_charset() or "utf-8"
+                form[str(name)] = payload.decode(charset, errors="replace")
+        self._uploaded_files = files
+        return form
+
+    def _uploaded_file(self, name: str) -> UploadedVoiceFile | None:
+        return getattr(self, "_uploaded_files", {}).get(name)
 
     def _redirect(self, location: str) -> None:
         self.send_response(HTTPStatus.SEE_OTHER)
@@ -2872,6 +3025,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                     """
                 )
             illustration_gallery = "".join(cards)
+        audiobook_record = get_audiobook_record(str(project_path), chapter_slug)
+        audiobook_player_html = _render_audiobook_player(project_id, audiobook_record)
+        narrator_options_html = _render_narrator_preset_options(project_path)
+        character_voice_options_html = _render_character_voice_options(project_path)
 
         body = f"""
         <div class="stack">
@@ -2931,6 +3088,41 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <button type="submit">为本章生成插图</button>
             </form>
           </section>
+          <section class="panel">
+            <h2>本章有声小说</h2>
+            {audiobook_player_html}
+            <form method="post" action="/project/{escape(project_id)}/audiobook" enctype="multipart/form-data">
+              <fieldset{busy_attr}>
+                <input type="hidden" name="chapter_slug" value="{escape(chapter_slug)}">
+                <label>旁白音色
+                  <select name="narrator_preset">
+                    {narrator_options_html}
+                  </select>
+                </label>
+                <label>旁白参考 WAV（可选）
+                  <input type="file" name="narrator_reference_audio" accept=".wav,audio/wav,audio/x-wav">
+                </label>
+                <label>旁白参考文本（可选）
+                  <input type="text" name="narrator_prompt_text" placeholder="如上传参考音频，可填写对应文本以增强克隆相似度">
+                </label>
+                <div class="two-col">
+                  <label>角色参考目标
+                    <select name="character_voice_name">
+                      {character_voice_options_html}
+                    </select>
+                  </label>
+                  <label>角色参考 WAV（可选）
+                    <input type="file" name="character_reference_audio" accept=".wav,audio/wav,audio/x-wav">
+                  </label>
+                </div>
+                <label>角色参考文本（可选）
+                  <input type="text" name="character_prompt_text" placeholder="如上传角色参考音频，可填写对应文本">
+                </label>
+                <label><input type="checkbox" name="force" value="1"> 强制重新生成</label>
+                <button type="submit">生成本章有声版</button>
+              </fieldset>
+            </form>
+          </section>
         </div>
         """
         self._write_html(
@@ -2954,6 +3146,19 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         file_path = (illustrations_root / chapter_slug / file_name).resolve()
         if not file_path.exists() or illustrations_root not in file_path.parents:
             self.send_error(HTTPStatus.NOT_FOUND, "插图不存在")
+            return
+        self._write_file(file_path)
+
+    def _handle_audiobook_file(self, project_id: str, chapter_slug: str, file_name: str) -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+
+        try:
+            file_path = audiobook_file_path(project_path, chapter_slug, file_name)
+        except FileNotFoundError:
+            self.send_error(HTTPStatus.NOT_FOUND, "有声章节音频不存在")
             return
         self._write_file(file_path)
 
@@ -3256,6 +3461,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         latest_snapshot = get_latest_state_snapshot_chapter(str(project_path))
         stats = (project.get("stats") or {}).get("total", {})
         illustration_records = list_illustration_records(str(project_path))
+        audiobook_records = list_audiobook_records(str(project_path))
         active_jobs = JOB_REGISTRY.list_jobs(project_id=project_id, active_only=True, limit=8)
         active_jobs_html = _render_job_cards(active_jobs, "当前没有运行中的后台任务。")
         blocking_jobs = [job for job in active_jobs if job.get("blocks_project", True)]
@@ -3315,6 +3521,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 """
             )
         illustration_gallery = "".join(illustration_cards) or "<p>当前还没有章节插图。</p>"
+        audiobook_gallery = _render_audiobook_records(project_id, audiobook_records)
+        narrator_options_html = _render_narrator_preset_options(project_path)
+        character_voice_options_html = _render_character_voice_options(project_path)
         latest_chapter_text = escape(chapters[-1]["text"]) if chapters else "还没有正文。"
         snapshot_text = f"已保存到第 {latest_snapshot} 章" if latest_snapshot is not None else "暂无"
         project_live_script = ""
@@ -3444,6 +3653,44 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               </form>
             </section>
             <section class="panel">
+              <h3>有声小说</h3>
+              <form method="post" action="/project/{escape(project_id)}/audiobook" enctype="multipart/form-data">
+                <fieldset{busy_attr}>
+                  <label>目标章节
+                    <select name="chapter_slug">
+                      {''.join(chapter_options)}
+                    </select>
+                  </label>
+                  <label>旁白音色
+                    <select name="narrator_preset">
+                      {narrator_options_html}
+                    </select>
+                  </label>
+                  <label>旁白参考 WAV（可选）
+                    <input type="file" name="narrator_reference_audio" accept=".wav,audio/wav,audio/x-wav">
+                  </label>
+                  <label>旁白参考文本（可选）
+                    <input type="text" name="narrator_prompt_text" placeholder="如上传参考音频，可填写对应文本以增强克隆相似度">
+                  </label>
+                  <div class="two-col">
+                    <label>角色参考目标
+                      <select name="character_voice_name">
+                        {character_voice_options_html}
+                      </select>
+                    </label>
+                    <label>角色参考 WAV（可选）
+                      <input type="file" name="character_reference_audio" accept=".wav,audio/wav,audio/x-wav">
+                    </label>
+                  </div>
+                  <label>角色参考文本（可选）
+                    <input type="text" name="character_prompt_text" placeholder="如上传角色参考音频，可填写对应文本">
+                  </label>
+                  <label><input type="checkbox" name="force" value="1"> 强制重新生成</label>
+                  <button type="submit">生成有声章节</button>
+                </fieldset>
+              </form>
+            </section>
+            <section class="panel">
               <h3>章节目录</h3>
               <div class="chapter-list">{chapter_links}</div>
             </section>
@@ -3503,6 +3750,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <section class="panel">
               <h2>最近插图</h2>
               <div class="gallery">{illustration_gallery}</div>
+            </section>
+            <section class="panel">
+              <h2>最近有声章节</h2>
+              <div class="gallery">{audiobook_gallery}</div>
             </section>
           </main>
         </div>
@@ -3806,6 +4057,77 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             return {
                 "message": message,
                 "result_url": result_url,
+                "result_label": "打开章节",
+                "project_id": project_id,
+                "project_path": str(project_path.resolve()),
+            }
+
+        _start_background_job(job["id"], runner)
+        self._redirect("/job/" + urllib.parse.quote(job["id"]))
+
+    def _handle_audiobook_async(self, project_id: str, form: dict[str, str]) -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+
+        chapter_slug = (form.get("chapter_slug") or "latest").strip() or "latest"
+        narrator_upload = self._uploaded_file("narrator_reference_audio")
+        character_upload = self._uploaded_file("character_reference_audio")
+        character_name = (form.get("character_voice_name") or "").strip()
+        try:
+            if character_upload and not character_name:
+                raise RuntimeError("上传角色参考音频前，请先选择角色。")
+            job = JOB_REGISTRY.create_job(
+                kind="audiobook",
+                title=f"生成有声章节：{chapter_slug}",
+                project_id=project_id,
+                project_path=str(project_path.resolve()),
+            )
+        except Exception as exc:
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote(str(exc))
+            )
+            return
+
+        def runner(progress_callback):
+            if narrator_upload:
+                progress_callback({"stage": "audiobook_voice_ref", "message": "正在保存旁白参考音频"})
+                save_uploaded_voice_reference(
+                    str(project_path),
+                    target="narrator",
+                    uploaded_file=narrator_upload,
+                    prompt_text=(form.get("narrator_prompt_text") or "").strip(),
+                )
+            if character_upload:
+                progress_callback({"stage": "audiobook_voice_ref", "message": f"正在保存 {character_name} 的参考音频"})
+                save_uploaded_voice_reference(
+                    str(project_path),
+                    target=character_name,
+                    uploaded_file=character_upload,
+                    prompt_text=(form.get("character_prompt_text") or "").strip(),
+                )
+            results = generate_audiobook_chapters(
+                str(project_path),
+                chapter_refs=[chapter_slug],
+                force=bool(form.get("force")),
+                narrator_preset=(form.get("narrator_preset") or "").strip(),
+                progress_callback=progress_callback,
+            )
+            result = results[0]
+            chapter_target = result.get("chapter_slug", chapter_slug)
+            message = "已复用现有有声章节。" if result.get("reused") else "有声章节生成完成。"
+            if narrator_upload or character_upload:
+                message = "参考音频已保存，" + message
+            return {
+                "message": message,
+                "result_url": "/project/"
+                + urllib.parse.quote(project_id)
+                + "/chapter/"
+                + urllib.parse.quote(chapter_target),
                 "result_label": "打开章节",
                 "project_id": project_id,
                 "project_path": str(project_path.resolve()),
