@@ -18,6 +18,8 @@ from external_services import (
     DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT,
     DEFAULT_ILLUSTRATION_STYLE_PRESET,
     DEFAULT_WORKFLOW_TEMPLATE_NAME,
+    ImageFrameClient,
+    load_image_frame_runtime,
     load_service_config,
     normalize_http_base,
 )
@@ -475,6 +477,36 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
     project = load_json(str(Path(project_path) / "project.json"))
     saved = project.get("illustration_config") or {}
     merged_overrides = overrides or {}
+    backend = str(
+        merged_overrides.get("backend")
+        or os.environ.get("NOVEL_ILLUSTRATION_BACKEND")
+        or saved.get("backend")
+        or "image_frame"
+    ).strip().lower()
+    if backend not in {"image_frame", "comfyui"}:
+        backend = "image_frame"
+    image_runtime = load_image_frame_runtime(
+        {
+            key: value
+            for key, value in {
+                "api_base": merged_overrides.get("image_frame_api_base"),
+                "provider": merged_overrides.get("image_frame_provider"),
+                "model": merged_overrides.get("image_frame_model"),
+                "size": merged_overrides.get("image_frame_size"),
+                "aspect_ratio": merged_overrides.get("image_frame_aspect_ratio"),
+                "google_image_size": merged_overrides.get("image_frame_google_image_size"),
+                "quality": merged_overrides.get("image_frame_quality"),
+                "background": merged_overrides.get("image_frame_background"),
+                "moderation": merged_overrides.get("image_frame_moderation"),
+                "num_outputs": merged_overrides.get("image_frame_num_outputs"),
+                "timeout": merged_overrides.get("image_frame_timeout"),
+                "poll_interval": merged_overrides.get("image_frame_poll_interval"),
+                "auth_username": merged_overrides.get("image_frame_auth_username"),
+                "auth_password": merged_overrides.get("image_frame_auth_password"),
+            }.items()
+            if value not in (None, "")
+        }
+    )
     service_defaults = load_service_config("comfyui", include_defaults=True)
     service_overrides = load_service_config("comfyui", include_defaults=False)
     comfyui_root = _resolve_comfyui_root(saved, merged_overrides, service_overrides, service_defaults)
@@ -491,6 +523,21 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
         saved_style_preset = ""
 
     config = {
+        "backend": backend,
+        "image_frame_api_base": image_runtime["api_base"],
+        "image_frame_provider": image_runtime["provider"],
+        "image_frame_model": image_runtime["model"],
+        "image_frame_size": image_runtime["size"],
+        "image_frame_aspect_ratio": image_runtime["aspect_ratio"],
+        "image_frame_google_image_size": image_runtime["google_image_size"],
+        "image_frame_quality": image_runtime["quality"],
+        "image_frame_background": image_runtime["background"],
+        "image_frame_moderation": image_runtime["moderation"],
+        "image_frame_num_outputs": image_runtime["num_outputs"],
+        "image_frame_timeout": image_runtime["timeout"],
+        "image_frame_poll_interval": image_runtime["poll_interval"],
+        "image_frame_auth_username": image_runtime["auth_username"],
+        "image_frame_auth_password": image_runtime["auth_password"],
         "comfyui_api_base": normalize_http_base(
             str(
                 merged_overrides.get("comfyui_api_base")
@@ -586,7 +633,7 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
         ),
     }
 
-    if not config["workflow_template"] and not config["checkpoint"]:
+    if backend == "comfyui" and not config["workflow_template"] and not config["checkpoint"]:
         raise RuntimeError(
             "未找到可用的 ComfyUI 工作流模板或 checkpoint。请确认 external_services.json 中的 comfyui.workflow_template / comfyui.checkpoint，或设置 NOVEL_COMFYUI_WORKFLOW_TEMPLATE。"
         )
@@ -597,6 +644,19 @@ def _persist_runtime_config(project_path: str, runtime_config: dict) -> None:
     project_file = Path(project_path) / "project.json"
     project_data = load_json(str(project_file))
     project_data["illustration_config"] = {
+        "backend": runtime_config.get("backend", "image_frame"),
+        "image_frame_api_base": runtime_config.get("image_frame_api_base", ""),
+        "image_frame_provider": runtime_config.get("image_frame_provider", ""),
+        "image_frame_model": runtime_config.get("image_frame_model", ""),
+        "image_frame_size": runtime_config.get("image_frame_size", ""),
+        "image_frame_aspect_ratio": runtime_config.get("image_frame_aspect_ratio", ""),
+        "image_frame_google_image_size": runtime_config.get("image_frame_google_image_size", ""),
+        "image_frame_quality": runtime_config.get("image_frame_quality", ""),
+        "image_frame_background": runtime_config.get("image_frame_background", ""),
+        "image_frame_moderation": runtime_config.get("image_frame_moderation", ""),
+        "image_frame_num_outputs": int(runtime_config.get("image_frame_num_outputs", 1)),
+        "image_frame_timeout": int(runtime_config.get("image_frame_timeout", 600)),
+        "image_frame_poll_interval": float(runtime_config.get("image_frame_poll_interval", 2.0)),
         "comfyui_api_base": runtime_config.get("comfyui_api_base", ""),
         "comfyui_root": runtime_config.get("comfyui_root", ""),
         "workflow_template": runtime_config.get("workflow_template", ""),
@@ -926,6 +986,16 @@ def _render_illustration_images(
     runtime_config: dict,
     progress_callback=None,
 ) -> tuple[str, int, list[dict]]:
+    if str(runtime_config.get("backend") or "").lower() == "image_frame":
+        return _render_image_frame_images(
+            project_path,
+            asset_slug=asset_slug,
+            record_dir=record_dir,
+            prompt_payload=prompt_payload,
+            runtime_config=runtime_config,
+            progress_callback=progress_callback,
+        )
+
     seed = int(runtime_config.get("seed") or 0) or random.randint(1, 2**31 - 1)
     project_id = load_json(str(Path(project_path) / "project.json")).get("project_id", Path(project_path).name)
     filename_prefix = f"novel_writer/{project_id}/{asset_slug}"
@@ -1007,6 +1077,93 @@ def _render_illustration_images(
 
     emit_progress(progress_callback, "illustration_saved", "插图文件已保存")
     return prompt_id, seed, saved_images
+
+
+def _image_frame_prompt(prompt_payload: dict) -> str:
+    prompt = str(prompt_payload.get("positive_prompt", "") or "").strip()
+    negative = str(prompt_payload.get("negative_prompt", "") or "").strip()
+    if negative:
+        prompt = f"{prompt}\n\nAvoid: {negative}"
+    return prompt
+
+
+def _render_image_frame_images(
+    project_path: str,
+    *,
+    asset_slug: str,
+    record_dir: Path,
+    prompt_payload: dict,
+    runtime_config: dict,
+    progress_callback=None,
+) -> tuple[str, int, list[dict]]:
+    seed = int(runtime_config.get("seed") or 0) or random.randint(1, 2**31 - 1)
+    runtime = load_image_frame_runtime(
+        {
+            "api_base": runtime_config.get("image_frame_api_base"),
+            "provider": runtime_config.get("image_frame_provider"),
+            "model": runtime_config.get("image_frame_model"),
+            "size": runtime_config.get("image_frame_size"),
+            "aspect_ratio": runtime_config.get("image_frame_aspect_ratio"),
+            "google_image_size": runtime_config.get("image_frame_google_image_size"),
+            "quality": runtime_config.get("image_frame_quality"),
+            "background": runtime_config.get("image_frame_background"),
+            "moderation": runtime_config.get("image_frame_moderation"),
+            "num_outputs": runtime_config.get("image_frame_num_outputs"),
+            "timeout": runtime_config.get("image_frame_timeout"),
+            "poll_interval": runtime_config.get("image_frame_poll_interval"),
+            "auth_username": runtime_config.get("image_frame_auth_username"),
+            "auth_password": runtime_config.get("image_frame_auth_password"),
+        }
+    )
+    client = ImageFrameClient(runtime["api_base"])
+    client.login(runtime.get("auth_username", ""), runtime.get("auth_password", ""))
+    emit_progress(progress_callback, "illustration_queue", "姝ｅ湪鎻愪氦鍒?Image Frame")
+    created = client.create_text_to_image_task(runtime, _image_frame_prompt(prompt_payload), timeout=60)
+    task_id = str(created.get("id") or "").strip()
+    if not task_id:
+        raise RuntimeError(f"Image Frame 鏈繑鍥炰换鍔?ID: {created}")
+
+    emit_progress(progress_callback, "illustration_wait", "Image Frame 姝ｅ湪鐢熸垚鍥剧墖")
+    completed = client.wait_for_task(
+        task_id,
+        timeout=int(runtime["timeout"]),
+        poll_interval=float(runtime["poll_interval"]),
+    )
+    if str(completed.get("status", "")).lower() != "succeeded":
+        raise RuntimeError(f"Image Frame 鐢熸垚澶辫触: {completed.get('error') or completed}")
+
+    assets = completed.get("output_assets") or []
+    if not assets:
+        raise RuntimeError("Image Frame 宸插畬鎴愪换鍔★紝浣嗘病鏈夎繑鍥炲浘鐗囪緭鍑恒€?")
+
+    emit_progress(progress_callback, "illustration_download", "姝ｅ湪涓嬭浇骞朵繚瀛?Image Frame 缁撴灉")
+    record_dir.mkdir(parents=True, exist_ok=True)
+    for old_file in record_dir.glob("image_*"):
+        old_file.unlink(missing_ok=True)
+
+    saved_images = []
+    for index, asset in enumerate(assets, start=1):
+        url = str(asset.get("url") or "")
+        filename = str(asset.get("filename") or f"image_{index:02d}.png")
+        suffix = Path(filename).suffix or ".png"
+        local_name = f"image_{index:02d}{suffix}"
+        local_path = record_dir / local_name
+        local_path.write_bytes(client.request_bytes(url, timeout=max(30, int(runtime["timeout"]))))
+        saved_images.append(
+            {
+                "file_name": local_name,
+                "relative_path": str(local_path.relative_to(Path(project_path))).replace("\\", "/"),
+                "source": {
+                    "task_id": task_id,
+                    "url": url,
+                    "filename": filename,
+                    "provider": runtime.get("provider", ""),
+                },
+            }
+        )
+
+    emit_progress(progress_callback, "illustration_saved", "鎻掑浘鏂囦欢宸蹭繚瀛?")
+    return task_id, seed, saved_images
 
 
 def _slugify_name(text: str, default: str) -> str:

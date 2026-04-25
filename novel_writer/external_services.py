@@ -8,6 +8,7 @@ launch details out of feature code. Local deployments can copy
 
 from __future__ import annotations
 
+import base64
 from copy import deepcopy
 import json
 import os
@@ -39,6 +40,8 @@ DEFAULT_COMFYUI_PREFERRED_CHECKPOINTS = (
 DEFAULT_VOXCPM2_ROOT = "/home/wsy/VoxCPM2"
 DEFAULT_VOXCPM2_PYTHON = "/home/wsy/VoxCPM2/.venv/bin/python"
 DEFAULT_VOXCPM2_MODEL_ID = "openbmb/VoxCPM2"
+DEFAULT_IMAGE_FRAME_API_BASE = "http://127.0.0.1:8010"
+DEFAULT_AUDIO_FRAME_API_BASE = "http://127.0.0.1:8808"
 
 DEFAULT_EXTERNAL_SERVICES_CONFIG: dict[str, Any] = {
     "version": 1,
@@ -73,6 +76,29 @@ DEFAULT_EXTERNAL_SERVICES_CONFIG: dict[str, Any] = {
         "denoise": False,
         "silence_ms": 260,
         "timeout_seconds": 0,
+    },
+    "image_frame": {
+        "api_base": DEFAULT_IMAGE_FRAME_API_BASE,
+        "provider": "google",
+        "model": "",
+        "size": "",
+        "aspect_ratio": "1:1",
+        "google_image_size": "",
+        "quality": "",
+        "background": "",
+        "moderation": "",
+        "num_outputs": 1,
+        "timeout": 600,
+        "poll_interval": 2.0,
+        "auth_username": "",
+        "auth_password": "",
+    },
+    "audio_frame": {
+        "api_base": DEFAULT_AUDIO_FRAME_API_BASE,
+        "timeout": 0,
+    },
+    "audiobook": {
+        "backend": "local_worker",
     },
 }
 
@@ -293,6 +319,262 @@ def load_voxcpm2_runtime(runtime_overrides: dict[str, Any] | None = None) -> dic
         if isinstance(layer, dict):
             raw.update(layer)
     return normalize_voxcpm2_runtime(raw)
+
+
+def normalize_image_frame_runtime(raw_config: dict[str, Any] | None) -> dict[str, Any]:
+    raw = raw_config if isinstance(raw_config, dict) else {}
+    return {
+        "api_base": normalize_http_base(raw.get("api_base"), DEFAULT_IMAGE_FRAME_API_BASE),
+        "provider": str(raw.get("provider") or "google").strip() or "google",
+        "model": str(raw.get("model") or "").strip(),
+        "size": str(raw.get("size") or "").strip(),
+        "aspect_ratio": str(raw.get("aspect_ratio") or "1:1").strip() or "1:1",
+        "google_image_size": str(raw.get("google_image_size") or "").strip(),
+        "quality": str(raw.get("quality") or "").strip(),
+        "background": str(raw.get("background") or "").strip(),
+        "moderation": str(raw.get("moderation") or "").strip(),
+        "num_outputs": coerce_int(raw.get("num_outputs"), 1),
+        "timeout": coerce_int(raw.get("timeout"), 600),
+        "poll_interval": coerce_float(raw.get("poll_interval"), 2.0),
+        "auth_username": str(raw.get("auth_username") or "").strip(),
+        "auth_password": str(raw.get("auth_password") or "").strip(),
+    }
+
+
+def normalize_audio_frame_runtime(raw_config: dict[str, Any] | None) -> dict[str, Any]:
+    raw = raw_config if isinstance(raw_config, dict) else {}
+    return {
+        "api_base": normalize_http_base(raw.get("api_base"), DEFAULT_AUDIO_FRAME_API_BASE),
+        "timeout": coerce_int(raw.get("timeout"), 0),
+    }
+
+
+def _image_frame_env_overrides() -> dict[str, Any]:
+    mapping = {
+        "api_base": "NOVEL_IMAGE_FRAME_API_BASE",
+        "provider": "NOVEL_IMAGE_FRAME_PROVIDER",
+        "model": "NOVEL_IMAGE_FRAME_MODEL",
+        "size": "NOVEL_IMAGE_FRAME_SIZE",
+        "aspect_ratio": "NOVEL_IMAGE_FRAME_ASPECT_RATIO",
+        "google_image_size": "NOVEL_IMAGE_FRAME_GOOGLE_IMAGE_SIZE",
+        "quality": "NOVEL_IMAGE_FRAME_QUALITY",
+        "background": "NOVEL_IMAGE_FRAME_BACKGROUND",
+        "moderation": "NOVEL_IMAGE_FRAME_MODERATION",
+        "num_outputs": "NOVEL_IMAGE_FRAME_NUM_OUTPUTS",
+        "timeout": "NOVEL_IMAGE_FRAME_TIMEOUT",
+        "poll_interval": "NOVEL_IMAGE_FRAME_POLL_INTERVAL",
+        "auth_username": "NOVEL_IMAGE_FRAME_AUTH_USERNAME",
+        "auth_password": "NOVEL_IMAGE_FRAME_AUTH_PASSWORD",
+    }
+    return {key: os.environ[env_name] for key, env_name in mapping.items() if os.environ.get(env_name, "") != ""}
+
+
+def _audio_frame_env_overrides() -> dict[str, Any]:
+    mapping = {
+        "api_base": "NOVEL_AUDIO_FRAME_API_BASE",
+        "timeout": "NOVEL_AUDIO_FRAME_TIMEOUT",
+    }
+    return {key: os.environ[env_name] for key, env_name in mapping.items() if os.environ.get(env_name, "") != ""}
+
+
+def load_image_frame_runtime(runtime_overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw: dict[str, Any] = deepcopy(DEFAULT_EXTERNAL_SERVICES_CONFIG["image_frame"])
+    for layer in (
+        load_service_config("image_frame", include_defaults=False),
+        _image_frame_env_overrides(),
+        runtime_overrides or {},
+    ):
+        if isinstance(layer, dict):
+            raw.update(layer)
+    return normalize_image_frame_runtime(raw)
+
+
+def load_audio_frame_runtime(runtime_overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw: dict[str, Any] = deepcopy(DEFAULT_EXTERNAL_SERVICES_CONFIG["audio_frame"])
+    for layer in (
+        load_service_config("audio_frame", include_defaults=False),
+        _audio_frame_env_overrides(),
+        runtime_overrides or {},
+    ):
+        if isinstance(layer, dict):
+            raw.update(layer)
+    return normalize_audio_frame_runtime(raw)
+
+
+class JsonHttpClient:
+    def __init__(self, api_base: str):
+        self.api_base = normalize_http_base(api_base)
+        self.cookie = ""
+
+    def request_json(
+        self,
+        path_or_url: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        timeout: int = 60,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        url = self._url(path_or_url)
+        body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request_headers = {"Content-Type": "application/json"} if payload is not None else {}
+        request_headers.update(headers or {})
+        if self.cookie:
+            request_headers["Cookie"] = self.cookie
+        req = request.Request(url, data=body, headers=request_headers, method="POST" if payload is not None else "GET")
+        try:
+            with request.urlopen(req, timeout=timeout) as response:
+                self._store_cookie(response)
+                return json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"HTTP request failed with {exc.code}: {detail}") from exc
+        except error.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            raise RuntimeError(f"Failed to connect to service: {reason}") from exc
+
+    def request_bytes(self, path_or_url: str, *, timeout: int = 60) -> bytes:
+        req = request.Request(self._url(path_or_url), method="GET")
+        if self.cookie:
+            req.add_header("Cookie", self.cookie)
+        try:
+            with request.urlopen(req, timeout=timeout) as response:
+                self._store_cookie(response)
+                return response.read()
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"File download failed with HTTP {exc.code}: {detail}") from exc
+        except error.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            raise RuntimeError(f"Failed to download file: {reason}") from exc
+
+    def _store_cookie(self, response) -> None:
+        cookie = response.headers.get("Set-Cookie")
+        if cookie:
+            self.cookie = cookie.split(";", 1)[0]
+
+    def _url(self, path_or_url: str) -> str:
+        text = str(path_or_url or "").strip()
+        if text.startswith(("http://", "https://")):
+            return text
+        if not text.startswith("/"):
+            text = "/" + text
+        return self.api_base + text
+
+
+class AudioFrameClient(JsonHttpClient):
+    def synthesize(
+        self,
+        *,
+        text: str,
+        control_instruction: str = "",
+        reference_audio: str = "",
+        prompt_text: str = "",
+        cfg_value: float = 2.0,
+        normalize: bool = True,
+        denoise: bool = False,
+        inference_timesteps: int = 10,
+        timeout: int = 0,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "text": text,
+            "control_instruction": control_instruction,
+            "prompt_text": prompt_text,
+            "cfg_value": cfg_value,
+            "normalize": normalize,
+            "denoise": denoise,
+            "inference_timesteps": inference_timesteps,
+        }
+        if reference_audio:
+            path = Path(reference_audio)
+            payload["reference_audio_filename"] = path.name
+            payload["reference_audio_base64"] = base64.b64encode(path.read_bytes()).decode("ascii")
+        return self.request_json("/api/tts", payload=payload, timeout=timeout if timeout > 0 else 3600)
+
+
+class ImageFrameClient(JsonHttpClient):
+    def login(self, username: str, password: str, *, timeout: int = 30) -> None:
+        if not username and not password:
+            return
+        form = parse.urlencode({"username": username, "password": password, "next": "/"}).encode("utf-8")
+        req = request.Request(
+            self._url("/login"),
+            data=form,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            class NoRedirect(request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            opener = request.build_opener(NoRedirect)
+            with opener.open(req, timeout=timeout) as response:
+                self._store_cookie(response)
+        except error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                self._store_cookie(exc)
+                if self.cookie:
+                    return
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Image Frame login failed with HTTP {exc.code}: {detail}") from exc
+
+    def create_text_to_image_task(self, runtime: dict[str, Any], prompt: str, *, timeout: int = 60) -> dict[str, Any]:
+        fields = {
+            "provider": runtime["provider"],
+            "mode": "text_to_image",
+            "prompt": prompt,
+            "model": runtime.get("model", ""),
+            "size": runtime.get("size", ""),
+            "aspect_ratio": runtime.get("aspect_ratio", ""),
+            "google_image_size": runtime.get("google_image_size", ""),
+            "quality": runtime.get("quality", ""),
+            "background": runtime.get("background", ""),
+            "moderation": runtime.get("moderation", ""),
+            "num_outputs": str(max(1, coerce_int(runtime.get("num_outputs"), 1))),
+        }
+        return self.request_multipart("/api/tasks", fields=fields, timeout=timeout)
+
+    def request_multipart(self, path_or_url: str, *, fields: dict[str, str], timeout: int = 60) -> dict[str, Any]:
+        boundary = "----novel-frame-boundary"
+        parts: list[bytes] = []
+        for name, value in fields.items():
+            if value is None or str(value) == "":
+                continue
+            parts.append(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                    f"{value}\r\n"
+                ).encode("utf-8")
+            )
+        parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+        req = request.Request(
+            self._url(path_or_url),
+            data=b"".join(parts),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        if self.cookie:
+            req.add_header("Cookie", self.cookie)
+        try:
+            with request.urlopen(req, timeout=timeout) as response:
+                self._store_cookie(response)
+                return json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Image Frame request failed with HTTP {exc.code}: {detail}") from exc
+
+    def wait_for_task(self, task_id: str, *, timeout: int, poll_interval: float) -> dict[str, Any]:
+        deadline = time.time() + timeout
+        last_payload: dict[str, Any] = {}
+        while time.time() < deadline:
+            payload = self.request_json(f"/api/tasks/{parse.quote(task_id)}", timeout=max(10, int(poll_interval * 4)))
+            last_payload = payload
+            status = str(payload.get("status", "")).lower()
+            if status in {"succeeded", "failed"}:
+                return payload
+            time.sleep(poll_interval)
+        raise RuntimeError(f"Image Frame task timed out: {task_id}, last state: {last_payload}")
 
 
 class VoxCPM2Service:

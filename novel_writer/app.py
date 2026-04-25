@@ -78,6 +78,14 @@ from version import APP_NAME, DISPLAY_VERSION
 
 def _add_illustration_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workers", type=int, help="Max concurrent illustration jobs")
+    parser.add_argument("--illustration-backend", choices=("image_frame", "comfyui"), help="Illustration backend")
+    parser.add_argument("--image-frame-api-base", help="Image Frame API base URL")
+    parser.add_argument("--image-frame-provider", help="Image Frame provider id, for example google/openai/xai")
+    parser.add_argument("--image-frame-model", help="Image Frame model name")
+    parser.add_argument("--image-frame-size", help="Image Frame size, for example 1024x1024")
+    parser.add_argument("--image-frame-aspect-ratio", help="Image Frame aspect ratio, for example 1:1")
+    parser.add_argument("--image-frame-google-image-size", help="Google image size option")
+    parser.add_argument("--image-frame-timeout", type=int, help="Image Frame task timeout in seconds")
     parser.add_argument("--comfyui-api-base", help="ComfyUI API base URL")
     parser.add_argument("--comfyui-root", help="Optional ComfyUI root directory")
     parser.add_argument("--checkpoint", help="Checkpoint name for CheckpointLoaderSimple")
@@ -93,6 +101,14 @@ def _add_illustration_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _extract_illustration_overrides(args: argparse.Namespace) -> dict:
     mapping = {
+        "backend": getattr(args, "illustration_backend", None),
+        "image_frame_api_base": getattr(args, "image_frame_api_base", None),
+        "image_frame_provider": getattr(args, "image_frame_provider", None),
+        "image_frame_model": getattr(args, "image_frame_model", None),
+        "image_frame_size": getattr(args, "image_frame_size", None),
+        "image_frame_aspect_ratio": getattr(args, "image_frame_aspect_ratio", None),
+        "image_frame_google_image_size": getattr(args, "image_frame_google_image_size", None),
+        "image_frame_timeout": getattr(args, "image_frame_timeout", None),
         "comfyui_api_base": getattr(args, "comfyui_api_base", None),
         "comfyui_root": getattr(args, "comfyui_root", None),
         "checkpoint": getattr(args, "checkpoint", None),
@@ -116,6 +132,9 @@ def _extract_illustration_workers(args: argparse.Namespace) -> int | None:
 
 
 def _add_audiobook_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--audiobook-backend", choices=("local_worker", "audio_frame"), help="Audiobook backend")
+    parser.add_argument("--audio-frame-api-base", help="Audio Frame API base URL")
+    parser.add_argument("--audio-frame-timeout", type=int, help="Audio Frame request timeout in seconds")
     parser.add_argument("--voxcpm-root", help="VoxCPM2 repository/root directory")
     parser.add_argument("--voxcpm-python", help="Python executable for the VoxCPM2 environment")
     parser.add_argument("--voxcpm-model-id", help="VoxCPM2 model id or local model path")
@@ -132,6 +151,9 @@ def _add_audiobook_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _extract_audiobook_overrides(args: argparse.Namespace) -> dict:
     mapping = {
+        "backend": getattr(args, "audiobook_backend", None),
+        "audio_frame_api_base": getattr(args, "audio_frame_api_base", None),
+        "audio_frame_timeout": getattr(args, "audio_frame_timeout", None),
         "root": getattr(args, "voxcpm_root", None),
         "python": getattr(args, "voxcpm_python", None),
         "model_id": getattr(args, "voxcpm_model_id", None),

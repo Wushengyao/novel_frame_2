@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+import base64
 import re
 import shutil
 import subprocess
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from common_utils import emit_progress, utc_now
 from external_services import (
+    AudioFrameClient,
     DEFAULT_EXTERNAL_SERVICES_CONFIG,
     DEFAULT_VOXCPM2_MODEL_ID,
     DEFAULT_VOXCPM2_PYTHON,
     DEFAULT_VOXCPM2_ROOT,
     VoxCPM2Service,
+    load_audio_frame_runtime,
+    load_service_config,
     load_voxcpm2_runtime,
     normalize_voxcpm2_runtime,
 )
@@ -684,6 +689,132 @@ def _run_worker(request_path: Path, runtime: dict) -> subprocess.CompletedProces
     )
 
 
+def _audiobook_backend(runtime_overrides: dict | None = None) -> str:
+    configured = str(
+        (runtime_overrides or {}).get("backend")
+        or (runtime_overrides or {}).get("audiobook_backend")
+        or load_service_config("audiobook", include_defaults=True).get("backend")
+        or "local_worker"
+    ).strip().lower()
+    return configured if configured in {"local_worker", "audio_frame"} else "local_worker"
+
+
+def _audio_frame_overrides(runtime_overrides: dict | None) -> dict:
+    raw = runtime_overrides or {}
+    return {
+        key: value
+        for key, value in {
+            "api_base": raw.get("audio_frame_api_base"),
+            "timeout": raw.get("audio_frame_timeout"),
+        }.items()
+        if value not in (None, "")
+    }
+
+
+def _wav_duration_seconds(path: Path) -> float:
+    with wave.open(str(path), "rb") as wav_file:
+        frame_count = wav_file.getnframes()
+        frame_rate = wav_file.getframerate()
+        return float(frame_count) / float(frame_rate) if frame_rate else 0.0
+
+
+def _combine_wav_files(paths: list[Path], output_path: Path, *, silence_ms: int = 260) -> None:
+    if not paths:
+        raise RuntimeError("no audio chunks were generated")
+
+    params = None
+    chunks: list[bytes] = []
+    for index, path in enumerate(paths):
+        with wave.open(str(path), "rb") as wav_file:
+            current_params = wav_file.getparams()
+            if params is None:
+                params = current_params
+            elif (
+                current_params.nchannels != params.nchannels
+                or current_params.sampwidth != params.sampwidth
+                or current_params.framerate != params.framerate
+                or current_params.comptype != params.comptype
+            ):
+                raise RuntimeError("Audio Frame returned WAV segments with incompatible formats.")
+            chunks.append(wav_file.readframes(wav_file.getnframes()))
+            if index != len(paths) - 1 and silence_ms > 0:
+                silence_frames = int(current_params.framerate * silence_ms / 1000)
+                chunks.append(b"\x00" * silence_frames * current_params.nchannels * current_params.sampwidth)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(output_path), "wb") as out_file:
+        out_file.setparams(params)
+        for chunk in chunks:
+            out_file.writeframes(chunk)
+
+
+def _run_audio_frame_service(request_payload: dict, runtime_overrides: dict | None, progress_callback=None) -> None:
+    runtime = load_audio_frame_runtime(_audio_frame_overrides(runtime_overrides))
+    client = AudioFrameClient(runtime["api_base"])
+    project_path = Path(request_payload["project_path"])
+    segments_dir = Path(request_payload["segments_dir"])
+    combined_audio_path = Path(request_payload["combined_audio_path"])
+    manifest_path = Path(request_payload["manifest_path"])
+    segments_dir.mkdir(parents=True, exist_ok=True)
+
+    generated_paths: list[Path] = []
+    manifest_segments = []
+    segments = request_payload.get("segments") or []
+    for index, item in enumerate(segments, start=1):
+        voice = item.get("voice") or {}
+        emit_progress(
+            progress_callback,
+            "audiobook_audio_frame",
+            f"Audio Frame 姝ｅ湪鍚堟垚 {index}/{len(segments)}",
+            current=index - 1,
+            total=len(segments),
+        )
+        response = client.synthesize(
+            text=str(item.get("text") or ""),
+            control_instruction=str(voice.get("control_instruction") or ""),
+            reference_audio=str(voice.get("reference_audio") or ""),
+            prompt_text=str(voice.get("prompt_text") or ""),
+            cfg_value=float(voice.get("cfg_value") or request_payload["runtime"].get("cfg_value") or 2.0),
+            normalize=bool(request_payload["runtime"].get("normalize", True)),
+            denoise=bool(request_payload["runtime"].get("denoise", False)),
+            inference_timesteps=int(
+                voice.get("inference_timesteps") or request_payload["runtime"].get("inference_timesteps") or 10
+            ),
+            timeout=int(runtime.get("timeout") or 0),
+        )
+        audio_bytes = base64.b64decode(str(response.get("audio_base64") or ""))
+        local_path = segments_dir / f"{item.get('segment_id', f'segment_{index:04d}')}.wav"
+        local_path.write_bytes(audio_bytes)
+        item = dict(item)
+        item["audio_file"] = _relative_path(project_path, local_path)
+        item["duration_seconds"] = round(_wav_duration_seconds(local_path), 3)
+        manifest_segments.append(item)
+        generated_paths.append(local_path)
+
+    _combine_wav_files(
+        generated_paths,
+        combined_audio_path,
+        silence_ms=int(request_payload["runtime"].get("silence_ms") or DEFAULT_AUDIOBOOK_RUNTIME["silence_ms"]),
+    )
+    save_json(
+        str(manifest_path),
+        {
+            "chapter_slug": request_payload["chapter_slug"],
+            "chapter_file": request_payload["chapter_file"],
+            "generated_at": utc_now(),
+            "status": "succeeded",
+            "combined_audio": _relative_path(project_path, combined_audio_path),
+            "segment_count": len(manifest_segments),
+            "segments": manifest_segments,
+            "narrator_id": request_payload.get("narrator_id", ""),
+            "split_config": request_payload.get("split_config", {}),
+            "audio_frame": {
+                "api_base": runtime["api_base"],
+            },
+        },
+    )
+
+
 def generate_audiobook_chapter(
     project_path: str | Path,
     chapter_ref: str | None = None,
@@ -743,7 +874,11 @@ def generate_audiobook_chapter(
     save_json(str(request_path), request_payload)
 
     emit_progress(progress_callback, "audiobook_worker", f"正在调用 VoxCPM2 合成 {len(segments)} 个片段", current=0, total=len(segments))
-    result = _run_worker(request_path, runtime)
+    if _audiobook_backend(runtime_overrides) == "audio_frame":
+        _run_audio_frame_service(request_payload, runtime_overrides, progress_callback=progress_callback)
+        result = subprocess.CompletedProcess(["audio_frame"], 0, stdout="ok", stderr="")
+    else:
+        result = _run_worker(request_path, runtime)
     if result.returncode != 0:
         detail = "\n".join(item for item in (result.stdout.strip(), result.stderr.strip()) if item)
         raise RuntimeError(f"VoxCPM2 有声章节生成失败，退出码 {result.returncode}。\n{detail}")

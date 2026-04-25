@@ -41,5 +41,28 @@
     "denoise": false,
     "silence_ms": 260,
     "timeout_seconds": 0
+  },
+  "image_frame": {
+    "_note": "Image Frame HTTP service used when illustration backend is image_frame.",
+    "api_base": "http://127.0.0.1:8010",
+    "provider": "google",
+    "model": "",
+    "size": "",
+    "aspect_ratio": "1:1",
+    "google_image_size": "",
+    "num_outputs": 1,
+    "timeout": 600,
+    "poll_interval": 2.0,
+    "auth_username": "",
+    "auth_password": ""
+  },
+  "audio_frame": {
+    "_note": "Audio Frame HTTP service used when audiobook backend is audio_frame.",
+    "api_base": "http://127.0.0.1:8808",
+    "timeout": 0
+  },
+  "audiobook": {
+    "_note": "Use local_worker for the legacy in-process VoxCPM2 worker, or audio_frame for the HTTP Audio Frame service.",
+    "backend": "audio_frame"
   }
 }
