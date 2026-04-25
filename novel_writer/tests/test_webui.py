@@ -672,6 +672,51 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         auto_job = self._wait_for_job_status(auto_jobs[0]["id"])
         self.assertFalse(auto_job.get("blocks_project", True))
 
+    def test_continue_async_rejects_same_project_when_blocking_job_active(self) -> None:
+        webui.JOB_REGISTRY.create_job(
+            kind="continue",
+            title="existing",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+        )
+
+        with patch("webui.run_next_chapters") as mocked_run_next_chapters:
+            response = self._post(
+                "/project/web/continue",
+                "count=1&selection_mode=recommended",
+            )
+
+        self.assertEqual(response.status, 303)
+        self.assertIn("/project/web?error=", response.getheader("Location"))
+        mocked_run_next_chapters.assert_not_called()
+        jobs = webui.JOB_REGISTRY.list_jobs(project_id="web", active_only=False, limit=8)
+        self.assertEqual([job["kind"] for job in jobs].count("continue"), 1)
+
+    def test_continue_async_allows_different_project_when_other_project_active(self) -> None:
+        other_path = create_test_project(self.output_dir, project_id="web_b")
+        webui.JOB_REGISTRY.create_job(
+            kind="continue",
+            title="existing",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+        )
+
+        with patch(
+            "webui.run_next_chapters",
+            return_value=[str(other_path / "chapters" / "chapter_0001.md")],
+        ) as mocked_run_next_chapters, patch("webui._enqueue_progression_job", return_value=None):
+            response = self._post(
+                "/project/web_b/continue",
+                "count=1&selection_mode=recommended",
+            )
+
+        self.assertEqual(response.status, 303)
+        location = response.getheader("Location")
+        self.assertTrue(location.startswith("/job/"))
+        job = self._wait_for_job_status(location.rsplit("/", 1)[-1])
+        self.assertEqual(job["project_id"], "web_b")
+        mocked_run_next_chapters.assert_called_once()
+
     def test_create_project_async_starts_followup_progression_job(self) -> None:
         session_payload = {
             "session_id": "session_project_bootstrap",

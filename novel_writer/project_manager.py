@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
@@ -121,6 +122,96 @@ ROLLBACK_SUMMARY_KEYS = (
     "active_characters",
     "next_chapter_goal",
 )
+PROJECT_WRITE_LOCK_FILENAME = ".project_write.lock"
+
+
+class ProjectWriteLockError(RuntimeError):
+    """Raised when a mutating project workflow cannot acquire the project lock."""
+
+
+class ProjectWriteLock:
+    def __init__(
+        self,
+        project_path: str,
+        *,
+        owner: str = "",
+        timeout: float = 0,
+        poll_interval: float = 0.2,
+    ) -> None:
+        self.project_path = Path(project_path).resolve()
+        self.lock_path = self.project_path / PROJECT_WRITE_LOCK_FILENAME
+        self.owner = str(owner or "").strip()
+        self.timeout = max(0.0, float(timeout or 0))
+        self.poll_interval = max(0.05, float(poll_interval or 0.2))
+        self.token = uuid4().hex
+        self._acquired = False
+
+    def __enter__(self) -> "ProjectWriteLock":
+        return self.acquire()
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.release()
+
+    def acquire(self) -> "ProjectWriteLock":
+        if self._acquired:
+            return self
+        if not self.project_path.exists():
+            raise FileNotFoundError(f"project path does not exist: {self.project_path}")
+
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                fd = os.open(str(self.lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    payload = {
+                        "pid": os.getpid(),
+                        "owner": self.owner,
+                        "created_at": utc_now(),
+                        "project_path": str(self.project_path),
+                        "token": self.token,
+                    }
+                    os.write(fd, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+                    os.write(fd, b"\n")
+                except Exception:
+                    try:
+                        self.lock_path.unlink()
+                    except OSError:
+                        pass
+                    raise
+                finally:
+                    os.close(fd)
+                self._acquired = True
+                return self
+            except FileExistsError as exc:
+                if self.timeout <= 0 or time.monotonic() >= deadline:
+                    raise ProjectWriteLockError(self._busy_message()) from exc
+                time.sleep(self.poll_interval)
+
+    def release(self) -> None:
+        if not self._acquired:
+            return
+        try:
+            if self.lock_path.exists():
+                try:
+                    lock_data = load_json(str(self.lock_path))
+                except Exception:
+                    lock_data = {}
+                if lock_data.get("token") == self.token:
+                    self.lock_path.unlink()
+        finally:
+            self._acquired = False
+
+    def _busy_message(self) -> str:
+        return (
+            "当前项目已有写作任务正在运行，请稍后再试。"
+            f"锁文件: {self.lock_path}。"
+            "如果确认没有任务运行，可手动删除该锁文件。"
+        )
+
+
+def acquire_project_write_lock(project_path: str, *, owner: str = "", timeout: float = 0) -> ProjectWriteLock:
+    return ProjectWriteLock(project_path, owner=owner, timeout=timeout)
+
 
 def normalize_planning_mode(mode: object, default: str = DEFAULT_PLANNING_MODE) -> str:
     normalized = str(mode or "").strip().lower()

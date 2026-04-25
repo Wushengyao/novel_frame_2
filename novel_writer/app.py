@@ -51,6 +51,7 @@ from project_manager import (
     PLANNING_MODE_CHAPTER,
     PLANNING_MODE_NONE,
     PLANNING_MODE_VOLUME,
+    acquire_project_write_lock,
     create_state_snapshot,
     ensure_state_snapshot,
     get_latest_state_snapshot_chapter,
@@ -254,7 +255,21 @@ def run_next_chapter(
     planning_mode: str | None = None,
     log_context: dict[str, object] | None = None,
     progress_callback=None,
+    lock_project: bool = True,
 ) -> str:
+    if lock_project:
+        with acquire_project_write_lock(project_path, owner="run_next_chapter"):
+            return run_next_chapter(
+                project_path,
+                config,
+                user_request=user_request,
+                chapter_outline_override=chapter_outline_override,
+                planning_mode=planning_mode,
+                log_context=log_context,
+                progress_callback=progress_callback,
+                lock_project=False,
+            )
+
     log_info(f"next_chapter: prepare project={project_path}")
     effective_mode = normalize_planning_mode(planning_mode or config.get("planning_mode"))
     emit_progress(progress_callback, "chapter_prepare", f"Preparing next chapter with planning mode: {effective_mode}")
@@ -417,7 +432,20 @@ def run_next_chapter_from_progression(
     progression_option: str,
     progression_feedback: str = "",
     progress_callback=None,
+    lock_project: bool = True,
 ) -> str:
+    if lock_project:
+        with acquire_project_write_lock(project_path, owner="run_next_chapter_from_progression"):
+            return run_next_chapter_from_progression(
+                project_path,
+                config,
+                progression_session=progression_session,
+                progression_option=progression_option,
+                progression_feedback=progression_feedback,
+                progress_callback=progress_callback,
+                lock_project=False,
+            )
+
     selection = resolve_progression_selection(
         project_path,
         progression_session,
@@ -439,6 +467,7 @@ def run_next_chapter_from_progression(
             "selection_feedback": (progression_feedback or "").strip()[:120],
         },
         progress_callback=progress_callback,
+        lock_project=False,
     )
 
 
@@ -451,10 +480,24 @@ def run_next_chapters(
     selection_mode: str = SELECTION_MODE_RECOMMENDED,
     runtime_overrides: dict | None = None,
     progress_callback=None,
+    lock_project: bool = True,
 ) -> list[str]:
     if count < 1:
         raise ValueError("count must be at least 1.")
     normalized_selection_mode = validate_selection_mode(selection_mode, allow_manual=False)
+    if lock_project:
+        with acquire_project_write_lock(project_path, owner="run_next_chapters"):
+            return run_next_chapters(
+                project_path,
+                config,
+                count,
+                user_request=user_request,
+                selection_mode=normalized_selection_mode,
+                runtime_overrides=runtime_overrides,
+                progress_callback=progress_callback,
+                lock_project=False,
+            )
+
     chapter_paths = []
     for index in range(count):
         emit_progress(
@@ -506,6 +549,7 @@ def run_next_chapters(
                     "auto_batch_request": user_request[:120],
                 },
                 progress_callback=progress_callback,
+                lock_project=False,
             )
         )
         emit_progress(

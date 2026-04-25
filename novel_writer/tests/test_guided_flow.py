@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import run_next_chapter, run_next_chapter_from_progression, run_next_chapters
+from project_manager import ProjectWriteLockError, acquire_project_write_lock
 from progression_manager import CUSTOM_PROGRESSION_OPTION_ID, generate_progression_options
 
 from tests.test_support import create_test_project, read_json, runtime_config
@@ -68,6 +69,37 @@ class GuidedFlowTests(unittest.TestCase):
             "revision_guidance": "" if passed else "换一个开场压力，减少推门和短暂停顿动作。",
             "repeat_examples": [] if passed else ["短暂停顿后小心推门"],
         }
+
+    def test_run_next_chapters_rejects_when_project_write_lock_is_held(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="app_lock")
+
+            with acquire_project_write_lock(str(project_path), owner="test"):
+                with self.assertRaises(ProjectWriteLockError):
+                    run_next_chapters(
+                        str(project_path),
+                        runtime_config("chapter"),
+                        1,
+                    )
+
+            project = read_json(project_path / "project.json")
+            self.assertEqual(project["chapter_count"], 0)
+            self.assertEqual(list((project_path / "chapters").glob("chapter_*.md")), [])
+
+    def test_guided_continue_rejects_when_project_write_lock_is_held(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="guided_lock")
+
+            with acquire_project_write_lock(str(project_path), owner="test"):
+                with self.assertRaises(ProjectWriteLockError):
+                    run_next_chapter_from_progression(
+                        str(project_path),
+                        runtime_config("chapter"),
+                        progression_session="missing",
+                        progression_option="option_1",
+                    )
+
+            self.assertEqual(list((project_path / "chapters").glob("chapter_*.md")), [])
 
     def test_guided_flow_generates_session_and_writes_next_chapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

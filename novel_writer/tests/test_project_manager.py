@@ -6,13 +6,58 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from project_manager import _generate_initial_story_data, _prune_initial_supporting_characters, rollback_project, save_json
+from project_manager import (
+    ProjectWriteLockError,
+    _generate_initial_story_data,
+    _prune_initial_supporting_characters,
+    acquire_project_write_lock,
+    rollback_project,
+    save_json,
+)
 from prompt_builder import build_init_prompt
 
 from tests.test_support import create_test_project, read_json
 
 
 class ProjectManagerTests(unittest.TestCase):
+    def test_project_write_lock_rejects_same_project_reentry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="lock_same")
+
+            with acquire_project_write_lock(str(project_path), owner="outer") as lock:
+                self.assertTrue(lock.lock_path.exists())
+                lock_data = read_json(lock.lock_path)
+                self.assertEqual(lock_data["owner"], "outer")
+                with self.assertRaises(ProjectWriteLockError):
+                    with acquire_project_write_lock(str(project_path), owner="inner"):
+                        pass
+
+            self.assertFalse(lock.lock_path.exists())
+
+    def test_project_write_lock_allows_different_projects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_a = create_test_project(Path(tmp), project_id="lock_a")
+            project_b = create_test_project(Path(tmp), project_id="lock_b")
+
+            with acquire_project_write_lock(str(project_a), owner="a") as lock_a:
+                with acquire_project_write_lock(str(project_b), owner="b") as lock_b:
+                    self.assertTrue(lock_a.lock_path.exists())
+                    self.assertTrue(lock_b.lock_path.exists())
+
+            self.assertFalse(lock_a.lock_path.exists())
+            self.assertFalse(lock_b.lock_path.exists())
+
+    def test_project_write_lock_releases_after_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="lock_exception")
+
+            with self.assertRaises(RuntimeError):
+                with acquire_project_write_lock(str(project_path), owner="boom") as lock:
+                    self.assertTrue(lock.lock_path.exists())
+                    raise RuntimeError("boom")
+
+            self.assertFalse((project_path / ".project_write.lock").exists())
+
     def test_init_prompt_limits_supporting_characters_to_opening_cast(self) -> None:
         prompt = build_init_prompt(
             {
