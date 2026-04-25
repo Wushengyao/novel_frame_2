@@ -33,6 +33,7 @@ REVIEW_SCORE_KEYS = (
     "reader_hook",
     "scene_freshness",
     "character_specificity",
+    "motivation_causality",
     "repetition_risk",
     "continuity",
 )
@@ -81,8 +82,10 @@ def normalize_craft_brief(payload: dict | None, fallback: dict | None = None) ->
     fallback_source = fallback if isinstance(fallback, dict) else {}
     return {
         "chapter_hook": str(source.get("chapter_hook") or fallback_source.get("chapter_hook") or "").strip(),
+        "context_bridge": str(source.get("context_bridge") or fallback_source.get("context_bridge") or "").strip(),
         "dramatic_question": str(source.get("dramatic_question") or fallback_source.get("dramatic_question") or "").strip(),
         "conflict_pressure": str(source.get("conflict_pressure") or fallback_source.get("conflict_pressure") or "").strip(),
+        "action_reasoning": str(source.get("action_reasoning") or fallback_source.get("action_reasoning") or "").strip(),
         "emotional_turn": str(source.get("emotional_turn") or fallback_source.get("emotional_turn") or "").strip(),
         "scene_movement": _normalize_string_list(source.get("scene_movement") or fallback_source.get("scene_movement"), max_items=6),
         "sensory_palette": _normalize_string_list(source.get("sensory_palette") or fallback_source.get("sensory_palette"), max_items=6),
@@ -106,8 +109,10 @@ def fallback_craft_brief(prompt_context: dict) -> dict:
     return normalize_craft_brief(
         {
             "chapter_hook": objective or "用一个具体压力或异常变化开章。",
+            "context_bridge": "开场补足读者需要理解的处境、人物关系和连续性锚点。",
             "dramatic_question": objective or "本章能否完成当前任务并付出新的代价？",
             "conflict_pressure": "让外部压力、资源限制或人物选择推动场景变化。",
+            "action_reasoning": "让关键行动来自当前压力、人物目标和可见限制，而不是无缘无故发生。",
             "emotional_turn": "至少让一名核心人物的判断、信任或欲望出现可见变化。",
             "scene_movement": ["开章给出具体压力", "中段让人物做出选择", "结尾兑现结果或留下新代价"],
             "sensory_palette": ["选择与本章地点相关的两到三种感官细节"],
@@ -125,7 +130,20 @@ def normalize_quality_review(payload: dict | None, *, fallback_passed: bool = Tr
         default_score = 10.0 if fallback_passed else 0.0
         scores = {key: default_score for key in REVIEW_SCORE_KEYS}
     else:
-        scores = {key: _coerce_score(raw_scores.get(key)) for key in REVIEW_SCORE_KEYS}
+        motivation_fallback = min(
+            (
+                _coerce_score(raw_scores.get(key))
+                for key in ("task_completion", "character_specificity", "continuity")
+                if key in raw_scores
+            ),
+            default=0.0,
+        )
+        scores = {
+            key: _coerce_score(
+                raw_scores.get(key, motivation_fallback if key == "motivation_causality" else None)
+            )
+            for key in REVIEW_SCORE_KEYS
+        }
     average = sum(scores.values()) / len(REVIEW_SCORE_KEYS)
     computed_passed = average >= REVIEW_PASS_AVERAGE and min(scores.values()) >= REVIEW_PASS_MINIMUM
     explicit_passed = _coerce_bool(source.get("passed"), default=computed_passed) if "passed" in source else computed_passed

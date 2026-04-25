@@ -105,6 +105,8 @@ def create_test_project(
             "open_threads": [],
             "resolved_threads": [],
             "foreshadowing": [],
+            "continuity_anchors": [],
+            "causal_links": [],
             "character_updates": [],
             "active_characters": ["林宇", "苏浅"],
             "current_location": "空间站隔离区",

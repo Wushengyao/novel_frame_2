@@ -44,6 +44,8 @@ EMPTY_PLOT_STATE = {
     "open_threads": [],
     "resolved_threads": [],
     "foreshadowing": [],
+    "continuity_anchors": [],
+    "causal_links": [],
     "character_updates": [],
     "active_characters": [],
     "current_location": "",
@@ -113,6 +115,8 @@ ROLLBACK_SUMMARY_KEYS = (
     "open_threads",
     "resolved_threads",
     "foreshadowing",
+    "continuity_anchors",
+    "causal_links",
     "character_updates",
     "active_characters",
     "next_chapter_goal",
@@ -542,6 +546,8 @@ def _normalize_initial_plot_state(plot_state: dict) -> dict:
     normalized["open_threads"] = []
     normalized["resolved_threads"] = []
     normalized["foreshadowing"] = []
+    normalized["continuity_anchors"] = []
+    normalized["causal_links"] = []
     normalized["character_updates"] = []
     normalized["active_characters"] = []
 

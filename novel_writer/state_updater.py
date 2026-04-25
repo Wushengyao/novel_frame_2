@@ -54,6 +54,8 @@ def _normalize_summary(summary: dict, current_state: dict) -> dict:
         "open_threads": live_state.get("open_threads", []),
         "resolved_threads": live_state.get("resolved_threads", []),
         "foreshadowing": live_state.get("foreshadowing", []),
+        "continuity_anchors": live_state.get("continuity_anchors", []),
+        "causal_links": live_state.get("causal_links", []),
         "character_updates": live_state.get("character_updates", []),
         "active_characters": live_state.get("active_characters", []),
         "retrieval_tags": _normalize_list((summary or {}).get("retrieval_tags"), max_items=SUMMARY_LIST_LIMITS["retrieval_tags"]),
@@ -92,7 +94,15 @@ def _merge_state(current_state: dict, summary: dict) -> dict:
         if value:
             updated[key] = value
 
-    for key in ("recent_events", "foreshadowing", "character_updates", "active_characters", "resolved_threads"):
+    for key in (
+        "recent_events",
+        "foreshadowing",
+        "continuity_anchors",
+        "causal_links",
+        "character_updates",
+        "active_characters",
+        "resolved_threads",
+    ):
         updated[key] = _normalize_list(summary.get(key), max_items=SUMMARY_LIST_LIMITS[key])
 
     resolved = set(updated.get("resolved_threads", []))

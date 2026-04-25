@@ -118,6 +118,8 @@ def build_init_prompt(data: dict) -> str:
     "open_threads": [],
     "resolved_threads": [],
     "foreshadowing": [],
+    "continuity_anchors": [],
+    "causal_links": [],
     "character_updates": [],
     "active_characters": [],
     "current_location": "",
@@ -702,12 +704,14 @@ def build_craft_brief_prompt(data: dict) -> str:
 1. 输出必须是合法 JSON
 2. 只设计当前这一章，不要改变任务卡的核心目标
 3. 蓝图要帮助正文更吸引人：开章钩子、戏剧问题、压力来源、人物选择、情绪转折都要具体
-4. `forbidden_repeats` 必须列出需要避开的上一章表层动作、姿态、句式或结尾套路
-5. `fresh_interaction_patterns` 要给出新的互动方式，不要只写“更细腻”“更紧张”这类抽象要求
-6. 不要输出解释，不要输出 Markdown
+4. `context_bridge` 写清本章开场需要补给读者的处境、人物入口或连续性锚点
+5. `action_reasoning` 写清人物采取关键行动的直接原因、压力与选择依据
+6. `forbidden_repeats` 必须列出需要避开的上一章表层动作、姿态、句式或结尾套路
+7. `fresh_interaction_patterns` 要给出新的互动方式，不要只写“更细腻”“更紧张”这类抽象要求
+8. 不要输出解释，不要输出 Markdown
 
 输出 JSON 骨架：
-{{"chapter_hook":"","dramatic_question":"","conflict_pressure":"","emotional_turn":"","scene_movement":[],"sensory_palette":[],"fresh_interaction_patterns":[],"forbidden_repeats":[],"focus_notes":""}}
+{{"chapter_hook":"","context_bridge":"","dramatic_question":"","conflict_pressure":"","action_reasoning":"","emotional_turn":"","scene_movement":[],"sensory_palette":[],"fresh_interaction_patterns":[],"forbidden_repeats":[],"focus_notes":""}}
 """
 
 
@@ -722,7 +726,10 @@ def build_writer_prompt(
         sections = data["sections"]
         chapter_count = int(data.get("chapter_count", 0) or 0)
         opening_note = (
-            "当前将要写的是第一章。重点完成开篇铺陈，不要把后续章节才会发生的大事件提前写出。"
+            "当前将要写的是第一章。开章可以有钩子，但必须在前 800-1200 字内自然交代读者入口："
+            "故事发生的基本处境、地点/时间/关键世界规则、至少核心人物的姓名/关系/当前状态，"
+            "以及他们为什么现在必须行动。背景和人物要嵌入观察、对话和选择，不要直接跳到任务事件，"
+            "也不要写成设定说明书；不要把后续章节才会发生的大事件提前写出。"
             if chapter_count == 0
             else "这不是第一章，请延续已有状态、记忆与场景动势。"
         )
@@ -743,14 +750,15 @@ def build_writer_prompt(
         return f"""{prompt_body}
 
 要求：
-1. 人物、地点、时间、未解线程与已写正文必须一致；不要遗忘伏笔，也不要把已解决的事情重新写回未解决
-2. 本章必须产生至少一项新的可验证变化；若沿用同一地点、目标或冲突，也要写出新的信息、代价、决定或结果
-3. 严格只写当前这一章。任务卡是当前章节任务的最高优先级来源，不要提前完成下一章或后续章节的大事件
-4. 如果提供了“近期写法避让”和“本章创作蓝图”，必须避开其中列出的表层重复；同类动作只有在产生新功能、新代价或新关系变化时才能使用
-5. 开章要尽快给读者一个具体钩子；场景推进要有压力、选择、结果，不要只在同一种姿态和情绪里反复停留
-6. 结尾可留下明确悬念或过渡，但不要把后续章核心情节直接写完
-7. 输出纯正文，不要章标题、序号、小标题、Markdown 标题
-8. 字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读
+1. 人物、地点、时间、未解线程、连续性锚点、因果/动机线与已写正文必须一致；不要遗忘伏笔，也不要把已解决的事情重新写回未解决
+2. 每个关键行动都要能看出“为什么现在做、人物想达成什么、受到什么压力或限制、选择造成什么结果”
+3. 本章必须产生至少一项新的可验证变化；若沿用同一地点、目标或冲突，也要写出新的信息、代价、决定或结果
+4. 严格只写当前这一章。任务卡是当前章节任务的最高优先级来源，不要提前完成下一章或后续章节的大事件
+5. 如果提供了“近期写法避让”和“本章创作蓝图”，必须避开其中列出的表层重复；同类动作只有在产生新功能、新代价或新关系变化时才能使用
+6. 开章要尽快给读者一个具体钩子；场景推进要有压力、选择、结果，不要只在同一种姿态和情绪里反复停留
+7. 结尾可留下明确悬念或过渡，但不要把后续章核心情节直接写完
+8. 输出纯正文，不要章标题、序号、小标题、Markdown 标题
+9. 字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读
 """
 
     world = _to_block(data.get("world", {}))
@@ -766,7 +774,9 @@ def build_writer_prompt(
     chapter_count = int(data.get("project", {}).get("chapter_count", 0) or 0)
     first_chapter_note = (
         "当前将要写的是第一章。因为正文尚未开始，recent_events、open_threads、foreshadowing、character_updates 此时应为空，"
-        "不要把后续章节才会出现的事件总结提前写进当前状态。重点是完成开篇铺陈。"
+        "不要把后续章节才会出现的事件总结提前写进当前状态。开章可以有钩子，但必须在前 800-1200 字内自然交代读者入口："
+        "故事发生的基本处境、地点/时间/关键世界规则、至少核心人物的姓名/关系/当前状态，以及他们为什么现在必须行动。"
+        "背景和人物要嵌入观察、对话和选择，不要直接跳到任务事件，也不要写成设定说明书。"
         if chapter_count == 0
         else ""
     )
@@ -805,8 +815,8 @@ def build_writer_prompt(
 
 要求：
 1. 人物不能 OOC
-2. 不遗忘伏笔
-3. 循序渐进推进剧情或场景，不能急于结束或完成
+2. 不遗忘伏笔、连续性锚点和因果/动机线
+3. 循序渐进推进剧情或场景，不能急于结束或完成；关键行动必须有当前原因、人物目标、压力限制和可见结果
 4. 输出纯正文
 5. 不要输出章标题、序号、小标题、Markdown 标题
 6. 如果用户额外要求与既有设定不冲突，优先吸收；若有冲突，以既有设定一致性为先，并尽量柔和地兼容用户意图
@@ -814,7 +824,8 @@ def build_writer_prompt(
 8. 本章必须完成分章大纲中的核心任务，同时与所属卷的阶段目标保持一致
 9. 严格只写当前这一章，不要提前完成下一章或后续章节的大事件
 10. 如果本章结尾需要承接后续内容，可以留下明确悬念或过渡，但不要把后续章的核心情节直接写完
-11. 字数建议在 3000 字以上、5000 字以下，保持内容的丰富性和可读性
+11. 第一章必须先建立背景、人物和行动理由，再推进任务事件；后续章节必须承接已保存的状态与记忆
+12. 字数建议在 3000 字以上、5000 字以下，保持内容的丰富性和可读性
 """
 
 
@@ -836,14 +847,15 @@ def build_quality_review_prompt(data: dict, draft_text: str, *, strict: bool = F
 
 要求：
 1. 输出必须是合法 JSON
-2. 六个分项分数都用 0 到 10，分数越高越好
+2. 七个分项分数都用 0 到 10，分数越高越好
 3. `repetition_risk` 的高分代表重复风险低、写法新鲜；低分代表动作/句式/场景结构复用明显
-4. `passed` 表示是否可以作为最终章节保存
-5. `revision_guidance` 必须具体指出需要如何改，不要泛泛而谈
-6. 不要输出解释，不要输出 Markdown
+4. `motivation_causality` 检查关键行动是否有明确动因、压力、选择和结果
+5. `passed` 表示是否可以作为最终章节保存
+6. `revision_guidance` 必须具体指出需要如何改，不要泛泛而谈
+7. 不要输出解释，不要输出 Markdown
 
 输出 JSON 骨架：
-{{"scores":{{"task_completion":0,"reader_hook":0,"scene_freshness":0,"character_specificity":0,"repetition_risk":0,"continuity":0}},"passed":false,"strengths":[],"issues":[],"revision_guidance":"","repeat_examples":[]}}
+{{"scores":{{"task_completion":0,"reader_hook":0,"scene_freshness":0,"character_specificity":0,"motivation_causality":0,"repetition_risk":0,"continuity":0}},"passed":false,"strengths":[],"issues":[],"revision_guidance":"","repeat_examples":[]}}
 """
 
 
@@ -865,7 +877,7 @@ def build_rewrite_prompt(data: dict, draft_text: str, review_report: dict) -> st
 
 要求：
 1. 保留已经正确完成的剧情目标和连续性
-2. 优先修复审稿报告中的低分项，尤其是重复动作、弱钩子、场景空转、人物反应泛化
+2. 优先修复审稿报告中的低分项，尤其是重复动作、弱钩子、场景空转、人物反应泛化、关键行动缺少原因
 3. 不要写改稿说明，不要输出 JSON，不要输出 Markdown 标题
 4. 输出纯正文，字数建议仍在 3000 字以上、5000 字以下
 """
@@ -890,12 +902,14 @@ def build_summary_prompt(data: dict, new_text: str) -> str:
 4. `active_characters` 只保留本章真正参与推进的角色
 5. `chapter_summary` 用 1 到 2 句话概括本章核心推进
 6. `next_chapter_goal` 写本章结束后最该继续推进的一步；如果本章主任务已完成，不要直接重复任务卡原句
-7. `retrieval_tags` 给出便于后续检索的简短标签
-8. `craft_notes` 记录本章已经用过的写法，供下一章避让重复；包括 repeated_actions、recurring_gestures、scene_type、emotional_beat、ending_pattern、notable_phrasing
-9. 不要输出解释，不要输出 Markdown
+7. `continuity_anchors` 记录后续必须记住且不能随意改写的事实、限制、资源状态、关系变化或承诺
+8. `causal_links` 记录本章形成的行动原因链：因为什么压力/信息，谁决定做什么，导致什么新局面
+9. `retrieval_tags` 给出便于后续检索的简短标签
+10. `craft_notes` 记录本章已经用过的写法，供下一章避让重复；包括 repeated_actions、recurring_gestures、scene_type、emotional_beat、ending_pattern、notable_phrasing
+11. 不要输出解释，不要输出 Markdown
 
 输出 JSON 骨架：
-{{"chapter_summary":"","current_location":"","current_time":"","current_arc":"","recent_events":[],"open_threads":[],"resolved_threads":[],"foreshadowing":[],"character_updates":[],"active_characters":[],"retrieval_tags":[],"next_chapter_goal":"","craft_notes":{{"repeated_actions":[],"recurring_gestures":[],"scene_type":"","emotional_beat":"","ending_pattern":"","notable_phrasing":[]}}}}
+{{"chapter_summary":"","current_location":"","current_time":"","current_arc":"","recent_events":[],"open_threads":[],"resolved_threads":[],"foreshadowing":[],"continuity_anchors":[],"causal_links":[],"character_updates":[],"active_characters":[],"retrieval_tags":[],"next_chapter_goal":"","craft_notes":{{"repeated_actions":[],"recurring_gestures":[],"scene_type":"","emotional_beat":"","ending_pattern":"","notable_phrasing":[]}}}}
 """
 
     plot_state = _to_block(data.get("plot_state", {}))
@@ -916,8 +930,13 @@ def build_summary_prompt(data: dict, new_text: str) -> str:
 {{
   "recent_events": [],
   "open_threads": [],
+  "resolved_threads": [],
   "foreshadowing": [],
+  "continuity_anchors": [],
+  "causal_links": [],
   "character_updates": [],
+  "active_characters": [],
+  "retrieval_tags": [],
   "next_chapter_goal": "",
   "craft_notes": {{
     "repeated_actions": [],

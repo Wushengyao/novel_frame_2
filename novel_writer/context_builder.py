@@ -21,7 +21,7 @@ from project_manager import (
 WRITER_SECTION_LIMITS = {
     "author_intent": 520,
     "chapter_task": 460,
-    "live_state": 860,
+    "live_state": 1000,
     "retrieved_memory": 520,
     "recent_craft_memory": 620,
     "recent_scene": 1700,
@@ -52,6 +52,8 @@ SUMMARY_LIST_LIMITS = {
     "open_threads": 8,
     "resolved_threads": 8,
     "foreshadowing": 6,
+    "continuity_anchors": 8,
+    "causal_links": 8,
     "character_updates": 6,
     "active_characters": 6,
     "retrieval_tags": 12,
@@ -314,6 +316,8 @@ def _normalize_summary_payload(summary: dict | None, *, chapter_number: int) -> 
         "open_threads": _normalize_string_list(source.get("open_threads"), max_items=SUMMARY_LIST_LIMITS["open_threads"]),
         "resolved_threads": _normalize_string_list(source.get("resolved_threads"), max_items=SUMMARY_LIST_LIMITS["resolved_threads"]),
         "foreshadowing": _normalize_string_list(source.get("foreshadowing"), max_items=SUMMARY_LIST_LIMITS["foreshadowing"]),
+        "continuity_anchors": _normalize_string_list(source.get("continuity_anchors"), max_items=SUMMARY_LIST_LIMITS["continuity_anchors"]),
+        "causal_links": _normalize_string_list(source.get("causal_links"), max_items=SUMMARY_LIST_LIMITS["causal_links"]),
         "character_updates": _normalize_string_list(source.get("character_updates"), max_items=SUMMARY_LIST_LIMITS["character_updates"]),
         "active_characters": _normalize_string_list(source.get("active_characters"), max_items=SUMMARY_LIST_LIMITS["active_characters"]),
         "retrieval_tags": _normalize_string_list(source.get("retrieval_tags"), max_items=SUMMARY_LIST_LIMITS["retrieval_tags"]),
@@ -343,6 +347,8 @@ def build_retrieval_tags(summary_payload: dict) -> list[str]:
         str(summary_payload.get("current_arc", "") or "").strip(),
         " ".join(summary_payload.get("open_threads") or []),
         " ".join(summary_payload.get("resolved_threads") or []),
+        " ".join(summary_payload.get("continuity_anchors") or []),
+        " ".join(summary_payload.get("causal_links") or []),
         " ".join(summary_payload.get("active_characters") or []),
     ]
     keywords = sorted(_extract_keywords(" ".join(part for part in text_parts if part)))
@@ -366,6 +372,8 @@ def build_arc_summary_payload(arc_index: int, chapter_payloads: list[dict]) -> d
             "current_arc": "",
             "open_threads": [],
             "resolved_threads": [],
+            "continuity_anchors": [],
+            "causal_links": [],
             "active_characters": [],
             "key_locations": [],
             "retrieval_tags": [],
@@ -400,6 +408,14 @@ def build_arc_summary_payload(arc_index: int, chapter_payloads: list[dict]) -> d
             [item for payload in chapter_payloads for item in payload.get("resolved_threads") or []],
             max_items=SUMMARY_LIST_LIMITS["resolved_threads"],
         ),
+        "continuity_anchors": _normalize_string_list(
+            [item for payload in chapter_payloads for item in payload.get("continuity_anchors") or []],
+            max_items=SUMMARY_LIST_LIMITS["continuity_anchors"],
+        ),
+        "causal_links": _normalize_string_list(
+            [item for payload in chapter_payloads for item in payload.get("causal_links") or []],
+            max_items=SUMMARY_LIST_LIMITS["causal_links"],
+        ),
         "active_characters": _normalize_string_list(
             [item for payload in chapter_payloads for item in payload.get("active_characters") or []],
             max_items=SUMMARY_LIST_LIMITS["active_characters"],
@@ -414,6 +430,8 @@ def build_arc_summary_payload(arc_index: int, chapter_payloads: list[dict]) -> d
             "current_arc": result["current_arc"],
             "open_threads": result["open_threads"],
             "resolved_threads": result["resolved_threads"],
+            "continuity_anchors": result["continuity_anchors"],
+            "causal_links": result["causal_links"],
             "active_characters": result["active_characters"],
         }
     )
@@ -1093,6 +1111,8 @@ def _build_live_state_block(plot_state: dict, *, max_chars: int, include_next_go
         ("未解线程", "open_threads"),
         ("已解线程", "resolved_threads"),
         ("伏笔", "foreshadowing"),
+        ("连续性锚点", "continuity_anchors"),
+        ("因果/动机线", "causal_links"),
     ):
         block = _format_bullets(title, state.get(key) or [], max_chars=max_chars - len("\n".join(lines)))
         if not block:
@@ -1138,6 +1158,8 @@ def _collect_summary_memory_candidates(project_path: str, chapter_count: int) ->
                         payload.get("chapter_summary", ""),
                         " ".join(payload.get("open_threads") or []),
                         " ".join(payload.get("resolved_threads") or []),
+                        " ".join(payload.get("continuity_anchors") or []),
+                        " ".join(payload.get("causal_links") or []),
                         " ".join(payload.get("character_updates") or []),
                     )
                     if part
@@ -1158,6 +1180,8 @@ def _collect_summary_memory_candidates(project_path: str, chapter_count: int) ->
                         str(data.get("summary", "") or "").strip(),
                         " ".join(_normalize_string_list(data.get("open_threads"), max_items=SUMMARY_LIST_LIMITS["open_threads"])),
                         " ".join(_normalize_string_list(data.get("resolved_threads"), max_items=SUMMARY_LIST_LIMITS["resolved_threads"])),
+                        " ".join(_normalize_string_list(data.get("continuity_anchors"), max_items=SUMMARY_LIST_LIMITS["continuity_anchors"])),
+                        " ".join(_normalize_string_list(data.get("causal_links"), max_items=SUMMARY_LIST_LIMITS["causal_links"])),
                     )
                     if part
                 ),
@@ -1187,6 +1211,8 @@ def _build_retrieved_memory_block(
             str(plot_state.get("current_arc", "") or "").strip(),
             " ".join(plot_state.get("open_threads") or []),
             " ".join(plot_state.get("foreshadowing") or []),
+            " ".join(plot_state.get("continuity_anchors") or []),
+            " ".join(plot_state.get("causal_links") or []),
             " ".join(plot_state.get("recent_events") or []),
             " ".join(plot_state.get("character_updates") or []),
             recent_scene,
@@ -1265,8 +1291,10 @@ def _build_craft_brief_block(craft_brief: dict | None, *, max_chars: int) -> str
     lines = []
     mapping = (
         ("钩子", "chapter_hook"),
+        ("读者入口/连续性桥", "context_bridge"),
         ("戏剧问题", "dramatic_question"),
         ("冲突压力", "conflict_pressure"),
+        ("行动理由", "action_reasoning"),
         ("情绪转折", "emotional_turn"),
         ("场景调度", "scene_movement"),
         ("感官调色", "sensory_palette"),

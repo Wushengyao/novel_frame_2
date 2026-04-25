@@ -105,8 +105,10 @@ class ContextBuilderTests(unittest.TestCase):
             }
             craft_brief = {
                 "chapter_hook": "开章让备用灯突然熄灭。",
+                "context_bridge": "开场提醒读者三人仍被困在隔离区，备用电力正在下降。",
                 "dramatic_question": "他们能否在不重复门口试探的情况下确认异常来源？",
                 "conflict_pressure": "电量下降，外部噪音逼近。",
+                "action_reasoning": "因为备用灯熄灭且噪音逼近，他们必须改用设备交叉验证异常来源。",
                 "emotional_turn": "苏浅主动提出改变行动方式。",
                 "scene_movement": ["熄灯", "手势分工", "设备交叉验证"],
                 "sensory_palette": ["焦味", "冷光"],
@@ -130,6 +132,8 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertIn("近期写法避让", prompt)
             self.assertIn("本章创作蓝图", prompt)
             self.assertIn("不要再写三人在门后短暂停顿", prompt)
+            self.assertIn("读者入口/连续性桥", prompt)
+            self.assertIn("行动理由", prompt)
             self.assertLessEqual(sum(len(value) for value in context["sections"].values()), WRITER_HARD_TOTAL_CHARS)
 
     def test_craft_brief_and_quality_review_prompts_expose_json_schemas(self) -> None:
@@ -153,8 +157,10 @@ class ContextBuilderTests(unittest.TestCase):
 
             for key in (
                 "chapter_hook",
+                "context_bridge",
                 "dramatic_question",
                 "conflict_pressure",
+                "action_reasoning",
                 "emotional_turn",
                 "scene_movement",
                 "sensory_palette",
@@ -167,11 +173,36 @@ class ContextBuilderTests(unittest.TestCase):
                 "reader_hook",
                 "scene_freshness",
                 "character_specificity",
+                "motivation_causality",
                 "repetition_risk",
                 "continuity",
             ):
                 self.assertIn(key, review_prompt)
             self.assertIn("高质量模式", review_prompt)
+
+    def test_first_chapter_writer_prompt_requires_opening_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="first_chapter")
+            project_data = load_project(str(project_path))
+            next_context = {
+                "volume": project_data["outlines"]["volumes"][0],
+                "chapter": project_data["outlines"]["volumes"][0]["chapters"][0],
+            }
+
+            context = build_writer_context(
+                str(project_path),
+                project_data,
+                next_context,
+                "",
+                planning_mode="chapter",
+            )
+            prompt = build_writer_prompt(context)
+
+            self.assertIn("当前将要写的是第一章", prompt)
+            self.assertIn("前 800-1200 字内自然交代读者入口", prompt)
+            self.assertIn("核心人物的姓名/关系/当前状态", prompt)
+            self.assertIn("为什么现在必须行动", prompt)
+            self.assertIn("不要直接跳到任务事件", prompt)
 
     def test_update_plot_state_refreshes_live_state_and_generates_arc_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -192,6 +223,8 @@ class ContextBuilderTests(unittest.TestCase):
                         "open_threads": ["旧门锁风险"],
                         "resolved_threads": [],
                         "foreshadowing": [f"伏笔{chapter_number}"],
+                        "continuity_anchors": [f"锚点{chapter_number}"],
+                        "causal_links": [f"因果{chapter_number}"],
                         "character_updates": [f"更新{chapter_number}"],
                         "active_characters": ["林宇", "苏浅"],
                         "retrieval_tags": ["据点", "门锁"],
@@ -208,6 +241,8 @@ class ContextBuilderTests(unittest.TestCase):
                 "open_threads": ["旧门锁风险", "异常信号源尚未确认"],
                 "resolved_threads": ["旧门锁风险"],
                 "foreshadowing": ["异常信号可能连接主控区更深处"],
+                "continuity_anchors": ["主控区外围维护走廊已被临时封锁"],
+                "causal_links": ["异常信号被重新定位，所以三人决定进入更深层区域确认源头"],
                 "character_updates": ["林宇开始承担诱敌风险"],
                 "active_characters": ["林宇", "苏浅", "叶宁"],
                 "retrieval_tags": ["主控区", "异常信号", "封锁"],
@@ -226,13 +261,19 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertEqual(plot_state["current_arc"], "主控区试探")
             self.assertNotIn("旧门锁风险", plot_state["open_threads"])
             self.assertIn("旧门锁风险", plot_state["resolved_threads"])
+            self.assertIn("主控区外围维护走廊已被临时封锁", plot_state["continuity_anchors"])
+            self.assertIn("异常信号被重新定位，所以三人决定进入更深层区域确认源头", plot_state["causal_links"])
 
             summary_file = load_json(str(project_path / "summaries" / "summary_0005.json"))
             self.assertEqual(summary_file["chapter_summary"], summary_payload["chapter_summary"])
+            self.assertEqual(summary_file["continuity_anchors"], summary_payload["continuity_anchors"])
+            self.assertEqual(summary_file["causal_links"], summary_payload["causal_links"])
 
             arc_summary = load_json(str(project_path / "arc_summaries" / "arc_0001.json"))
             self.assertEqual(arc_summary["arc_index"], 1)
             self.assertEqual(arc_summary["current_arc"], "主控区试探")
+            self.assertIn("主控区外围维护走廊已被临时封锁", arc_summary["continuity_anchors"])
+            self.assertIn("异常信号被重新定位，所以三人决定进入更深层区域确认源头", arc_summary["causal_links"])
 
     def test_volume_mode_persists_lightweight_task_card(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -417,6 +458,8 @@ class ContextBuilderTests(unittest.TestCase):
                         "open_threads": ["异常信号源尚未确认"],
                         "resolved_threads": [],
                         "foreshadowing": [],
+                        "continuity_anchors": ["旧通风口备用氧气瓶仍未取走"] if chapter_number == 1 else [],
+                        "causal_links": ["异常信号反复出现，所以三人必须验证主控区"] if chapter_number == 3 else [],
                         "character_updates": [],
                         "active_characters": ["林宇", "苏浅"],
                         "retrieval_tags": ["异常信号", "主控区", "氧气瓶"] if chapter_number in {1, 3} else ["试探"],
@@ -433,6 +476,8 @@ class ContextBuilderTests(unittest.TestCase):
                     "current_arc": "试探推进",
                     "open_threads": ["异常信号源尚未确认"],
                     "resolved_threads": [],
+                    "continuity_anchors": ["旧通风口备用氧气瓶仍未取走"],
+                    "causal_links": ["异常信号反复出现，所以三人必须验证主控区"],
                     "active_characters": ["林宇", "苏浅"],
                     "key_locations": ["主控区附近", "旧通风口"],
                     "retrieval_tags": ["异常信号", "主控区", "氧气瓶"],
@@ -465,6 +510,10 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertTrue(
                 "氧气瓶" in context["sections"]["retrieved_memory"]
                 or "异常信号" in context["sections"]["retrieved_memory"]
+            )
+            self.assertTrue(
+                "旧通风口备用氧气瓶仍未取走" in context["sections"]["retrieved_memory"]
+                or "异常信号反复出现" in context["sections"]["retrieved_memory"]
             )
             self.assertNotIn("最近一次试探后气氛紧张", context["sections"]["retrieved_memory"])
             self.assertIn("第三段他们决定去主控区外围。", context["sections"]["recent_scene"])
@@ -522,6 +571,8 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertIn("本章写前任务卡", prompt)
             self.assertIn("本章 objective: 建立临时安全区", context["sections"]["completed_task"])
             self.assertIn("不要直接重复任务卡原句", prompt)
+            self.assertIn("continuity_anchors", prompt)
+            self.assertIn("causal_links", prompt)
 
     def test_compact_prompts_stay_within_budget_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
