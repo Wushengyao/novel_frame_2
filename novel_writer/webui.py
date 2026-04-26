@@ -38,6 +38,7 @@ from audiobook_manager import (
 from chapter_context import peek_next_context_for_mode
 from common_utils import utc_now
 from context_builder import resolve_effective_chapter_task
+from external_services import AudioFrameClient, ImageFrameClient, load_audio_frame_runtime, load_image_frame_runtime
 from illustration_manager import get_illustration_record, illustrate_chapters, list_illustration_records
 from polish_manager import POLISH_PRESETS, run_chapter_polish
 from progression_manager import (
@@ -110,6 +111,7 @@ ADMIN_LOCALHOSTS = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 ADMIN_ACTION_STATUS_FILENAME = "admin_action_status.json"
 PUBLIC_PATHS = {"/login", "/healthz"}
 API_PATH_PREFIX = "/api/"
+EXTERNAL_SERVICE_HEALTH_TIMEOUT_SECONDS = 3.0
 
 JOB_ACTIVE_STATUSES = {"queued", "running"}
 JOB_FINISHED_STATUSES = {"succeeded", "failed"}
@@ -117,6 +119,8 @@ PROGRESSION_JOB_KINDS = {"progression_options", "progression_options_auto"}
 
 _LOGIN_ATTEMPT_GUARDS: dict[tuple[int, int, int], LoginAttemptGuard] = {}
 _LOGIN_ATTEMPT_GUARDS_LOCK = threading.Lock()
+_EXTERNAL_SERVICE_HEALTH_LOCK = threading.Lock()
+_EXTERNAL_SERVICE_HEALTH_CACHE: dict = {}
 
 
 class BackgroundJobRegistry:
@@ -1574,6 +1578,230 @@ def _job_status_class(status: str) -> str:
     return mapping.get(status, "status-neutral")
 
 
+def _external_service_definitions() -> tuple[dict, ...]:
+    return (
+        {
+            "id": "image_frame",
+            "label": "Image Frame",
+            "health_path": "/healthz",
+            "runtime_loader": load_image_frame_runtime,
+            "client_class": ImageFrameClient,
+        },
+        {
+            "id": "audio_frame",
+            "label": "Audio Frame API",
+            "health_path": "/healthz",
+            "runtime_loader": load_audio_frame_runtime,
+            "client_class": AudioFrameClient,
+        },
+    )
+
+
+def _external_service_payload_summary(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        return {}
+    summary = {}
+    for key, value in payload.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            summary[str(key)] = value
+    return summary
+
+
+def _external_service_status_label(status: str) -> str:
+    mapping = {
+        "succeeded": "连通",
+        "failed": "失败",
+        "unknown": "未检测",
+    }
+    return mapping.get(status, status or "unknown")
+
+
+def _external_service_placeholder() -> dict:
+    services = []
+    for definition in _external_service_definitions():
+        api_base = ""
+        message = "启动检测尚未完成"
+        try:
+            runtime = definition["runtime_loader"]()
+            api_base = str(runtime.get("api_base") or "").strip()
+        except Exception as exc:
+            message = f"配置读取失败：{exc}"
+        services.append(
+            {
+                "id": definition["id"],
+                "label": definition["label"],
+                "api_base": api_base,
+                "health_path": definition["health_path"],
+                "ok": None,
+                "status": "unknown",
+                "message": message,
+                "latency_ms": None,
+                "details": {},
+            }
+        )
+    return {"ok": False, "checked_at": "", "services": services}
+
+
+def _check_external_service(definition: dict) -> dict:
+    started = time.monotonic()
+    api_base = ""
+    try:
+        runtime = definition["runtime_loader"]()
+        api_base = str(runtime.get("api_base") or "").strip()
+        client = definition["client_class"](api_base)
+        payload = client.request_json(
+            definition["health_path"],
+            timeout=EXTERNAL_SERVICE_HEALTH_TIMEOUT_SECONDS,
+        )
+        ok = bool(payload.get("ok", True)) if isinstance(payload, dict) else True
+        message = "连通正常" if ok else "健康检查返回异常"
+        if isinstance(payload, dict) and payload.get("message"):
+            message = str(payload.get("message"))
+        return {
+            "id": definition["id"],
+            "label": definition["label"],
+            "api_base": api_base,
+            "health_path": definition["health_path"],
+            "ok": ok,
+            "status": "succeeded" if ok else "failed",
+            "message": message,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "details": _external_service_payload_summary(payload),
+        }
+    except Exception as exc:
+        return {
+            "id": definition["id"],
+            "label": definition["label"],
+            "api_base": api_base,
+            "health_path": definition["health_path"],
+            "ok": False,
+            "status": "failed",
+            "message": str(exc),
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "details": {},
+        }
+
+
+def _check_external_services() -> dict:
+    services = [_check_external_service(definition) for definition in _external_service_definitions()]
+    return {
+        "ok": all(bool(service.get("ok")) for service in services),
+        "checked_at": utc_now(),
+        "services": services,
+    }
+
+
+def _refresh_external_service_health() -> dict:
+    snapshot = _check_external_services()
+    with _EXTERNAL_SERVICE_HEALTH_LOCK:
+        _EXTERNAL_SERVICE_HEALTH_CACHE.clear()
+        _EXTERNAL_SERVICE_HEALTH_CACHE.update(snapshot)
+    return snapshot
+
+
+def _external_service_health_snapshot() -> dict:
+    with _EXTERNAL_SERVICE_HEALTH_LOCK:
+        if _EXTERNAL_SERVICE_HEALTH_CACHE:
+            return {
+                "ok": bool(_EXTERNAL_SERVICE_HEALTH_CACHE.get("ok")),
+                "checked_at": str(_EXTERNAL_SERVICE_HEALTH_CACHE.get("checked_at") or ""),
+                "services": [dict(service) for service in _EXTERNAL_SERVICE_HEALTH_CACHE.get("services", [])],
+            }
+    return _external_service_placeholder()
+
+
+def _render_external_service_panel() -> str:
+    snapshot = _external_service_health_snapshot()
+    service_rows = []
+    for service in snapshot.get("services", []):
+        status = str(service.get("status") or "unknown")
+        latency = service.get("latency_ms")
+        latency_text = f" / {latency} ms" if isinstance(latency, int) else ""
+        service_rows.append(
+            f"""
+            <div class="job-card" data-external-service-row="{escape(str(service.get('id') or ''))}">
+              <div class="job-card-head">
+                <strong>{escape(str(service.get("label") or ""))}</strong>
+                <span class="status-pill {escape(_job_status_class(status))}" data-external-service-status>
+                  {escape(_external_service_status_label(status))}
+                </span>
+              </div>
+              <div class="muted" data-external-service-base>{escape(str(service.get("api_base") or ""))}{escape(str(service.get("health_path") or ""))}</div>
+              <div class="muted" data-external-service-message>{escape(str(service.get("message") or ""))}{escape(latency_text)}</div>
+            </div>
+            """
+        )
+    checked_at = str(snapshot.get("checked_at") or "未检测")
+    return f"""
+    <section class="panel" data-external-service-panel>
+      <div class="option-panel-head">
+        <div>
+          <h2>外部服务</h2>
+          <p class="muted">Image Frame / Audio Frame 连通性</p>
+        </div>
+        <button type="button" class="ghost-button" data-external-service-check>测试连通性</button>
+      </div>
+      <div class="muted" data-external-service-checked>最近检测：{escape(checked_at)}</div>
+      <div class="stack" data-external-service-list>
+        {''.join(service_rows)}
+      </div>
+    </section>
+    <script>
+    (() => {{
+      const panel = document.querySelector("[data-external-service-panel]");
+      if (!panel || panel.dataset.bound === "1") return;
+      panel.dataset.bound = "1";
+      const button = panel.querySelector("[data-external-service-check]");
+      const checked = panel.querySelector("[data-external-service-checked]");
+      const list = panel.querySelector("[data-external-service-list]");
+      const statusLabel = (status) => ({{succeeded: "连通", failed: "失败", unknown: "未检测"}}[status] || status || "unknown");
+      const statusClass = (status) => {{
+        const map = {{succeeded: "status-succeeded", failed: "status-failed", unknown: "status-neutral"}};
+        return `status-pill ${{map[status] || "status-neutral"}}`;
+      }};
+      const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({{
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      }}[char]));
+      const render = (payload) => {{
+        if (checked) checked.textContent = `最近检测：${{payload.checked_at || "未检测"}}`;
+        if (!list) return;
+        list.innerHTML = (payload.services || []).map((service) => {{
+          const latency = Number.isInteger(service.latency_ms) ? ` / ${{service.latency_ms}} ms` : "";
+          return `
+            <div class="job-card" data-external-service-row="${{escapeHtml(service.id)}}">
+              <div class="job-card-head">
+                <strong>${{escapeHtml(service.label)}}</strong>
+                <span class="${{statusClass(service.status)}}" data-external-service-status>${{statusLabel(service.status)}}</span>
+              </div>
+              <div class="muted" data-external-service-base>${{escapeHtml(service.api_base)}}${{escapeHtml(service.health_path)}}</div>
+              <div class="muted" data-external-service-message>${{escapeHtml(service.message)}}${{escapeHtml(latency)}}</div>
+            </div>`;
+        }}).join("");
+      }};
+      button?.addEventListener("click", async () => {{
+        button.disabled = true;
+        const previousText = button.textContent;
+        button.textContent = "检测中...";
+        try {{
+          const response = await fetch("/api/external-services/check", {{headers: {{"Accept": "application/json"}}}});
+          const payload = await response.json();
+          render(payload);
+        }} catch (error) {{
+          if (checked) checked.textContent = `检测失败：${{error}}`;
+        }} finally {{
+          button.disabled = false;
+          button.textContent = previousText || "测试连通性";
+        }}
+      }});
+    }})();
+    </script>
+    """
+
+
 def _render_job_events(events: object) -> str:
     if not isinstance(events, list) or not events:
         return '<li class="muted">暂无任务日志。</li>'
@@ -2241,6 +2469,10 @@ def _render_page(
       border: 1px solid rgba(124, 91, 62, 0.18);
       background: rgba(255,255,255,0.8);
     }}
+    .status-neutral {{
+      color: #5f5a55;
+      background: rgba(255,255,255,0.72);
+    }}
     .status-queued {{
       color: #855c24;
       background: rgba(239, 214, 169, 0.45);
@@ -2636,6 +2868,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if len(parts) == 2 and parts[0] == "job":
             self._handle_job_page(parts[1], notice=notice, error=error)
             return
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "external-services" and parts[2] == "check":
+            self._handle_external_services_check()
+            return
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "jobs":
             self._handle_job_api(parts[2])
             return
@@ -2819,6 +3054,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _handle_external_services_check(self) -> None:
+        self._write_json(_refresh_external_service_health())
 
     def send_error(self, code, message=None, explain=None):
         safe_message = message
@@ -3084,6 +3322,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             JOB_REGISTRY.list_jobs(limit=6),
             "当前还没有后台任务。",
         )
+        external_service_panel_html = _render_external_service_panel()
         admin_panel_html = _render_admin_panel(
             client_host=self.client_address[0],
             auth_settings=auth_settings,
@@ -3176,6 +3415,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 <button type="submit">创建项目</button>
               </form>
             </section>
+            {external_service_panel_html}
             {admin_panel_html}
           </div>
           <section class="panel">
@@ -3230,6 +3470,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         illustration_records = list_illustration_records(str(project_path))
         active_jobs = JOB_REGISTRY.list_jobs(project_id=project_id, active_only=True, limit=6)
         active_jobs_html = _render_job_cards(active_jobs, "当前没有运行中的后台任务。")
+        external_service_panel_html = _render_external_service_panel()
         project_busy = bool(active_jobs)
         busy_attr = " disabled" if project_busy else ""
         busy_notice = (
@@ -3291,6 +3532,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <h3>后台任务</h3>
               {active_jobs_html}
             </section>
+            {external_service_panel_html}
             {busy_notice}
             <section class="panel">
               <h3>续写</h3>
@@ -4112,6 +4354,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         audiobook_records = list_audiobook_records(str(project_path))
         active_jobs = JOB_REGISTRY.list_jobs(project_id=project_id, active_only=True, limit=8)
         active_jobs_html = _render_job_cards(active_jobs, "当前没有运行中的后台任务。")
+        external_service_panel_html = _render_external_service_panel()
         blocking_jobs = [job for job in active_jobs if job.get("blocks_project", True)]
         progression_jobs = [job for job in active_jobs if job.get("kind") in PROGRESSION_JOB_KINDS]
         project_busy = bool(blocking_jobs)
@@ -4219,6 +4462,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <h3>后台任务</h3>
               {active_jobs_html}
             </section>
+            {external_service_panel_html}
             {busy_notice}
             <section class="panel">
               <h3>续写</h3>
@@ -4870,6 +5114,19 @@ def main() -> None:
         )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    health_snapshot = _refresh_external_service_health()
+    status_text = "ok" if health_snapshot.get("ok") else "degraded"
+    print(f"[{utc_now()}] External service health check: {status_text}")
+    for service in health_snapshot.get("services", []):
+        print(
+            "[{time}] - {label} {status} {base}: {message}".format(
+                time=utc_now(),
+                label=service.get("label") or service.get("id"),
+                status=service.get("status"),
+                base=(service.get("api_base") or "") + (service.get("health_path") or ""),
+                message=service.get("message") or "",
+            )
+        )
     server = ThreadingHTTPServer((args.host, args.port), NovelWriterHandler)
     print(f"[{utc_now()}] Web UI listening on http://{args.host}:{args.port}")
     try:

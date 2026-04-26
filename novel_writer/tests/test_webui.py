@@ -36,6 +36,8 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.original_output_dir = webui.OUTPUT_DIR
         self.original_registry = webui.JOB_REGISTRY
         webui._LOGIN_ATTEMPT_GUARDS.clear()
+        with webui._EXTERNAL_SERVICE_HEALTH_LOCK:
+            webui._EXTERNAL_SERVICE_HEALTH_CACHE.clear()
         webui.OUTPUT_DIR = self.output_dir
         webui.JOB_REGISTRY = webui.BackgroundJobRegistry()
         self.auth_settings_patch = patch("webui._auth_settings", return_value=self._make_auth_settings(enabled=False))
@@ -53,6 +55,8 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.auth_settings_patch.stop()
         webui.OUTPUT_DIR = self.original_output_dir
         webui.JOB_REGISTRY = self.original_registry
+        with webui._EXTERNAL_SERVICE_HEALTH_LOCK:
+            webui._EXTERNAL_SERVICE_HEALTH_CACHE.clear()
 
     def _make_auth_settings(self, *, enabled: bool, **overrides) -> WebAuthSettings:
         data = {
@@ -140,6 +144,68 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                 return job
             time.sleep(0.1)
         self.fail(f"job {job_id} did not reach one of {sorted(target_statuses)}")
+
+    def test_external_service_panel_and_manual_check_endpoint(self) -> None:
+        cached_status = {
+            "ok": True,
+            "checked_at": "2026-04-26T00:00:00+00:00",
+            "services": [
+                {
+                    "id": "image_frame",
+                    "label": "Image Frame",
+                    "api_base": "http://127.0.0.1:8010",
+                    "health_path": "/healthz",
+                    "ok": True,
+                    "status": "succeeded",
+                    "message": "ok",
+                    "latency_ms": 12,
+                    "details": {"ok": True},
+                },
+                {
+                    "id": "audio_frame",
+                    "label": "Audio Frame API",
+                    "api_base": "http://127.0.0.1:8810",
+                    "health_path": "/healthz",
+                    "ok": True,
+                    "status": "succeeded",
+                    "message": "ok",
+                    "latency_ms": 18,
+                    "details": {"ok": True},
+                },
+            ],
+        }
+        refreshed_status = {
+            "ok": False,
+            "checked_at": "2026-04-26T00:01:00+00:00",
+            "services": [
+                dict(cached_status["services"][0]),
+                {
+                    "id": "audio_frame",
+                    "label": "Audio Frame API",
+                    "api_base": "http://127.0.0.1:8810",
+                    "health_path": "/healthz",
+                    "ok": False,
+                    "status": "failed",
+                    "message": "connection refused",
+                    "latency_ms": 3,
+                    "details": {},
+                },
+            ],
+        }
+        with patch("webui._external_service_health_snapshot", return_value=cached_status):
+            with patch("webui._refresh_external_service_health", return_value=refreshed_status) as refresh:
+                projects_page = self._get("/projects")
+                api_response = self._get("/api/external-services/check")
+
+        self.assertEqual(projects_page.status, 200)
+        self.assertIn("data-external-service-panel", projects_page.body)
+        self.assertIn("data-external-service-check", projects_page.body)
+        self.assertIn("/api/external-services/check", projects_page.body)
+        self.assertEqual(api_response.status, 200)
+        payload = json.loads(api_response.body)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["services"][1]["status"], "failed")
+        refresh.assert_called_once_with()
 
     def test_project_pages_show_token_cost_statistics(self) -> None:
         project_file = self.project_path / "project.json"
