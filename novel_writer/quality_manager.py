@@ -9,7 +9,7 @@ from typing import Any
 from common_utils import emit_progress, extract_json_object
 from console_logger import log_info, log_success, log_warning
 from llm_client import generate_text_with_metadata
-from project_manager import record_context_telemetry, save_json, update_project_stats
+from project_manager import load_json, record_context_telemetry, save_json, update_project_stats
 from prompt_builder import (
     build_craft_brief_prompt,
     build_quality_review_prompt,
@@ -30,6 +30,7 @@ from runtime_config import (
 
 CRAFT_BRIEF_DIR_NAME = "craft_briefs"
 QUALITY_REVIEW_DIR_NAME = "quality_reviews"
+QUALITY_DRAFT_DIR_NAME = "quality_drafts"
 REVIEW_SCORE_KEYS = (
     "task_completion",
     "reader_hook",
@@ -267,6 +268,75 @@ def quality_review_path(project_path: str, chapter_number: int, attempt: int) ->
     return Path(project_path) / QUALITY_REVIEW_DIR_NAME / f"chapter_{chapter_number:04d}_attempt_{attempt}.json"
 
 
+def pre_rewrite_draft_path(project_path: str, chapter_number: int, rewrite_attempt: int) -> Path:
+    return Path(project_path) / QUALITY_DRAFT_DIR_NAME / f"chapter_{chapter_number:04d}_before_rewrite_{rewrite_attempt}.md"
+
+
+def save_pre_rewrite_draft(project_path: str, chapter_number: int, rewrite_attempt: int, draft_text: str) -> Path:
+    path = pre_rewrite_draft_path(project_path, chapter_number, rewrite_attempt)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(draft_text, encoding="utf-8")
+    return path
+
+
+def list_quality_artifacts(project_path: str, chapter_number: int) -> dict:
+    base = Path(project_path)
+    review_pattern = f"chapter_{chapter_number:04d}_attempt_*.json"
+    draft_pattern = f"chapter_{chapter_number:04d}_before_rewrite_*.md"
+    reports = []
+    for path in sorted((base / QUALITY_REVIEW_DIR_NAME).glob(review_pattern)):
+        match = path.name.rsplit("_attempt_", 1)
+        attempt = 0
+        if len(match) == 2:
+            try:
+                attempt_text = match[1][:-5] if match[1].endswith(".json") else match[1]
+                attempt = int(attempt_text)
+            except ValueError:
+                attempt = 0
+        report = {}
+        error = ""
+        try:
+            report = load_json(str(path))
+        except Exception as exc:  # pragma: no cover - damaged local artifact
+            error = str(exc)
+        reports.append(
+            {
+                "attempt": attempt,
+                "file_name": path.name,
+                "path": str(path),
+                "report": report,
+                "error": error,
+            }
+        )
+
+    drafts = []
+    for path in sorted((base / QUALITY_DRAFT_DIR_NAME).glob(draft_pattern)):
+        match = path.name.rsplit("_before_rewrite_", 1)
+        rewrite_attempt = 0
+        if len(match) == 2:
+            try:
+                attempt_text = match[1][:-3] if match[1].endswith(".md") else match[1]
+                rewrite_attempt = int(attempt_text)
+            except ValueError:
+                rewrite_attempt = 0
+        drafts.append(
+            {
+                "rewrite_attempt": rewrite_attempt,
+                "file_name": path.name,
+                "path": str(path),
+            }
+        )
+
+    reports.sort(key=lambda item: item.get("attempt", 0))
+    drafts.sort(key=lambda item: item.get("rewrite_attempt", 0))
+    return {
+        "chapter_number": chapter_number,
+        "reports": reports,
+        "pre_rewrite_drafts": drafts,
+        "rewrite_count": len(drafts),
+    }
+
+
 def _quality_request_config(config: dict, log_context: dict[str, Any], phase: str) -> tuple[dict, dict[str, Any], dict[str, object]]:
     request_config, uses_quality_model = resolve_quality_model_config(config)
     request_log_context = {
@@ -473,6 +543,9 @@ __all__ = [
     "quality_review_available",
     "quality_review_passed",
     "quality_review_path",
+    "list_quality_artifacts",
+    "pre_rewrite_draft_path",
     "review_chapter_draft",
     "rewrite_chapter_draft",
+    "save_pre_rewrite_draft",
 ]

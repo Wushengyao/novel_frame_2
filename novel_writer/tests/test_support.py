@@ -34,6 +34,7 @@ def create_test_project(
         "task_cards",
         "craft_briefs",
         "quality_reviews",
+        "quality_drafts",
         "illustrations",
         "audiobook",
         "snapshots",

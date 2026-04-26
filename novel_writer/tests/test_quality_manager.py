@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
-from quality_manager import normalize_craft_brief, normalize_quality_review, quality_review_passed
+from project_manager import save_json
+from quality_manager import (
+    list_quality_artifacts,
+    normalize_craft_brief,
+    normalize_quality_review,
+    quality_review_passed,
+    save_pre_rewrite_draft,
+)
 
 
 class QualityManagerTests(unittest.TestCase):
@@ -99,6 +108,23 @@ class QualityManagerTests(unittest.TestCase):
         self.assertFalse(review["passed"])
         self.assertFalse(quality_review_passed(review))
         self.assertFalse(review["review_unavailable"])
+
+    def test_quality_artifacts_list_reports_and_pre_rewrite_drafts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp)
+            (project_path / "quality_reviews").mkdir()
+            save_json(
+                str(project_path / "quality_reviews" / "chapter_0001_attempt_1.json"),
+                {"passed": False, "average_score": 4.0},
+            )
+            save_pre_rewrite_draft(str(project_path), 1, 1, "重写前正文")
+
+            artifacts = list_quality_artifacts(str(project_path), 1)
+
+            self.assertEqual(artifacts["rewrite_count"], 1)
+            self.assertEqual(artifacts["reports"][0]["attempt"], 1)
+            self.assertEqual(artifacts["reports"][0]["report"]["average_score"], 4.0)
+            self.assertEqual(artifacts["pre_rewrite_drafts"][0]["rewrite_attempt"], 1)
 
 
 if __name__ == "__main__":

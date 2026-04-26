@@ -336,8 +336,10 @@ class GuidedFlowTests(unittest.TestCase):
             self.assertEqual(phases, ["craft_brief", "quality_review", "rewrite", "quality_review"])
             review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")
             second_review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_2.json")
+            pre_rewrite = project_path / "quality_drafts" / "chapter_0001_before_rewrite_1.md"
             self.assertFalse(review["passed"])
             self.assertTrue(second_review["passed"])
+            self.assertEqual(pre_rewrite.read_text(encoding="utf-8").strip(), "原始正文")
 
     def test_unavailable_quality_review_does_not_trigger_auto_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

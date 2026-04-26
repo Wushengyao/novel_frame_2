@@ -835,6 +835,61 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("更欢乐", page.body)
         self.assertIn("自定义润色要求", page.body)
         self.assertNotIn("Planning Mode", page.body)
+        self.assertIn("质量优化", page.body)
+        self.assertIn("暂无质量报告或自动重写记录", page.body)
+
+    def test_chapter_page_links_quality_reports_and_pre_rewrite_text(self) -> None:
+        (self.project_path / "chapters" / "chapter_0001.md").write_text(
+            "重写后的正文",
+            encoding="utf-8",
+        )
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 1
+        save_json(str(self.project_path / "project.json"), project)
+        save_json(
+            str(self.project_path / "quality_reviews" / "chapter_0001_attempt_1.json"),
+            {
+                "schema_version": 2,
+                "passed": False,
+                "average_score": 4.0,
+                "scores": {"task_completion": 4, "reader_hook": 4},
+                "blocking_issues": [
+                    {
+                        "category": "task_completion",
+                        "severity": "blocker",
+                        "issue": "没有完成信号确认。",
+                        "evidence": "全文停留在讨论。",
+                        "fix": "补写确认行动。",
+                    }
+                ],
+                "issues": ["开章钩子弱"],
+                "revision_guidance": "换一个开场压力。",
+                "rewrite_plan": ["补写确认动作", "收束到新线索"],
+            },
+        )
+        (self.project_path / "quality_drafts" / "chapter_0001_before_rewrite_1.md").write_text(
+            "重写前正文",
+            encoding="utf-8",
+        )
+
+        page = self._get("/project/web/chapter/chapter_0001")
+
+        self.assertEqual(page.status, 200)
+        self.assertIn("已迭代优化次数", page.body)
+        self.assertIn("查看质量报告", page.body)
+        self.assertIn("查看重写前文本", page.body)
+
+        report_page = self._get("/project/web/chapter/chapter_0001/quality-report")
+        self.assertEqual(report_page.status, 200)
+        self.assertIn("Attempt 1", report_page.body)
+        self.assertIn("未通过", report_page.body)
+        self.assertIn("没有完成信号确认", report_page.body)
+        self.assertIn("原始 JSON", report_page.body)
+
+        draft_page = self._get("/project/web/chapter/chapter_0001/pre-rewrite")
+        self.assertEqual(draft_page.status, 200)
+        self.assertIn("重写前文本 1", draft_page.body)
+        self.assertIn("重写前正文", draft_page.body)
 
     def test_chapter_page_shows_audiobook_player_when_manifest_exists(self) -> None:
         (self.project_path / "chapters" / "chapter_0001.md").write_text(

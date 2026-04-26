@@ -229,15 +229,22 @@ class ProjectManagerTests(unittest.TestCase):
                     str(project_path / "quality_reviews" / f"chapter_{chapter_number:04d}_attempt_1.json"),
                     {"passed": True},
                 )
+                (project_path / "quality_drafts" / f"chapter_{chapter_number:04d}_before_rewrite_1.md").write_text(
+                    f"第{chapter_number}章重写前正文",
+                    encoding="utf-8",
+                )
 
             result = rollback_project(str(project_path), 1)
 
             self.assertIn("craft_briefs/chapter_0002.json", result["removed"]["craft_briefs"])
             self.assertIn("quality_reviews/chapter_0002_attempt_1.json", result["removed"]["quality_reviews"])
+            self.assertIn("quality_drafts/chapter_0002_before_rewrite_1.md", result["removed"]["quality_drafts"])
             self.assertTrue((project_path / "craft_briefs" / "chapter_0001.json").exists())
             self.assertTrue((project_path / "quality_reviews" / "chapter_0001_attempt_1.json").exists())
+            self.assertTrue((project_path / "quality_drafts" / "chapter_0001_before_rewrite_1.md").exists())
             self.assertFalse((project_path / "craft_briefs" / "chapter_0002.json").exists())
             self.assertFalse((project_path / "quality_reviews" / "chapter_0002_attempt_1.json").exists())
+            self.assertFalse((project_path / "quality_drafts" / "chapter_0002_before_rewrite_1.md").exists())
 
 
 if __name__ == "__main__":

@@ -47,6 +47,7 @@ from quality_manager import (
     quality_review_passed,
     review_chapter_draft,
     rewrite_chapter_draft,
+    save_pre_rewrite_draft,
 )
 from project_manager import (
     PLANNING_MODE_CHAPTER,
@@ -413,7 +414,10 @@ def run_next_chapter(
             and not quality_review_passed(review)
             and quality_review_available(review)
         ):
+            pre_rewrite_path = None
             try:
+                pre_rewrite_path = save_pre_rewrite_draft(project_path, int(target_chapter_number), 1, chapter_text)
+                log_info(f"rewrite: saved pre-rewrite draft to {pre_rewrite_path}")
                 rewritten_text = rewrite_chapter_draft(
                     project_path,
                     prompt_context,
@@ -424,6 +428,8 @@ def run_next_chapter(
                     progress_callback=progress_callback,
                 )
             except Exception as exc:  # pragma: no cover - keep original draft if rewrite fails
+                if pre_rewrite_path is not None:
+                    pre_rewrite_path.unlink(missing_ok=True)
                 log_warning(f"rewrite: failed; keeping original draft. reason={exc}")
             else:
                 chapter_text = normalize_chapter_text(rewritten_text)

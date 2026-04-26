@@ -807,6 +807,7 @@ def init_project(config_path: str, progress_callback=None) -> str:
     (project_path / "task_cards").mkdir(exist_ok=True)
     (project_path / "craft_briefs").mkdir(exist_ok=True)
     (project_path / "quality_reviews").mkdir(exist_ok=True)
+    (project_path / "quality_drafts").mkdir(exist_ok=True)
     (project_path / "illustrations").mkdir(exist_ok=True)
     (project_path / "audiobook").mkdir(exist_ok=True)
     log_success("init_project: base directories ready")
@@ -915,6 +916,7 @@ def load_project(project_path: str) -> dict:
         "task_cards_path": str(base / "task_cards"),
         "craft_briefs_path": str(base / "craft_briefs"),
         "quality_reviews_path": str(base / "quality_reviews"),
+        "quality_drafts_path": str(base / "quality_drafts"),
         "illustrations_path": str(base / "illustrations"),
         "audiobook_path": str(base / "audiobook"),
     }
@@ -1091,6 +1093,7 @@ def _delete_future_artifacts(project_path: str, keep_chapter_count: int) -> dict
         "task_cards": [],
         "craft_briefs": [],
         "quality_reviews": [],
+        "quality_drafts": [],
         "illustrations": [],
         "audiobook": [],
         "snapshots": [],
@@ -1126,6 +1129,13 @@ def _delete_future_artifacts(project_path: str, keep_chapter_count: int) -> dict
         if chapter_number is not None and chapter_number > keep_chapter_count:
             _remove_path(review_path)
             removed["quality_reviews"].append(str(review_path.relative_to(base)).replace("\\", "/"))
+
+    for draft_path in sorted((base / "quality_drafts").glob("chapter_*_before_rewrite_*.md")):
+        match = re.fullmatch(r"chapter_(\d{4})_before_rewrite_\d+\.md", draft_path.name)
+        chapter_number = int(match.group(1)) if match else None
+        if chapter_number is not None and chapter_number > keep_chapter_count:
+            _remove_path(draft_path)
+            removed["quality_drafts"].append(str(draft_path.relative_to(base)).replace("\\", "/"))
 
     for arc_summary_path in sorted((base / "arc_summaries").glob("arc_*.json")):
         arc_index = _parse_numbered_name(arc_summary_path.name, "arc_", ".json")

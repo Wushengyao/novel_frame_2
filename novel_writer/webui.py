@@ -49,6 +49,7 @@ from progression_manager import (
     load_progression_session,
     validate_selection_mode,
 )
+from quality_manager import list_quality_artifacts
 from project_manager import (
     DEFAULT_PLANNING_MODE,
     PLANNING_MODE_CHAPTER,
@@ -1199,6 +1200,94 @@ def _chapter_number_from_slug(chapter_slug: str) -> int | None:
     return int(match.group(1))
 
 
+def _quality_status_label(report: dict) -> str:
+    if bool(report.get("review_unavailable")):
+        return "审稿不可用"
+    return "通过" if bool(report.get("passed")) else "未通过"
+
+
+def _render_chapter_quality_panel(project_id: str, chapter_slug: str, artifacts: dict) -> str:
+    reports = artifacts.get("reports") or []
+    drafts = artifacts.get("pre_rewrite_drafts") or []
+    rewrite_count = int(artifacts.get("rewrite_count", 0) or 0)
+    latest_report = reports[-1].get("report", {}) if reports else {}
+    latest_status = _quality_status_label(latest_report) if latest_report else "暂无"
+    report_button = (
+        f'<a class="ghost-button" href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}/quality-report">查看质量报告</a>'
+        if reports
+        else ""
+    )
+    draft_button = (
+        f'<a class="ghost-button" href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}/pre-rewrite">查看重写前文本</a>'
+        if drafts
+        else ""
+    )
+    empty_note = ""
+    if not reports and not drafts:
+        empty_note = '<p class="muted">暂无质量报告或自动重写记录。light 模式和未触发重写的历史章节可能没有相关产物。</p>'
+    elif not drafts:
+        empty_note = '<p class="muted">暂无重写前文本。历史章节如果生成时未保存原稿，无法补回。</p>'
+    return f"""
+    <section class="panel">
+      <h2>质量优化</h2>
+      <p><strong>已迭代优化次数：</strong>{rewrite_count}</p>
+      <p><strong>质量报告：</strong>{len(reports)} 份</p>
+      <p><strong>重写前文本：</strong>{len(drafts)} 份</p>
+      <p><strong>最新审稿状态：</strong>{escape(latest_status)}</p>
+      <div class="button-row">
+        {report_button}
+        {draft_button}
+      </div>
+      {empty_note}
+    </section>
+    """
+
+
+def _render_issue_items(items: object) -> str:
+    if not isinstance(items, list) or not items:
+        return '<p class="muted">暂无</p>'
+    rendered = []
+    for item in items:
+        if isinstance(item, dict):
+            severity = str(item.get("severity") or "").strip()
+            category = str(item.get("category") or "").strip()
+            issue = str(item.get("issue") or "").strip()
+            evidence = str(item.get("evidence") or "").strip()
+            fix = str(item.get("fix") or "").strip()
+            severity_html = f' <span class="pill">{escape(severity)}</span>' if severity else ""
+            category_html = f' <span class="pill">{escape(category)}</span>' if category else ""
+            evidence_html = f'<div class="muted">证据：{escape(evidence)}</div>' if evidence else ""
+            fix_html = f'<div class="muted">修复：{escape(fix)}</div>' if fix else ""
+            rendered.append(
+                "<li>"
+                f"<strong>{escape(issue or '未命名问题')}</strong>"
+                f"{severity_html}"
+                f"{category_html}"
+                f"{evidence_html}"
+                f"{fix_html}"
+                "</li>"
+            )
+        else:
+            rendered.append(f"<li>{escape(str(item))}</li>")
+    return f"<ul>{''.join(rendered)}</ul>"
+
+
+def _render_string_items(items: object) -> str:
+    if not isinstance(items, list) or not items:
+        return '<p class="muted">暂无</p>'
+    return "<ul>" + "".join(f"<li>{escape(str(item))}</li>" for item in items) + "</ul>"
+
+
+def _render_score_rows(scores: object) -> str:
+    if not isinstance(scores, dict) or not scores:
+        return '<p class="muted">暂无评分</p>'
+    rows = "".join(
+        f"<tr><th>{escape(str(key))}</th><td>{escape(str(value))}</td></tr>"
+        for key, value in scores.items()
+    )
+    return f'<table class="quality-table"><tbody>{rows}</tbody></table>'
+
+
 def _illustration_overrides_from_form(form: dict[str, str]) -> dict:
     mapping = {
         "checkpoint": (form.get("checkpoint") or "").strip(),
@@ -1771,6 +1860,27 @@ def _render_page(
       white-space: pre-wrap;
       line-height: 1.9;
       font-size: 17px;
+    }}
+    .quality-table {{
+      width: 100%;
+      border-collapse: collapse;
+      margin: 10px 0 14px;
+      background: rgba(255,255,255,0.56);
+      border: 1px solid rgba(124, 91, 62, 0.12);
+      border-radius: 12px;
+      overflow: hidden;
+    }}
+    .quality-table th,
+    .quality-table td {{
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(124, 91, 62, 0.1);
+      vertical-align: top;
+    }}
+    .quality-table th {{
+      width: 220px;
+      color: var(--accent-dark);
+      background: rgba(255,255,255,0.48);
     }}
     .chapter-nav {{
       display: flex;
@@ -2351,6 +2461,12 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 4 and parts[0] == "project" and parts[2] == "chapter":
             self._handle_chapter(parts[1], parts[3], notice=notice, error=error)
+            return
+        if len(parts) == 5 and parts[0] == "project" and parts[2] == "chapter" and parts[4] == "quality-report":
+            self._handle_chapter_quality_report(parts[1], parts[3], notice=notice, error=error)
+            return
+        if len(parts) == 5 and parts[0] == "project" and parts[2] == "chapter" and parts[4] == "pre-rewrite":
+            self._handle_chapter_pre_rewrite(parts[1], parts[3], notice=notice, error=error)
             return
         if len(parts) == 5 and parts[0] == "project" and parts[2] == "illustration-file":
             self._handle_illustration_file(parts[1], parts[3], parts[4])
@@ -3184,6 +3300,12 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         chapters = _read_chapters(project_path)
         chapter_text = chapter_file.read_text(encoding="utf-8")
         chapter_number = _chapter_number_from_slug(chapter_slug)
+        quality_artifacts = (
+            list_quality_artifacts(str(project_path), chapter_number)
+            if chapter_number is not None
+            else {"reports": [], "pre_rewrite_drafts": [], "rewrite_count": 0}
+        )
+        quality_panel_html = _render_chapter_quality_panel(project_id, chapter_slug, quality_artifacts)
         current_index = next((idx for idx, chapter in enumerate(chapters) if chapter["slug"] == chapter_slug), -1)
         previous_chapter = chapters[current_index - 1] if current_index > 0 else None
         next_chapter = chapters[current_index + 1] if 0 <= current_index < len(chapters) - 1 else None
@@ -3256,6 +3378,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <button class="ghost-button" type="submit">回滚到本章并从这里继续写</button>
             </form>
           </section>
+          {quality_panel_html}
           {busy_notice}
           <section class="panel">
             <h2>章节润色</h2>
@@ -3335,6 +3458,148 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         self._write_html(
             _render_page(
                 f"{project_name} - {chapter_file.name}",
+                body,
+                notice=notice,
+                error=error,
+                auth_enabled=auth_settings.enabled,
+                authenticated=authenticated,
+            )
+        )
+
+    def _handle_chapter_quality_report(self, project_id: str, chapter_slug: str, notice: str = "", error: str = "") -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+        chapter_number = _chapter_number_from_slug(chapter_slug)
+        if chapter_number is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "章节不存在")
+            return
+        auth_settings = self._current_auth_settings()
+        authenticated = self._is_authenticated(auth_settings)
+
+        project = load_json(str(project_path / "project.json"))
+        project_name = _repair_display_text(project.get("name", project_id))
+        artifacts = list_quality_artifacts(str(project_path), chapter_number)
+        report_sections = []
+        for item in artifacts.get("reports") or []:
+            report = item.get("report") if isinstance(item.get("report"), dict) else {}
+            attempt = item.get("attempt") or "?"
+            if item.get("error"):
+                report_sections.append(
+                    f"""
+                    <section class="panel">
+                      <h2>Attempt {escape(str(attempt))}</h2>
+                      <div class="warning-box">报告读取失败：{escape(str(item.get("error")))}</div>
+                    </section>
+                    """
+                )
+                continue
+            raw_json = json.dumps(report, ensure_ascii=False, indent=2)
+            report_sections.append(
+                f"""
+                <section class="panel">
+                  <h2>Attempt {escape(str(attempt))}</h2>
+                  <p><strong>状态：</strong>{escape(_quality_status_label(report))}</p>
+                  <p><strong>平均分：</strong>{escape(str(report.get("average_score", "暂无")))}</p>
+                  <h3>分项评分</h3>
+                  {_render_score_rows(report.get("scores"))}
+                  <h3>阻断问题</h3>
+                  {_render_issue_items(report.get("blocking_issues"))}
+                  <h3>主要问题</h3>
+                  {_render_string_items(report.get("issues"))}
+                  <h3>重写方案</h3>
+                  {_render_string_items(report.get("rewrite_plan"))}
+                  <h3>修订建议</h3>
+                  <div class="chapter-view">{escape(str(report.get("revision_guidance") or "暂无"))}</div>
+                  <h3>原始 JSON</h3>
+                  <div class="chapter-view">{escape(raw_json)}</div>
+                </section>
+                """
+            )
+        if not report_sections:
+            report_sections.append('<section class="panel"><h2>质量报告</h2><p class="muted">暂无本章质量报告。</p></section>')
+
+        body = f"""
+        <div class="stack">
+          <section class="panel">
+            <a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}">返回章节</a>
+            <h2>{escape(chapter_slug)} 质量报告</h2>
+            <p class="muted">这里展示本章所有审稿 attempt，包含自动重写后的二审报告。</p>
+          </section>
+          {''.join(report_sections)}
+        </div>
+        """
+        self._write_html(
+            _render_page(
+                f"{project_name} - {chapter_slug} 质量报告",
+                body,
+                notice=notice,
+                error=error,
+                auth_enabled=auth_settings.enabled,
+                authenticated=authenticated,
+            )
+        )
+
+    def _handle_chapter_pre_rewrite(self, project_id: str, chapter_slug: str, notice: str = "", error: str = "") -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+        chapter_number = _chapter_number_from_slug(chapter_slug)
+        if chapter_number is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "章节不存在")
+            return
+        auth_settings = self._current_auth_settings()
+        authenticated = self._is_authenticated(auth_settings)
+
+        project = load_json(str(project_path / "project.json"))
+        project_name = _repair_display_text(project.get("name", project_id))
+        artifacts = list_quality_artifacts(str(project_path), chapter_number)
+        draft_sections = []
+        for item in artifacts.get("pre_rewrite_drafts") or []:
+            path = Path(str(item.get("path") or ""))
+            text = ""
+            error_text = ""
+            try:
+                text = path.read_text(encoding="utf-8")
+            except Exception as exc:  # pragma: no cover - damaged local artifact
+                error_text = str(exc)
+            attempt = item.get("rewrite_attempt") or "?"
+            if error_text:
+                draft_sections.append(
+                    f"""
+                    <section class="panel">
+                      <h2>重写前文本 {escape(str(attempt))}</h2>
+                      <div class="warning-box">文本读取失败：{escape(error_text)}</div>
+                    </section>
+                    """
+                )
+                continue
+            draft_sections.append(
+                f"""
+                <section class="panel">
+                  <h2>重写前文本 {escape(str(attempt))}</h2>
+                  <div class="chapter-view">{escape(text)}</div>
+                </section>
+                """
+            )
+        if not draft_sections:
+            draft_sections.append('<section class="panel"><h2>重写前文本</h2><p class="muted">暂无本章重写前文本。历史章节如果生成时未保存原稿，无法补回。</p></section>')
+
+        body = f"""
+        <div class="stack">
+          <section class="panel">
+            <a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}">返回章节</a>
+            <h2>{escape(chapter_slug)} 重写前文本</h2>
+            <p class="muted">这些文本来自高质量自动审稿失败后、执行重写前保存的草稿。</p>
+          </section>
+          {''.join(draft_sections)}
+        </div>
+        """
+        self._write_html(
+            _render_page(
+                f"{project_name} - {chapter_slug} 重写前文本",
                 body,
                 notice=notice,
                 error=error,
