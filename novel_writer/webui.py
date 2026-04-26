@@ -728,6 +728,170 @@ def _quality_model_label(llm_config: dict) -> str:
     return "inherit main"
 
 
+def _stats_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _stats_float(value: object) -> float:
+    try:
+        return max(0.0, float(value or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _format_tokens(value: object) -> str:
+    return f"{_stats_int(value):,}"
+
+
+def _format_usd(value: object) -> str:
+    amount = _stats_float(value)
+    if amount == 0:
+        return "$0.0000"
+    if amount < 0.0001:
+        return "$<0.0001"
+    return f"${amount:.4f}"
+
+
+def _usage_cost_summary(stats: dict | None) -> dict[str, int | float | dict]:
+    stats = stats if isinstance(stats, dict) else {}
+    total = stats.get("total") if isinstance(stats.get("total"), dict) else {}
+    cost = stats.get("cost") if isinstance(stats.get("cost"), dict) else {}
+    priced_tokens = _stats_int(cost.get("priced_tokens"))
+    unpriced_tokens = _stats_int(cost.get("unpriced_tokens"))
+    total_tokens = _stats_int(total.get("total_tokens"))
+    legacy_tokens = max(0, total_tokens - priced_tokens - unpriced_tokens)
+    return {
+        "total": total,
+        "cost": cost,
+        "estimated_total_usd": _stats_float(cost.get("estimated_total_usd")),
+        "priced_tokens": priced_tokens,
+        "unpriced_tokens": unpriced_tokens,
+        "legacy_tokens": legacy_tokens,
+    }
+
+
+def _render_cost_meta(stats: dict | None) -> str:
+    summary = _usage_cost_summary(stats)
+    parts = [f"估算费用：{_format_usd(summary['estimated_total_usd'])}"]
+    if summary["unpriced_tokens"]:
+        parts.append(f"未定价：{_format_tokens(summary['unpriced_tokens'])} tokens")
+    if summary["legacy_tokens"]:
+        parts.append(f"历史未估价：{_format_tokens(summary['legacy_tokens'])} tokens")
+    return f'<div class="meta">{" · ".join(escape(part) for part in parts)}</div>'
+
+
+def _pricing_status_label(status: object) -> str:
+    mapping = {
+        "priced": "已定价",
+        "local": "本地 $0",
+        "unpriced": "未定价",
+    }
+    return mapping.get(str(status or "").strip(), "未知")
+
+
+def _render_sidebar_usage_stats(stats: dict | None) -> str:
+    summary = _usage_cost_summary(stats)
+    total = summary["total"]
+    return f"""
+                <p><strong>请求：</strong>{_format_tokens(total.get("requests"))} 次（成功 {_format_tokens(total.get("successes"))} / 失败 {_format_tokens(total.get("failures"))}）</p>
+                <p><strong>Token：</strong>{_format_tokens(total.get("total_tokens"))}</p>
+                <p><strong>Prompt：</strong>{_format_tokens(total.get("prompt_tokens"))}</p>
+                <p><strong>Output：</strong>{_format_tokens(total.get("completion_tokens"))}</p>
+                <p><strong>Cached：</strong>{_format_tokens(total.get("cached_tokens"))}</p>
+                <p><strong>Reasoning：</strong>{_format_tokens(total.get("reasoning_tokens"))}</p>
+                <p><strong>Thought：</strong>{_format_tokens(total.get("thought_tokens"))}</p>
+                <p><strong>估算费用：</strong>{_format_usd(summary["estimated_total_usd"])}</p>
+                <p><strong>未定价 Token：</strong>{_format_tokens(summary["unpriced_tokens"])}</p>
+                <p><strong>历史未估价：</strong>{_format_tokens(summary["legacy_tokens"])}</p>
+    """
+
+
+def _render_token_cost_panel(stats: dict | None) -> str:
+    stats = stats if isinstance(stats, dict) else {}
+    by_phase = stats.get("by_phase") if isinstance(stats.get("by_phase"), dict) else {}
+    cost = stats.get("cost") if isinstance(stats.get("cost"), dict) else {}
+    cost_by_phase = cost.get("by_phase") if isinstance(cost.get("by_phase"), dict) else {}
+    cost_by_model = cost.get("by_model") if isinstance(cost.get("by_model"), dict) else {}
+
+    phase_rows = []
+    for phase in sorted(set(by_phase) | set(cost_by_phase)):
+        usage = by_phase.get(phase) if isinstance(by_phase.get(phase), dict) else {}
+        phase_cost = cost_by_phase.get(phase) if isinstance(cost_by_phase.get(phase), dict) else {}
+        if (
+            _stats_int(usage.get("requests")) == 0
+            and _stats_int(usage.get("total_tokens")) == 0
+            and _stats_int(phase_cost.get("requests")) == 0
+        ):
+            continue
+        phase_rows.append(
+            f"""
+            <tr>
+              <td>{escape(str(phase))}</td>
+              <td>{_format_tokens(usage.get("requests"))}</td>
+              <td>{_format_tokens(usage.get("prompt_tokens"))}</td>
+              <td>{_format_tokens(usage.get("completion_tokens"))}</td>
+              <td>{_format_tokens(usage.get("cached_tokens"))}</td>
+              <td>{_format_tokens(usage.get("total_tokens"))}</td>
+              <td>{_format_usd(phase_cost.get("estimated_usd"))}</td>
+              <td>{_format_tokens(phase_cost.get("unpriced_tokens"))}</td>
+            </tr>
+            """
+        )
+    if not phase_rows:
+        phase_rows.append('<tr><td colspan="8" class="muted">暂无 token 统计。</td></tr>')
+
+    model_rows = []
+    sorted_models = sorted(
+        cost_by_model.values(),
+        key=lambda item: _stats_float(item.get("estimated_usd")) if isinstance(item, dict) else 0.0,
+        reverse=True,
+    )
+    for item in sorted_models:
+        if not isinstance(item, dict):
+            continue
+        source = item.get("source") if isinstance(item.get("source"), dict) else {}
+        source_label = source.get("name") or item.get("reason") or ""
+        model_rows.append(
+            f"""
+            <tr>
+              <td>{escape(str(item.get("provider") or ""))}</td>
+              <td>{escape(str(item.get("model") or ""))}</td>
+              <td>{_format_tokens(item.get("requests"))}</td>
+              <td>{_format_tokens(item.get("total_tokens"))}</td>
+              <td>{_format_usd(item.get("estimated_usd"))}</td>
+              <td>{escape(_pricing_status_label(item.get("pricing_status")))}</td>
+              <td>{escape(str(source_label))}</td>
+            </tr>
+            """
+        )
+    if not model_rows:
+        model_rows.append('<tr><td colspan="7" class="muted">暂无新调用费用统计。</td></tr>')
+
+    return f"""
+            <section class="panel">
+              <h2>Token / 费用统计</h2>
+              {_render_cost_meta(stats)}
+              <h3>按阶段</h3>
+              <table class="quality-table">
+                <thead>
+                  <tr><th>阶段</th><th>请求</th><th>Prompt</th><th>Output</th><th>Cached</th><th>Total</th><th>估算费用</th><th>未定价</th></tr>
+                </thead>
+                <tbody>{''.join(phase_rows)}</tbody>
+              </table>
+              <h3>按模型</h3>
+              <table class="quality-table">
+                <thead>
+                  <tr><th>Provider</th><th>Model</th><th>请求</th><th>Total</th><th>估算费用</th><th>价格状态</th><th>来源</th></tr>
+                </thead>
+                <tbody>{''.join(model_rows)}</tbody>
+              </table>
+            </section>
+    """
+
+
 def _model_blank_label(provider: str, *, base_model: str, provider_explicit: bool) -> str:
     effective_provider = _normalize_provider_for_ui(provider, default="gemini")
     default_model = _default_model_for_provider(effective_provider)
@@ -879,6 +1043,7 @@ def _list_projects() -> list[dict]:
                 "chapter_count": project.get("chapter_count", 0),
                 "updated_at": project.get("updated_at", ""),
                 "provider": (project.get("llm_config") or {}).get("model_provider", ""),
+                "stats": project.get("stats") or {},
             }
         )
     return projects
@@ -2884,6 +3049,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                     <span class="pill">{item['chapter_count']} 章</span>
                     <span class="pill">{escape(item['updated_at'] or '')}</span>
                   </div>
+                  {_render_cost_meta(item.get("stats") or {})}
                 </div>
                 """
             )
@@ -3052,7 +3218,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         effective_task_html = _render_effective_task_summary(effective_task)
         chapters = _read_chapters(project_path)
         latest_snapshot = get_latest_state_snapshot_chapter(str(project_path))
-        stats = (project.get("stats") or {}).get("total", {})
+        project_stats = project.get("stats") or {}
+        stats = project_stats.get("total", {})
         illustration_records = list_illustration_records(str(project_path))
         active_jobs = JOB_REGISTRY.list_jobs(project_id=project_id, active_only=True, limit=6)
         active_jobs_html = _render_job_cards(active_jobs, "当前没有运行中的后台任务。")
@@ -3107,8 +3274,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <p><strong>下章目标：</strong>{escape(plot_state.get("next_chapter_goal", "") or "暂无")}</p>
               <p><strong>当前地点：</strong>{escape(plot_state.get("current_location", "") or "未知")}</p>
               <p><strong>当前时间：</strong>{escape(plot_state.get("current_time", "") or "未知")}</p>
-              <p><strong>请求：</strong>{stats.get("requests", 0)} 次</p>
-              <p><strong>Token：</strong>{stats.get("total_tokens", 0)}</p>
+              {_render_sidebar_usage_stats(project_stats)}
               <p><strong>Planning:</strong>{escape(_planning_mode_label(project.get("planning_mode", DEFAULT_PLANNING_MODE)))}</p>
               <p><strong>Quality:</strong>{escape(_quality_mode_label((project.get("llm_config") or {}).get("writing_quality_mode", DEFAULT_WRITING_QUALITY_MODE)))}</p>
               <p><strong>Review:</strong>{escape(_review_mode_label((project.get("llm_config") or {}).get("review_mode", DEFAULT_REVIEW_MODE)))}</p>
@@ -3931,7 +4097,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         effective_task_html = _render_effective_task_summary(effective_task)
         chapters = _read_chapters(project_path)
         latest_snapshot = get_latest_state_snapshot_chapter(str(project_path))
-        stats = (project.get("stats") or {}).get("total", {})
+        project_stats = project.get("stats") or {}
+        stats = project_stats.get("total", {})
         illustration_records = list_illustration_records(str(project_path))
         audiobook_records = list_audiobook_records(str(project_path))
         active_jobs = JOB_REGISTRY.list_jobs(project_id=project_id, active_only=True, limit=8)
@@ -4032,8 +4199,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 <p><strong>live-state 下一目标：</strong>{escape(plot_state.get("next_chapter_goal", "") or "暂无")}</p>
                 <p><strong>当前位置：</strong>{escape(plot_state.get("current_location", "") or "未知")}</p>
                 <p><strong>当前时间：</strong>{escape(plot_state.get("current_time", "") or "未知")}</p>
-                <p><strong>请求：</strong>{stats.get("requests", 0)} 次</p>
-                <p><strong>Token：</strong>{stats.get("total_tokens", 0)}</p>
+                {_render_sidebar_usage_stats(project_stats)}
                 <p><strong>Planning:</strong>{escape(_planning_mode_label(planning_mode))}</p>
                 <p><strong>Quality:</strong>{escape(_quality_mode_label(project_llm_config.get("writing_quality_mode", DEFAULT_WRITING_QUALITY_MODE)))}</p>
                 <p><strong>Review:</strong>{escape(_review_mode_label(project_llm_config.get("review_mode", DEFAULT_REVIEW_MODE)))}</p>
@@ -4175,6 +4341,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <h2>最近一章</h2>
               <div class="chapter-view">{latest_chapter_text}</div>
             </section>
+            {_render_token_cost_panel(project_stats)}
             <section class="panel">
               {effective_task_html}
             </section>

@@ -50,9 +50,15 @@ def _safe_float(value: Any, default: float) -> float:
         return default
 
 
-def _update_project_stats_threadsafe(project_path: str, phase: str, success: bool, usage: dict | None = None) -> None:
+def _update_project_stats_threadsafe(
+    project_path: str,
+    phase: str,
+    success: bool,
+    usage: dict | None = None,
+    metadata: dict | None = None,
+) -> None:
     with PROJECT_STATS_LOCK:
-        update_project_stats(project_path, phase=phase, success=success, usage=usage)
+        update_project_stats(project_path, phase=phase, success=success, usage=usage, metadata=metadata)
 
 
 def _coerce_worker_count(requested_workers: Any, task_count: int) -> int:
@@ -785,6 +791,7 @@ def _generate_prompt_payload(
                 phase="illustration_prompt",
                 success=True,
                 usage=metadata.get("usage"),
+                metadata=metadata,
             )
             payload = extract_json_object(response_text, "Could not parse JSON from illustration prompt response.")
             llm_positive_prompt = _normalize_prompt_text(str(payload.get("positive_prompt", "") or ""), limit=1200)

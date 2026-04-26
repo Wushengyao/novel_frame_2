@@ -226,6 +226,7 @@ def run_chapter_polish(
         phase="polish",
         success=True,
         usage=metadata.get("usage"),
+        metadata=metadata,
     )
     emit_progress(progress_callback, "polish_backup", "正在备份原章节正文")
     backup_path, metadata_path = _backup_original_chapter(

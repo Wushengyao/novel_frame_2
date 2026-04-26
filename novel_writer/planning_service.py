@@ -202,6 +202,7 @@ def plan_batch_chapters(
             phase="outline",
             success=True,
             usage=metadata.get("usage"),
+            metadata=metadata,
         )
         plan = _normalize_batch_plan_response(
             extract_json_object(response_text, "Could not parse JSON from batch chapter plan response."),

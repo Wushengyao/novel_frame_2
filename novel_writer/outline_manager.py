@@ -266,6 +266,7 @@ def _generate_outline_json(
                 phase="outline",
                 success=False,
                 usage=metadata.get("usage"),
+                metadata=metadata,
             )
             last_error = exc
             log_warning(f"{context}: 第 {attempt + 1}/{max_attempts} 次返回内容无效，原因: {exc}")
@@ -276,6 +277,7 @@ def _generate_outline_json(
             phase="outline",
             success=True,
             usage=metadata.get("usage"),
+            metadata=metadata,
         )
         log_success(f"{context}: 第 {attempt + 1}/{max_attempts} 次请求成功。")
         return validated

@@ -14,6 +14,7 @@ from project_manager import (
     acquire_project_write_lock,
     rollback_project,
     save_json,
+    update_project_stats,
 )
 from prompt_builder import build_init_prompt
 
@@ -78,6 +79,85 @@ class ProjectManagerTests(unittest.TestCase):
                     raise RuntimeError("boom")
 
             self.assertFalse((project_path / ".project_write.lock").exists())
+
+    def test_update_project_stats_records_token_and_cost_totals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="cost_totals")
+            metadata = {
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "usage": {
+                    "prompt_tokens": 1000,
+                    "cached_tokens": 400,
+                    "completion_tokens": 500,
+                    "total_tokens": 1500,
+                },
+            }
+
+            update_project_stats(str(project_path), phase="writer", success=True, usage=metadata["usage"], metadata=metadata)
+
+            stats = read_json(project_path / "project.json")["stats"]
+            expected_cost = (600 * 0.14 + 400 * 0.028 + 500 * 0.28) / 1_000_000
+            self.assertEqual(stats["total"]["total_tokens"], 1500)
+            self.assertEqual(stats["by_phase"]["writer"]["prompt_tokens"], 1000)
+            self.assertEqual(stats["cost"]["currency"], "USD")
+            self.assertEqual(stats["cost"]["priced_tokens"], 1500)
+            self.assertEqual(stats["cost"]["unpriced_tokens"], 0)
+            self.assertAlmostEqual(stats["cost"]["estimated_total_usd"], expected_cost)
+            self.assertIn("deepseek:deepseek-v4-flash", stats["cost"]["by_model"])
+
+    def test_update_project_stats_preserves_legacy_tokens_without_cost_backfill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="legacy_cost")
+            project_file = project_path / "project.json"
+            project = read_json(project_file)
+            project["stats"] = {
+                "total": {
+                    "requests": 2,
+                    "successes": 2,
+                    "failures": 0,
+                    "prompt_tokens": 3000,
+                    "completion_tokens": 2000,
+                    "total_tokens": 5000,
+                    "cached_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "thought_tokens": 0,
+                },
+                "by_phase": {},
+            }
+            save_json(str(project_file), project)
+            metadata = {
+                "provider": "ollama",
+                "model": "llama3.2",
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+            }
+
+            update_project_stats(str(project_path), phase="writer", success=True, usage=metadata["usage"], metadata=metadata)
+
+            stats = read_json(project_file)["stats"]
+            legacy_tokens = stats["total"]["total_tokens"] - stats["cost"]["priced_tokens"] - stats["cost"]["unpriced_tokens"]
+            self.assertEqual(stats["total"]["total_tokens"], 5150)
+            self.assertEqual(stats["cost"]["priced_tokens"], 150)
+            self.assertEqual(stats["cost"]["unpriced_tokens"], 0)
+            self.assertEqual(legacy_tokens, 5000)
+
+    def test_update_project_stats_tracks_unpriced_tokens_without_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="unpriced_cost")
+            metadata = {
+                "provider": "doubao",
+                "model": "doubao-seed-1-8-251228",
+                "usage": {"prompt_tokens": 200, "completion_tokens": 80, "total_tokens": 280},
+            }
+
+            update_project_stats(str(project_path), phase="outline", success=True, usage=metadata["usage"], metadata=metadata)
+
+            stats = read_json(project_path / "project.json")["stats"]
+            model_entry = stats["cost"]["by_model"]["doubao:doubao-seed-1-8-251228"]
+            self.assertEqual(stats["cost"]["estimated_total_usd"], 0.0)
+            self.assertEqual(stats["cost"]["priced_tokens"], 0)
+            self.assertEqual(stats["cost"]["unpriced_tokens"], 280)
+            self.assertEqual(model_entry["pricing_status"], "unpriced")
 
     def test_init_prompt_limits_supporting_characters_to_opening_cast(self) -> None:
         prompt = build_init_prompt(

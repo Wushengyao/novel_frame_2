@@ -396,6 +396,7 @@ def run_next_chapter(
         phase="writer",
         success=True,
         usage=metadata.get("usage"),
+        metadata=metadata,
     )
     chapter_text = normalize_chapter_text(response_text)
     if quality_mode_uses_review(writing_quality_mode):

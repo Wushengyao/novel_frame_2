@@ -15,6 +15,7 @@ from uuid import uuid4
 from common_utils import emit_progress, extract_json_object, utc_now
 from console_logger import log_error, log_info, log_success, log_warning
 from llm_client import generate_text_with_metadata
+from pricing import estimate_llm_cost
 from prompt_builder import build_init_prompt, build_system_prompt
 
 
@@ -252,10 +253,23 @@ def _build_project_stats() -> dict:
     return {
         "total": _empty_usage_stats(),
         "by_phase": {phase: _empty_usage_stats() for phase in STATS_PHASES},
+        "cost": _empty_cost_stats(),
         "context_telemetry": {
             "recent_runs": [],
             "last_by_phase": {},
         },
+    }
+
+
+def _empty_cost_stats() -> dict:
+    return {
+        "currency": "USD",
+        "estimated_total_usd": 0.0,
+        "priced_tokens": 0,
+        "unpriced_tokens": 0,
+        "by_phase": {},
+        "by_model": {},
+        "started_at": "",
     }
 
 
@@ -280,13 +294,114 @@ def _merge_usage_stats(target: dict, success: bool, usage: dict | None) -> None:
         target[key] = int(target.get(key, 0)) + int(usage.get(key, 0) or 0)
 
 
-def update_project_stats(project_path: str, phase: str, success: bool, usage: dict | None = None) -> None:
-    project_file = Path(project_path) / "project.json"
-    project_data = load_json(str(project_file))
-    stats = project_data.get("stats") or _build_project_stats()
+def _cost_float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _cost_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_cost_stats(stats: dict) -> dict:
+    cost = stats.get("cost") if isinstance(stats.get("cost"), dict) else {}
+    normalized = _empty_cost_stats()
+    normalized.update(cost)
+    normalized["currency"] = "USD"
+    normalized["estimated_total_usd"] = _cost_float(normalized.get("estimated_total_usd"))
+    normalized["priced_tokens"] = _cost_int(normalized.get("priced_tokens"))
+    normalized["unpriced_tokens"] = _cost_int(normalized.get("unpriced_tokens"))
+    normalized["by_phase"] = normalized.get("by_phase") if isinstance(normalized.get("by_phase"), dict) else {}
+    normalized["by_model"] = normalized.get("by_model") if isinstance(normalized.get("by_model"), dict) else {}
+    return normalized
+
+
+def _merge_cost_entry(target: dict, usage: dict | None, estimate: dict) -> None:
+    target["requests"] = _cost_int(target.get("requests")) + 1
+    target["estimated_usd"] = _cost_float(target.get("estimated_usd")) + _cost_float(estimate.get("estimated_cost_usd"))
+    target["priced_tokens"] = _cost_int(target.get("priced_tokens")) + _cost_int(estimate.get("priced_tokens"))
+    target["unpriced_tokens"] = _cost_int(target.get("unpriced_tokens")) + _cost_int(estimate.get("unpriced_tokens"))
+    if not usage:
+        return
+    for key in (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
+        "thought_tokens",
+    ):
+        target[key] = _cost_int(target.get(key)) + _cost_int(usage.get(key))
+
+
+def _merge_model_cost_stats(stats: dict, phase: str, success: bool, metadata: dict | None = None) -> None:
+    if not success or not isinstance(metadata, dict):
+        return
+    usage = metadata.get("usage")
+    if not isinstance(usage, dict):
+        return
+    provider = str(metadata.get("provider") or "openai_compatible").strip() or "openai_compatible"
+    model = str(metadata.get("model") or "").strip()
+    estimate = estimate_llm_cost(provider, model, usage)
+
+    cost = _normalize_cost_stats(stats)
+    if not cost.get("started_at"):
+        cost["started_at"] = utc_now()
+    cost["estimated_total_usd"] = _cost_float(cost.get("estimated_total_usd")) + _cost_float(
+        estimate.get("estimated_cost_usd")
+    )
+    cost["priced_tokens"] = _cost_int(cost.get("priced_tokens")) + _cost_int(estimate.get("priced_tokens"))
+    cost["unpriced_tokens"] = _cost_int(cost.get("unpriced_tokens")) + _cost_int(estimate.get("unpriced_tokens"))
+
+    phase_entry = cost["by_phase"].setdefault(phase, {})
+    _merge_cost_entry(phase_entry, usage, estimate)
+
+    model_key = f"{estimate.get('provider') or provider}:{estimate.get('model') or model}"
+    model_entry = cost["by_model"].setdefault(
+        model_key,
+        {
+            "provider": estimate.get("provider") or provider,
+            "model": estimate.get("model") or model,
+            "pricing_status": estimate.get("pricing_status", ""),
+            "source": estimate.get("source") or {},
+            "reason": estimate.get("reason", ""),
+        },
+    )
+    model_entry["provider"] = estimate.get("provider") or provider
+    model_entry["model"] = estimate.get("model") or model
+    model_entry["pricing_status"] = estimate.get("pricing_status", "")
+    model_entry["source"] = estimate.get("source") or {}
+    model_entry["reason"] = estimate.get("reason", "")
+    _merge_cost_entry(model_entry, usage, estimate)
+
+    stats["cost"] = cost
+
+
+def _merge_project_stats(stats: dict, phase: str, success: bool, usage: dict | None = None, metadata: dict | None = None) -> None:
     stats.setdefault("total", _empty_usage_stats())
     stats.setdefault("by_phase", {})
     stats["by_phase"].setdefault(phase, _empty_usage_stats())
+    stats["cost"] = _normalize_cost_stats(stats)
+    _merge_usage_stats(stats["total"], success=success, usage=usage)
+    _merge_usage_stats(stats["by_phase"][phase], success=success, usage=usage)
+    _merge_model_cost_stats(stats, phase=phase, success=success, metadata=metadata)
+
+
+def update_project_stats(
+    project_path: str,
+    phase: str,
+    success: bool,
+    usage: dict | None = None,
+    metadata: dict | None = None,
+) -> None:
+    project_file = Path(project_path) / "project.json"
+    project_data = load_json(str(project_file))
+    stats = project_data.get("stats") or _build_project_stats()
     stats.setdefault(
         "context_telemetry",
         {
@@ -295,8 +410,7 @@ def update_project_stats(project_path: str, phase: str, success: bool, usage: di
         },
     )
 
-    _merge_usage_stats(stats["total"], success=success, usage=usage)
-    _merge_usage_stats(stats["by_phase"][phase], success=success, usage=usage)
+    _merge_project_stats(stats, phase=phase, success=success, usage=usage, metadata=metadata)
 
     project_data["stats"] = stats
     project_data["updated_at"] = utc_now()
@@ -720,15 +834,19 @@ def _generate_initial_story_data(config: dict) -> tuple[dict, dict]:
                 response_format="json",
             )
         except Exception as exc:  # pragma: no cover - resilience path
-            _merge_usage_stats(init_stats["total"], success=False, usage=None)
-            _merge_usage_stats(init_stats["by_phase"]["init"], success=False, usage=None)
+            _merge_project_stats(init_stats, phase="init", success=False, usage=None, metadata=None)
             llm_init_error = str(exc)
             log_warning(f"初始化设定: 第 {attempt + 1} 次请求失败，原因: {llm_init_error}")
             continue
 
         try:
-            _merge_usage_stats(init_stats["total"], success=True, usage=metadata.get("usage"))
-            _merge_usage_stats(init_stats["by_phase"]["init"], success=True, usage=metadata.get("usage"))
+            _merge_project_stats(
+                init_stats,
+                phase="init",
+                success=True,
+                usage=metadata.get("usage"),
+                metadata=metadata,
+            )
             generated_data = _normalize_init_result(
                 extract_json_object(response_text, "Could not parse JSON from init response.")
             )

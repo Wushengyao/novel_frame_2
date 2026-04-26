@@ -345,6 +345,7 @@ def generate_auto_chapter_objective(
             phase="outline",
             success=True,
             usage=metadata.get("usage"),
+            metadata=metadata,
         )
         objective_payload = extract_json_object(
             response_text,
@@ -450,6 +451,7 @@ def generate_progression_options(
             phase="outline",
             success=True,
             usage=metadata.get("usage"),
+            metadata=metadata,
         )
         normalized = normalize_progression_options_response(
             extract_json_object(response_text, "Could not parse JSON from progression options response."),

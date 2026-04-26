@@ -385,7 +385,7 @@ def generate_craft_brief(
             system_prompt=build_system_prompt("craft_brief"),
             response_format="json",
         )
-        update_project_stats(project_path, phase="craft_brief", success=True, usage=metadata.get("usage"))
+        update_project_stats(project_path, phase="craft_brief", success=True, usage=metadata.get("usage"), metadata=metadata)
     except Exception as exc:  # pragma: no cover - resilience path
         update_project_stats(project_path, phase="craft_brief", success=False, usage=None)
         log_warning(f"craft_brief: using fallback brief, reason: {exc}")
@@ -444,7 +444,7 @@ def review_chapter_draft(
                 system_prompt=build_system_prompt("quality_review"),
                 response_format="json",
             )
-            update_project_stats(project_path, phase="quality_review", success=True, usage=metadata.get("usage"))
+            update_project_stats(project_path, phase="quality_review", success=True, usage=metadata.get("usage"), metadata=metadata)
         except Exception as exc:  # pragma: no cover - resilience path
             update_project_stats(project_path, phase="quality_review", success=False, usage=None)
             last_error = str(exc)
@@ -498,7 +498,7 @@ def rewrite_chapter_draft(
             log_context=request_log_context,
             system_prompt=build_system_prompt("rewrite"),
         )
-        update_project_stats(project_path, phase="rewrite", success=True, usage=metadata.get("usage"))
+        update_project_stats(project_path, phase="rewrite", success=True, usage=metadata.get("usage"), metadata=metadata)
         return response_text
     except Exception:
         update_project_stats(project_path, phase="rewrite", success=False, usage=None)

@@ -168,6 +168,7 @@ def update_plot_state(project_path: str, new_text: str, config: dict, progress_c
                 phase="summary",
                 success=True,
                 usage=metadata.get("usage"),
+                metadata=metadata,
             )
             summary = _normalize_summary(
                 extract_json_object(response_text, "Could not parse JSON from summary response."),

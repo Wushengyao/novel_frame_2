@@ -141,6 +141,77 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             time.sleep(0.1)
         self.fail(f"job {job_id} did not reach one of {sorted(target_statuses)}")
 
+    def test_project_pages_show_token_cost_statistics(self) -> None:
+        project_file = self.project_path / "project.json"
+        project = load_json(str(project_file))
+        project["stats"] = {
+            "total": {
+                "requests": 3,
+                "successes": 2,
+                "failures": 1,
+                "prompt_tokens": 1200,
+                "completion_tokens": 800,
+                "total_tokens": 2500,
+                "cached_tokens": 300,
+                "reasoning_tokens": 20,
+                "thought_tokens": 10,
+            },
+            "by_phase": {
+                "writer": {
+                    "requests": 1,
+                    "successes": 1,
+                    "failures": 0,
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 500,
+                    "total_tokens": 1500,
+                    "cached_tokens": 300,
+                    "reasoning_tokens": 0,
+                    "thought_tokens": 0,
+                }
+            },
+            "cost": {
+                "currency": "USD",
+                "estimated_total_usd": 0.000123,
+                "priced_tokens": 1500,
+                "unpriced_tokens": 500,
+                "started_at": "2026-04-26T00:00:00+00:00",
+                "by_phase": {
+                    "writer": {
+                        "requests": 1,
+                        "estimated_usd": 0.000123,
+                        "priced_tokens": 1500,
+                        "unpriced_tokens": 0,
+                    }
+                },
+                "by_model": {
+                    "deepseek:deepseek-v4-flash": {
+                        "provider": "deepseek",
+                        "model": "deepseek-v4-flash",
+                        "requests": 1,
+                        "total_tokens": 1500,
+                        "estimated_usd": 0.000123,
+                        "priced_tokens": 1500,
+                        "unpriced_tokens": 0,
+                        "pricing_status": "priced",
+                        "source": {"name": "DeepSeek Models & Pricing"},
+                    }
+                },
+            },
+        }
+        save_json(str(project_file), project)
+
+        projects_page = self._get("/projects")
+        project_page = self._get("/project/web")
+
+        self.assertEqual(projects_page.status, 200)
+        self.assertEqual(project_page.status, 200)
+        self.assertIn("估算费用：$0.0001", projects_page.body)
+        self.assertIn("未定价：500 tokens", projects_page.body)
+        self.assertIn("历史未估价：500 tokens", projects_page.body)
+        self.assertIn("Token / 费用统计", project_page.body)
+        self.assertIn("deepseek-v4-flash", project_page.body)
+        self.assertIn("DeepSeek Models &amp; Pricing", project_page.body)
+
     def test_progression_options_endpoint_saves_session_and_project_page_reflects_it(self) -> None:
         session_payload = {
             "session_id": "session_generated",
