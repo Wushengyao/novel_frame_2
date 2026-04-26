@@ -16,7 +16,7 @@ from context_builder import (
     write_arc_summary,
 )
 from llm_client import generate_text_with_metadata
-from prompt_builder import build_summary_prompt
+from prompt_builder import build_summary_prompt, build_system_prompt
 from project_manager import (
     load_json,
     load_project,
@@ -153,6 +153,8 @@ def update_plot_state(project_path: str, new_text: str, config: dict, progress_c
                 prompt,
                 config,
                 log_context=summary_log_context,
+                system_prompt=build_system_prompt("summary"),
+                response_format="json",
             )
         except Exception as exc:  # pragma: no cover - intentional resilience path
             update_project_stats(project_path, phase="summary", success=False, usage=None)

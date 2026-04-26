@@ -15,7 +15,7 @@ from uuid import uuid4
 from common_utils import emit_progress, extract_json_object, utc_now
 from console_logger import log_error, log_info, log_success, log_warning
 from llm_client import generate_text_with_metadata
-from prompt_builder import build_init_prompt
+from prompt_builder import build_init_prompt, build_system_prompt
 
 
 EMPTY_WORLD = {
@@ -713,7 +713,12 @@ def _generate_initial_story_data(config: dict) -> tuple[dict, dict]:
     for attempt in range(2):
         try:
             log_info(f"初始化设定: 第 {attempt + 1} 次请求模型。")
-            response_text, metadata = generate_text_with_metadata(prompt, llm_config)
+            response_text, metadata = generate_text_with_metadata(
+                prompt,
+                llm_config,
+                system_prompt=build_system_prompt("planner"),
+                response_format="json",
+            )
         except Exception as exc:  # pragma: no cover - resilience path
             _merge_usage_stats(init_stats["total"], success=False, usage=None)
             _merge_usage_stats(init_stats["by_phase"]["init"], success=False, usage=None)

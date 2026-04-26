@@ -27,7 +27,7 @@ from project_manager import (
     save_json,
     update_project_stats,
 )
-from prompt_builder import build_auto_objective_prompt, build_progression_options_prompt
+from prompt_builder import build_auto_objective_prompt, build_progression_options_prompt, build_system_prompt
 from runtime_config import sanitize_runtime_overrides
 
 
@@ -337,6 +337,8 @@ def generate_auto_chapter_objective(
             prompt,
             config,
             log_context=log_context,
+            system_prompt=build_system_prompt("planner"),
+            response_format="json",
         )
         update_project_stats(
             project_path,
@@ -440,6 +442,8 @@ def generate_progression_options(
             prompt,
             config,
             log_context=log_context,
+            system_prompt=build_system_prompt("planner"),
+            response_format="json",
         )
         update_project_stats(
             project_path,

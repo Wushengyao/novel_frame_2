@@ -18,7 +18,7 @@ from project_manager import (
     save_json,
     update_project_stats,
 )
-from prompt_builder import build_chapter_polish_prompt
+from prompt_builder import build_chapter_polish_prompt, build_system_prompt
 
 
 POLISH_PRESETS = [
@@ -208,7 +208,12 @@ def run_chapter_polish(
 
     try:
         emit_progress(progress_callback, "polish_request", "正在请求模型润色章节")
-        response_text, metadata = generate_text_with_metadata(prompt, config, log_context=log_context)
+        response_text, metadata = generate_text_with_metadata(
+            prompt,
+            config,
+            log_context=log_context,
+            system_prompt=build_system_prompt("polish"),
+        )
         polished_text = normalize_chapter_text(_strip_wrapping_code_fence(response_text))
         _validate_polished_text(original_text, polished_text)
     except Exception:

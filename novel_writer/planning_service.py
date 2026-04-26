@@ -24,7 +24,7 @@ from project_manager import (
     record_context_telemetry,
     update_project_stats,
 )
-from prompt_builder import build_batch_chapter_plan_prompt
+from prompt_builder import build_batch_chapter_plan_prompt, build_system_prompt
 
 
 def _fallback_batch_plan(
@@ -191,7 +191,12 @@ def plan_batch_chapters(
         },
     )
     try:
-        response_text, metadata = generate_text_with_metadata(prompt, config)
+        response_text, metadata = generate_text_with_metadata(
+            prompt,
+            config,
+            system_prompt=build_system_prompt("planner"),
+            response_format="json",
+        )
         update_project_stats(
             project_path,
             phase="outline",

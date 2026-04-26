@@ -10,7 +10,7 @@ from common_utils import emit_progress, extract_json_object, safe_int, utc_now
 from console_logger import log_error, log_info, log_success, log_warning
 from context_builder import build_chapter_outline_context, build_volume_outline_context
 from llm_client import generate_text_with_metadata
-from prompt_builder import build_chapter_outline_prompt, build_volume_outline_prompt
+from prompt_builder import build_chapter_outline_prompt, build_system_prompt, build_volume_outline_prompt
 from project_manager import (
     load_json,
     load_project,
@@ -245,7 +245,12 @@ def _generate_outline_json(
     for attempt in range(max_attempts):
         try:
             log_info(f"{context}: 第 {attempt + 1}/{max_attempts} 次请求模型。")
-            response_text, metadata = generate_text_with_metadata(prompt, config)
+            response_text, metadata = generate_text_with_metadata(
+                prompt,
+                config,
+                system_prompt=build_system_prompt("planner"),
+                response_format="json",
+            )
         except Exception as exc:  # pragma: no cover - resilience path
             update_project_stats(project_path, phase="outline", success=False, usage=None)
             last_error = exc

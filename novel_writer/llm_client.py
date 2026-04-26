@@ -253,10 +253,33 @@ def _extract_gemini_usage(payload: dict[str, Any]) -> dict[str, int]:
         "thought_tokens": int(usage.get("thoughtsTokenCount", 0) or 0),
     }
 
+
+def _normalize_optional_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _build_openai_messages(prompt: str, system_prompt: str = "") -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+    normalized_system_prompt = _normalize_optional_text(system_prompt)
+    if normalized_system_prompt:
+        messages.append({"role": "system", "content": normalized_system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def _is_json_response_requested(prompt: str, response_format: str = "") -> bool:
+    normalized_format = _normalize_optional_text(response_format).lower()
+    if normalized_format in {"json", "json_object", "application/json"}:
+        return True
+    return "输出 JSON" in prompt or "输出必须是合法 JSON" in prompt
+
+
 def generate_text_with_metadata(
     prompt: str,
     config: dict,
     log_context: dict[str, Any] | None = None,
+    system_prompt: str = "",
+    response_format: str = "",
 ) -> tuple[str, dict[str, Any]]:
     """Generate text and return normalized usage metadata."""
     provider = (config.get("model_provider") or "openai_compatible").strip().lower()
@@ -278,7 +301,7 @@ def generate_text_with_metadata(
 
         body = {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": _build_openai_messages(prompt, system_prompt),
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
@@ -319,7 +342,7 @@ def generate_text_with_metadata(
         if not model:
             raise ValueError("Missing 'model' or 'model_name' in config.")
 
-        response_mime_type = "application/json" if "输出 JSON" in prompt else "text/plain"
+        response_mime_type = "application/json" if _is_json_response_requested(prompt, response_format) else "text/plain"
         endpoint = (
             f"{api_base.rstrip('/')}/models/{model}:generateContent"
             f"?{parse.urlencode({'key': api_key})}"
@@ -343,6 +366,11 @@ def generate_text_with_metadata(
                 "responseMimeType": response_mime_type,
             },
         }
+        normalized_system_prompt = _normalize_optional_text(system_prompt)
+        if normalized_system_prompt:
+            body["systemInstruction"] = {
+                "parts": [{"text": normalized_system_prompt}],
+            }
         payload, request_attempts = _request_json(endpoint, headers, body, timeout)
         response_text = _extract_gemini_text(payload)
         metadata = {
@@ -369,6 +397,8 @@ def generate_text_with_metadata(
             prompt,
             {**grok_config, "model_provider": "openai_compatible"},
             log_context=log_context,
+            system_prompt=system_prompt,
+            response_format=response_format,
         )
         metadata["provider"] = "grok"
         return text, metadata
@@ -382,6 +412,8 @@ def generate_text_with_metadata(
             prompt,
             {**deepseek_config, "model_provider": "openai_compatible"},
             log_context=log_context,
+            system_prompt=system_prompt,
+            response_format=response_format,
         )
         metadata["provider"] = "deepseek"
         return text, metadata
@@ -396,6 +428,8 @@ def generate_text_with_metadata(
             prompt,
             {**doubao_config, "model_provider": "openai_compatible"},
             log_context=log_context,
+            system_prompt=system_prompt,
+            response_format=response_format,
         )
         metadata["provider"] = "doubao"
         return text, metadata
@@ -410,6 +444,8 @@ def generate_text_with_metadata(
             prompt,
             {**ollama_config, "model_provider": "openai_compatible"},
             log_context=log_context,
+            system_prompt=system_prompt,
+            response_format=response_format,
         )
         metadata["provider"] = "ollama"
         return text, metadata
@@ -420,6 +456,11 @@ def generate_text_with_metadata(
     )
 
 
-def generate_text(prompt: str, config: dict) -> str:
+def generate_text(prompt: str, config: dict, system_prompt: str = "", response_format: str = "") -> str:
     """Generate text from the configured backend."""
-    return generate_text_with_metadata(prompt, config)[0]
+    return generate_text_with_metadata(
+        prompt,
+        config,
+        system_prompt=system_prompt,
+        response_format=response_format,
+    )[0]

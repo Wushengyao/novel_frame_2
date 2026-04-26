@@ -14,6 +14,7 @@ from prompt_builder import (
     build_craft_brief_prompt,
     build_quality_review_prompt,
     build_rewrite_prompt,
+    build_system_prompt,
 )
 from runtime_config import (
     REVIEW_MODE_AUTO,
@@ -307,7 +308,13 @@ def generate_craft_brief(
     try:
         log_info("craft_brief: requesting model brief")
         emit_progress(progress_callback, "craft_brief", "Generating chapter craft brief")
-        response_text, metadata = generate_text_with_metadata(prompt, request_config, log_context=request_log_context)
+        response_text, metadata = generate_text_with_metadata(
+            prompt,
+            request_config,
+            log_context=request_log_context,
+            system_prompt=build_system_prompt("craft_brief"),
+            response_format="json",
+        )
         update_project_stats(project_path, phase="craft_brief", success=True, usage=metadata.get("usage"))
     except Exception as exc:  # pragma: no cover - resilience path
         update_project_stats(project_path, phase="craft_brief", success=False, usage=None)
@@ -360,7 +367,13 @@ def review_chapter_draft(
             if request_attempt > 1:
                 message += " retry"
             emit_progress(progress_callback, "quality_review", message)
-            response_text, metadata = generate_text_with_metadata(prompt, request_config, log_context=request_log_context)
+            response_text, metadata = generate_text_with_metadata(
+                prompt,
+                request_config,
+                log_context=request_log_context,
+                system_prompt=build_system_prompt("quality_review"),
+                response_format="json",
+            )
             update_project_stats(project_path, phase="quality_review", success=True, usage=metadata.get("usage"))
         except Exception as exc:  # pragma: no cover - resilience path
             update_project_stats(project_path, phase="quality_review", success=False, usage=None)
@@ -409,7 +422,12 @@ def rewrite_chapter_draft(
     try:
         log_info("rewrite: requesting improved chapter draft")
         emit_progress(progress_callback, "rewrite", "Rewriting chapter draft after quality review")
-        response_text, metadata = generate_text_with_metadata(prompt, request_config, log_context=request_log_context)
+        response_text, metadata = generate_text_with_metadata(
+            prompt,
+            request_config,
+            log_context=request_log_context,
+            system_prompt=build_system_prompt("rewrite"),
+        )
         update_project_stats(project_path, phase="rewrite", success=True, usage=metadata.get("usage"))
         return response_text
     except Exception:

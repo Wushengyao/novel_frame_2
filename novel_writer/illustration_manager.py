@@ -25,7 +25,7 @@ from external_services import (
 )
 from llm_client import generate_text_with_metadata
 from project_manager import load_json, load_project, save_json, update_project_stats
-from prompt_builder import build_illustration_prompt
+from prompt_builder import build_illustration_prompt, build_system_prompt
 
 
 LEGACY_DEFAULT_NEGATIVE_PROMPT = (
@@ -774,7 +774,12 @@ def _generate_prompt_payload(
         prompt = build_illustration_prompt(project_data, chapter_text, user_request=user_request)
         try:
             emit_progress(progress_callback, "illustration_prompt", "正在生成插图提示词")
-            response_text, metadata = generate_text_with_metadata(prompt, llm_config)
+            response_text, metadata = generate_text_with_metadata(
+                prompt,
+                llm_config,
+                system_prompt=build_system_prompt("illustration"),
+                response_format="json",
+            )
             _update_project_stats_threadsafe(
                 project_path,
                 phase="illustration_prompt",

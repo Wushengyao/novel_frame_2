@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import _quality_model_overrides_from_args, run_next_chapter, run_next_chapter_from_progression, run_next_chapters
+from prompt_builder import build_system_prompt
 from project_manager import ProjectWriteLockError, acquire_project_write_lock
 from progression_manager import CUSTOM_PROGRESSION_OPTION_ID, generate_progression_options
 
@@ -246,6 +247,7 @@ class GuidedFlowTests(unittest.TestCase):
 
             mocked_quality_generate.assert_not_called()
             mocked_writer_generate.assert_called_once()
+            self.assertEqual(mocked_writer_generate.call_args.kwargs["system_prompt"], build_system_prompt("writer"))
             mocked_state_generate.assert_called_once()
             self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "轻量模式正文")
             self.assertEqual(list((project_path / "craft_briefs").glob("*.json")), [])
@@ -623,7 +625,7 @@ class GuidedFlowTests(unittest.TestCase):
                 ]
             )
 
-            def fake_progression_generate(prompt, config, log_context=None):
+            def fake_progression_generate(prompt, config, log_context=None, system_prompt: str = "", response_format: str = ""):
                 progress_prompts.append(prompt)
                 if log_context and log_context.get("prompt_type") == "auto_objective":
                     return (json.dumps({"objective": next(objective_texts)}, ensure_ascii=False), {"usage": {}})

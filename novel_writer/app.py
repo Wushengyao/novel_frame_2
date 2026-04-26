@@ -36,7 +36,7 @@ from progression_manager import (
     resolve_progression_selection,
     validate_selection_mode,
 )
-from prompt_builder import build_writer_prompt
+from prompt_builder import build_system_prompt, build_writer_prompt
 from quality_manager import (
     generate_craft_brief,
     normalize_quality_config,
@@ -383,6 +383,7 @@ def run_next_chapter(
             prompt,
             config,
             log_context=log_context_payload,
+            system_prompt=build_system_prompt("writer"),
         )
     except Exception:
         update_project_stats(project_path, phase="writer", success=False, usage=None)

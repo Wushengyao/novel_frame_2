@@ -53,10 +53,11 @@ class PolishManagerTests(unittest.TestCase):
             "苏浅蹲在控制板旁，指尖掠过裂开的屏幕，语气比警报声还镇定：门锁还差最后一次校验。"
         )
 
-        def fake_generate(prompt: str, config: dict, log_context=None):
+        def fake_generate(prompt: str, config: dict, log_context=None, system_prompt: str = "", response_format: str = ""):
             captured["prompt"] = prompt
             captured["config"] = config
             captured["log_context"] = log_context
+            captured["system_prompt"] = system_prompt
             return polished, {"usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}}
 
         with patch("polish_manager.generate_text_with_metadata", side_effect=fake_generate):
@@ -72,6 +73,7 @@ class PolishManagerTests(unittest.TestCase):
         self.assertIn("细节增强", str(captured["prompt"]))
         self.assertIn("更欢乐", str(captured["prompt"]))
         self.assertIn("多一点轻松互怼", str(captured["prompt"]))
+        self.assertIn("润色", str(captured["system_prompt"]))
         self.assertEqual(captured["log_context"]["phase"], "polish")
         self.assertEqual(result["staled_progression_sessions"], 1)
 
