@@ -103,7 +103,12 @@ class AudiobookManagerTests(unittest.TestCase):
             return subprocess.CompletedProcess(["worker"], 0, stdout="ok", stderr="")
 
         with patch("audiobook_manager._run_worker", side_effect=fake_run_worker):
-            manifest = generate_audiobook_chapter(self.project_path, "chapter_0001", force=True)
+            manifest = generate_audiobook_chapter(
+                self.project_path,
+                "chapter_0001",
+                force=True,
+                runtime_overrides={"backend": "local_worker"},
+            )
 
         self.assertEqual(manifest["chapter_slug"], "chapter_0001")
         self.assertEqual(captured["payload"]["chapter_slug"], "chapter_0001")

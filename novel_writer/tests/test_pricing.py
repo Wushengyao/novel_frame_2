@@ -70,6 +70,22 @@ class PricingTests(unittest.TestCase):
         self.assertAlmostEqual(short_context["estimated_cost_usd"], (200_000 * 1.25 + 10_000 * 10.0) / 1_000_000)
         self.assertAlmostEqual(long_context["estimated_cost_usd"], (200_001 * 2.50 + 10_000 * 15.0) / 1_000_000)
 
+    def test_gemini_31_pro_alias_uses_preview_tiered_rates(self) -> None:
+        estimate = estimate_llm_cost(
+            "gemini",
+            "gemini-3.1-pro",
+            {
+                "prompt_tokens": 250_000,
+                "cached_tokens": 50_000,
+                "completion_tokens": 25_000,
+            },
+        )
+
+        expected = (200_000 * 4.0 + 50_000 * 0.40 + 25_000 * 18.0) / 1_000_000
+        self.assertEqual(estimate["pricing_status"], "priced")
+        self.assertEqual(estimate["model"], "gemini-3.1-pro-preview")
+        self.assertAlmostEqual(estimate["estimated_cost_usd"], expected)
+
     def test_xai_grok_420_uses_long_context_rates_above_200k_prompt_tokens(self) -> None:
         estimate = estimate_llm_cost(
             "grok",

@@ -343,6 +343,23 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(page.status, 200)
         self.assertIn("任务状态", page.body)
 
+    def test_job_page_renders_existing_events_on_first_load(self) -> None:
+        job = webui.JOB_REGISTRY.create_job(
+            kind="continue",
+            title="后台续写",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+        )
+        webui.JOB_REGISTRY.mark_running(job["id"], "后台任务已启动")
+        webui.JOB_REGISTRY.progress(job["id"], {"stage": "writer", "message": "正在写第 1 章"})
+
+        page = self._get(f"/job/{job['id']}")
+        self.assertEqual(page.status, 200)
+        self.assertIn("任务日志", page.body)
+        self.assertIn("任务已加入队列", page.body)
+        self.assertIn("后台任务已启动", page.body)
+        self.assertIn("正在写第 1 章", page.body)
+
     def test_continue_guided_rejects_blank_custom_option_without_user_idea(self) -> None:
         session = {
             "session_id": "session_web_custom",
@@ -665,7 +682,6 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                     "story_request": "娴嬭瘯鏁呬簨",
                     "quality_provider": "gemini",
                     "quality_model_name": "gemini-2.5-pro",
-                    "quality_temperature": "0.4",
                 },
                 {"OLLAMA_API_KEY": "", "GEMINI_API_KEY": "gemini-key"},
             )
@@ -673,7 +689,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(captured["config"]["quality_model"]["model_provider"], "gemini")
         self.assertEqual(captured["config"]["quality_model"]["model_name"], "gemini-2.5-pro")
         self.assertEqual(captured["config"]["quality_model"]["api_key"], "gemini-key")
-        self.assertEqual(captured["config"]["quality_model"]["temperature"], "0.4")
+        self.assertNotIn("temperature", captured["config"]["quality_model"])
 
     def test_runtime_overrides_include_quality_and_review_modes(self) -> None:
         overrides = webui._runtime_overrides_from_form(
@@ -732,13 +748,14 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             {
                 "quality_provider": "gemini",
                 "quality_model_name": "gemini-2.5-pro",
-                "quality_temperature": "0.3",
+                "temperature": "1.7",
             }
         )
 
         self.assertEqual(overrides["quality_model"]["model_provider"], "gemini")
         self.assertEqual(overrides["quality_model"]["model_name"], "gemini-2.5-pro")
-        self.assertEqual(overrides["quality_model"]["temperature"], "0.3")
+        self.assertNotIn("temperature", overrides)
+        self.assertNotIn("temperature", overrides["quality_model"])
 
     def test_runtime_overrides_includes_log_llm_payload_when_checked(self) -> None:
         overrides = webui._runtime_overrides_from_form(

@@ -31,7 +31,7 @@ class GuidedFlowTests(unittest.TestCase):
 
         self.assertEqual(overrides["quality_model"]["model_provider"], "gemini")
         self.assertEqual(overrides["quality_model"]["model_name"], "gemini-2.5-pro")
-        self.assertEqual(overrides["quality_model"]["temperature"], "0.4")
+        self.assertNotIn("temperature", overrides["quality_model"])
         self.assertEqual(overrides["quality_model"]["max_tokens"], "6000")
         self.assertEqual(overrides["quality_model"]["timeout"], "180")
 

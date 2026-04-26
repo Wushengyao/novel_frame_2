@@ -59,6 +59,7 @@ MODEL_PRESETS_PATH = Path(__file__).resolve().parent / "model_presets.json"
 DEFAULT_MODEL_PRESETS = {
     "gemini": [
         "gemini-3.1-flash-lite-preview",
+        "gemini-3.1-pro-preview",
         "gemini-2.5-flash",
         "gemini-2.5-pro",
     ],
@@ -84,7 +85,6 @@ RUNTIME_OVERRIDE_KEYS = (
     "provider",
     "model_name",
     "api_base",
-    "temperature",
     "max_tokens",
     "timeout",
     "planning_mode",
@@ -96,7 +96,6 @@ QUALITY_MODEL_OVERRIDE_KEYS = {
     "quality_provider": "model_provider",
     "quality_model_name": "model_name",
     "quality_api_base": "api_base",
-    "quality_temperature": "temperature",
     "quality_max_tokens": "max_tokens",
     "quality_timeout": "timeout",
 }

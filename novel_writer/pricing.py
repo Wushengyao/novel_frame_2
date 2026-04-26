@@ -76,6 +76,19 @@ GEMINI_RATES: dict[str, TokenRates | TieredTokenRates] = {
         cached_input_per_million=0.025,
         output_per_million=1.50,
     ),
+    "gemini-3.1-pro-preview": TieredTokenRates(
+        threshold_prompt_tokens=200_000,
+        short_context=TokenRates(
+            input_per_million=2.00,
+            cached_input_per_million=0.20,
+            output_per_million=12.00,
+        ),
+        long_context=TokenRates(
+            input_per_million=4.00,
+            cached_input_per_million=0.40,
+            output_per_million=18.00,
+        ),
+    ),
     "gemini-2.5-flash": TokenRates(
         input_per_million=0.30,
         cached_input_per_million=0.03,
@@ -116,6 +129,7 @@ XAI_RATES: dict[str, TieredTokenRates] = {
 MODEL_ALIASES = {
     ("deepseek", "deepseek-chat"): "deepseek-v4-flash",
     ("deepseek", "deepseek-reasoner"): "deepseek-v4-flash",
+    ("gemini", "gemini-3.1-pro"): "gemini-3.1-pro-preview",
     ("grok", "grok-4.20-non-reasoning"): "grok-4.20-beta-latest-non-reasoning",
     ("grok", "grok-4.20-non-reasoning-latest"): "grok-4.20-beta-latest-non-reasoning",
     ("grok", "grok-4.20-beta-non-reasoning"): "grok-4.20-beta-latest-non-reasoning",

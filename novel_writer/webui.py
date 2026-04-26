@@ -423,6 +423,8 @@ def _read_admin_action_status() -> dict:
 def _systemd_user_command_env() -> dict[str, str]:
     env = dict(os.environ)
     runtime_dir = str(env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}").strip()
+    if runtime_dir != "/":
+        runtime_dir = runtime_dir.rstrip("/")
     if runtime_dir:
         env["XDG_RUNTIME_DIR"] = runtime_dir
         env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime_dir}/bus")
@@ -701,7 +703,6 @@ def _quality_model_from_form(form: dict[str, str], api_keys: dict[str, str] | No
     if api_base:
         quality_model["api_base"] = api_base
     for form_key, config_key in (
-        ("quality_temperature", "temperature"),
         ("quality_max_tokens", "max_tokens"),
         ("quality_timeout", "timeout"),
     ):
@@ -1073,7 +1074,6 @@ def _runtime_overrides_from_form(form: dict[str, str]) -> dict[str, object]:
             "planning_mode": form.get("planning_mode"),
             "writing_quality_mode": form.get("writing_quality_mode"),
             "review_mode": form.get("review_mode"),
-            "temperature": form.get("temperature"),
             "max_tokens": form.get("max_tokens"),
             "timeout": form.get("timeout"),
             "api_base": form.get("api_base"),
@@ -1234,14 +1234,9 @@ def _render_runtime_override_fields(
         <input type="number" name="quality_timeout" placeholder="inherit or provider default">
       </label>
     </div>
-    <div class="two-col">
-      <label>Quality Temperature
-        <input type="number" step="0.1" name="quality_temperature" placeholder="inherit main">
-      </label>
-      <label>Quality Max Tokens
-        <input type="number" name="quality_max_tokens" placeholder="inherit main">
-      </label>
-    </div>
+    <label>Quality Max Tokens
+      <input type="number" name="quality_max_tokens" placeholder="inherit main">
+    </label>
     <div class="muted">Optional advanced model used only for craft brief, quality review, and rewrite.</div>
         """
         if include_quality_fields
@@ -1287,14 +1282,9 @@ def _render_runtime_override_fields(
         <input type="number" name="timeout" placeholder="沿用项目设置">
       </label>
     </div>
-    <div class="two-col">
-      <label>Temperature
-        <input type="number" step="0.1" name="temperature" placeholder="沿用项目设置">
-      </label>
-      <label>Max Tokens
-        <input type="number" name="max_tokens" placeholder="沿用项目设置">
-      </label>
-    </div>
+    <label>Max Tokens
+      <input type="number" name="max_tokens" placeholder="沿用项目设置">
+    </label>
     <label class="muted">
       <input type="checkbox" name="log_llm_payload" value="1">
       启用模型调用落盘（请求与返回将写入项目下 llm_logs，便于排查问题）
@@ -1325,7 +1315,6 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_cal
         "model_name": (resolved_model_name or _default_model_for_provider(provider)).strip(),
         "api_base": (form.get("api_base") or _default_api_base_for_provider(provider)).strip(),
         "api_key": api_key,
-        "temperature": float(form.get("temperature") or 0.9),
         "max_tokens": int(form.get("max_tokens") or 4000),
         "timeout": _resolve_timeout_for_provider(provider, form.get("timeout") or _default_timeout_for_provider(provider)),
     }
@@ -1571,6 +1560,23 @@ def _job_status_class(status: str) -> str:
         "failed": "status-failed",
     }
     return mapping.get(status, "status-neutral")
+
+
+def _render_job_events(events: object) -> str:
+    if not isinstance(events, list) or not events:
+        return '<li class="muted">暂无任务日志。</li>'
+    rows = []
+    for item in events:
+        if not isinstance(item, dict):
+            continue
+        event_time = str(item.get("time") or "").strip()
+        stage = str(item.get("stage") or "").strip()
+        message = str(item.get("message") or stage or "").strip()
+        stage_html = f' <span class="pill">{escape(stage)}</span>' if stage else ""
+        rows.append(
+            f'<li><span class="mono">{escape(event_time)}</span>{stage_html} {escape(message)}</li>'
+        )
+    return "".join(rows) or '<li class="muted">暂无任务日志。</li>'
 
 
 def _render_job_cards(jobs: list[dict], empty_text: str) -> str:
@@ -2960,7 +2966,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
           <section class="panel">
             <h3>任务日志</h3>
             <ol id="job-events" class="job-log">
-              {''.join(f"<li><span class='mono'>{escape(item.get('time', ''))}</span> {escape(item.get('message', ''))}</li>" for item in job.get("events", []))}
+              {_render_job_events(job.get("events"))}
             </ol>
           </section>
         </div>
@@ -2994,7 +3000,15 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             const percent = Math.max(0, Math.min(100, Math.round(current * 100 / total)));
             return `<div class="job-progress"><div class="job-progress-bar" style="width:${{percent}}%"></div></div><div class="muted">进度：${{current}}/${{total}}</div>`;
           }};
-          const renderEvents = (events) => events.map((item) => `<li><span class="mono">${{escapeHtml(item.time || "")}}</span> ${{escapeHtml(item.message || "")}}</li>`).join("");
+          const renderEvents = (events) => {{
+            const items = Array.isArray(events) ? events : [];
+            if (!items.length) return '<li class="muted">暂无任务日志。</li>';
+            return items.map((item) => {{
+              const stage = item.stage ? ` <span class="pill">${{escapeHtml(item.stage)}}</span>` : "";
+              const message = item.message || item.stage || "";
+              return `<li><span class="mono">${{escapeHtml(item.time || "")}}</span>${{stage}} ${{escapeHtml(message)}}</li>`;
+            }}).join("");
+          }};
           const update = async () => {{
             const resp = await fetch(`/api/jobs/${{encodeURIComponent(jobId)}}`, {{ cache: "no-store" }});
             if (!resp.ok) return;
@@ -3100,21 +3114,16 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                   <textarea name="story_request" placeholder="把你想写的题材、角色、世界观、节奏偏好写在这里"></textarea>
                 </label>
                 <div class="two-col">
-                  <label>Temperature
-                    <input type="number" step="0.1" name="temperature" value="0.9">
-                  </label>
                   <label>Max Tokens
                     <input type="number" name="max_tokens" value="4000">
                   </label>
-                </div>
-                <div class="two-col">
                   <label>Timeout
                     <input type="number" name="timeout" value="120">
                   </label>
-                  <label>API Base（可选）
-                    <input type="text" name="api_base" placeholder="如需自定义接口地址可填写">
-                  </label>
                 </div>
+                <label>API Base（可选）
+                  <input type="text" name="api_base" placeholder="如需自定义接口地址可填写">
+                </label>
                 <label>Planning Mode
                   <select name="planning_mode">
                     {_render_planning_mode_options(DEFAULT_PLANNING_MODE)}
@@ -3157,14 +3166,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                     <input type="number" name="quality_timeout" placeholder="inherit or provider default">
                   </label>
                 </div>
-                <div class="two-col">
-                  <label>Quality Temperature
-                    <input type="number" step="0.1" name="quality_temperature" placeholder="inherit main">
-                  </label>
-                  <label>Quality Max Tokens
-                    <input type="number" name="quality_max_tokens" placeholder="inherit main">
-                  </label>
-                </div>
+                <label>Quality Max Tokens
+                  <input type="number" name="quality_max_tokens" placeholder="inherit main">
+                </label>
                 <div class="muted">Optional advanced model used only for craft brief, quality review, and rewrite.</div>
                 <button type="submit">创建项目</button>
               </form>
@@ -3331,16 +3335,13 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 </label>
                 <div class="muted">Leave blank to use the project default. none is the freest, volume is balanced, chapter is the most controlled.</div>
                 <div class="two-col">
-                  <label>Temperature
-                    <input type="number" step="0.1" name="temperature" placeholder="沿用项目设置">
-                  </label>
                   <label>Max Tokens
                     <input type="number" name="max_tokens" placeholder="沿用项目设置">
                   </label>
+                  <label>Timeout
+                    <input type="number" name="timeout" placeholder="沿用项目设置">
+                  </label>
                 </div>
-                <label>Timeout
-                  <input type="number" name="timeout" placeholder="沿用项目设置">
-                </label>
                 <label><input type="checkbox" name="illustrate_generated" value="1"> 续写完成后立即调用 ComfyUI 生成插图</label>
                 <label>插图额外要求（可选）
                   <input type="text" name="illustration_request" placeholder="例如：突出雪夜窗景与室内暖光反差。">
@@ -3985,7 +3986,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
           </section>
           <section class="panel">
             <h3>任务日志</h3>
-            <ol id="job-events" class="job-log"></ol>
+            <ol id="job-events" class="job-log">
+              {_render_job_events(job.get("events"))}
+            </ol>
           </section>
         </div>
         <script>
@@ -4009,7 +4012,15 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             if (ch === "\"") return "&quot;";
             return "&#39;";
           }});
-          const renderEvents = (events) => (events || []).map((item) => `<li><span class="mono">${{escapeHtml(item.time || "")}}</span> ${{escapeHtml(item.message || "")}}</li>`).join("");
+          const renderEvents = (events) => {{
+            const items = Array.isArray(events) ? events : [];
+            if (!items.length) return '<li class="muted">暂无任务日志。</li>';
+            return items.map((item) => {{
+              const stage = item.stage ? ` <span class="pill">${{escapeHtml(item.stage)}}</span>` : "";
+              const message = item.message || item.stage || "";
+              return `<li><span class="mono">${{escapeHtml(item.time || "")}}</span>${{stage}} ${{escapeHtml(message)}}</li>`;
+            }}).join("");
+          }};
           const renderActions = (job) => {{
             if (job.result_url) {{
               return `<a href="${{escapeHtml(job.result_url)}}">${{escapeHtml(job.result_label || "查看结果")}}</a>`;

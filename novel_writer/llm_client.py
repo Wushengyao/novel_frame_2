@@ -66,13 +66,31 @@ PROVIDER_STRUCTURED_TEMPERATURES = {
     "ollama": 0.2,
 }
 LEGACY_DEFAULT_TEMPERATURES = {0.8, 0.9, 1.0}
-DEEPSEEK_V4_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
-DEEPSEEK_CREATIVE_TEMPERATURES = {
-    "writer": 1.3,
-    "rewrite": 1.1,
-    "polish": 1.2,
-    "illustration_prompt": 1.0,
+GEMINI_MODEL_ALIASES = {
+    "gemini-3.1-pro": "gemini-3.1-pro-preview",
 }
+GEMINI_31_PRO_CREATIVE_TEMPERATURES = {
+    "writer": 0.8,
+    "rewrite": 0.7,
+    "polish": 0.65,
+    "illustration_prompt": 0.6,
+}
+DEEPSEEK_V4_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
+DEEPSEEK_CREATIVE_TEMPERATURES_BY_MODEL = {
+    "deepseek-v4-flash": {
+        "writer": 1.3,
+        "rewrite": 1.1,
+        "polish": 1.2,
+        "illustration_prompt": 1.0,
+    },
+    "deepseek-v4-pro": {
+        "writer": 0.85,
+        "rewrite": 0.75,
+        "polish": 0.65,
+        "illustration_prompt": 0.6,
+    },
+}
+DEEPSEEK_CREATIVE_PHASES = {"writer", "rewrite", "polish", "illustration_prompt"}
 DEEPSEEK_REASONING_PHASES = {
     "init",
     "outline",
@@ -328,6 +346,18 @@ def _normalize_model_id(value: object) -> str:
     return str(value or "").strip().lower()
 
 
+def _strip_model_prefix(model: str) -> str:
+    normalized = _normalize_model_id(model)
+    if normalized.startswith("models/"):
+        return normalized.removeprefix("models/")
+    return normalized
+
+
+def _canonical_gemini_model_id(value: object) -> str:
+    normalized = _strip_model_prefix(str(value or ""))
+    return GEMINI_MODEL_ALIASES.get(normalized, normalized)
+
+
 def _is_nonempty(value: object) -> bool:
     return value not in (None, "")
 
@@ -338,6 +368,13 @@ def _is_legacy_default_temperature(value: object) -> bool:
     except (TypeError, ValueError):
         return False
     return any(abs(temperature - default) < 0.000001 for default in LEGACY_DEFAULT_TEMPERATURES)
+
+
+def _coerce_float(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_json_response_format(response_format: str = "") -> bool:
@@ -373,6 +410,34 @@ def _apply_temperature_defaults(
         next_temperature = PROVIDER_STRUCTURED_TEMPERATURES.get(provider)
     elif _phase_uses_creative_defaults(normalized_phase):
         next_temperature = PROVIDER_CREATIVE_TEMPERATURES.get(provider, {}).get(normalized_phase)
+
+    if next_temperature is None:
+        return config
+    optimized = dict(config)
+    optimized["temperature"] = next_temperature
+    return optimized
+
+
+def _apply_gemini_temperature_defaults(
+    config: dict[str, Any],
+    *,
+    model: str,
+    phase: str,
+    response_format: str,
+) -> dict[str, Any]:
+    raw_temperature = config.get("temperature")
+    if _is_nonempty(raw_temperature) and not _is_legacy_default_temperature(raw_temperature):
+        return config
+
+    normalized_phase = str(phase or "").strip().lower()
+    next_temperature: float | None = None
+    if _phase_uses_structured_defaults(normalized_phase, response_format):
+        next_temperature = PROVIDER_STRUCTURED_TEMPERATURES["gemini"]
+    elif _phase_uses_creative_defaults(normalized_phase):
+        if _canonical_gemini_model_id(model) == "gemini-3.1-pro-preview":
+            next_temperature = GEMINI_31_PRO_CREATIVE_TEMPERATURES.get(normalized_phase)
+        else:
+            next_temperature = PROVIDER_CREATIVE_TEMPERATURES["gemini"].get(normalized_phase)
 
     if next_temperature is None:
         return config
@@ -419,7 +484,7 @@ def _merge_generation_config(config: dict[str, Any], generation_config: object) 
 
 
 def _gemini_model_family(model: str) -> str:
-    normalized = _normalize_model_id(model)
+    normalized = _canonical_gemini_model_id(model)
     if normalized.startswith("gemini-3"):
         return "gemini-3"
     if normalized.startswith("gemini-2.5"):
@@ -433,10 +498,10 @@ def _apply_gemini_defaults(
     phase: str,
     response_format: str,
 ) -> dict[str, Any]:
-    model = _normalize_model_id(config.get("model") or config.get("model_name"))
-    optimized = _apply_temperature_defaults(
+    model = _canonical_gemini_model_id(config.get("model") or config.get("model_name"))
+    optimized = _apply_gemini_temperature_defaults(
         config,
-        provider="gemini",
+        model=model,
         phase=phase,
         response_format=response_format,
     )
@@ -591,7 +656,7 @@ def _apply_deepseek_v4_defaults(
     if explicit_thinking is None:
         thinking = (
             {"type": "disabled"}
-            if normalized_phase in DEEPSEEK_CREATIVE_TEMPERATURES
+            if normalized_phase in DEEPSEEK_CREATIVE_PHASES
             else {"type": "enabled" if reasoning_task else "disabled"}
         )
     else:
@@ -612,10 +677,22 @@ def _apply_deepseek_v4_defaults(
         omit_fields.update(DEEPSEEK_THINKING_INACTIVE_FIELDS)
     else:
         request_options.pop("reasoning_effort", None)
-        if _is_nonempty(config.get("temperature")) and not _is_legacy_default_temperature(config.get("temperature")):
+        model_temperatures = DEEPSEEK_CREATIVE_TEMPERATURES_BY_MODEL.get(model, {})
+        default_temperature = model_temperatures.get(normalized_phase, 1.0)
+        custom_temperature = _coerce_float(config.get("temperature"))
+        if model == "deepseek-v4-pro":
+            if (
+                custom_temperature is not None
+                and not _is_legacy_default_temperature(config.get("temperature"))
+                and 0.0 <= custom_temperature <= 1.0
+            ):
+                optimized["temperature"] = custom_temperature
+            else:
+                optimized["temperature"] = default_temperature
+        elif _is_nonempty(config.get("temperature")) and not _is_legacy_default_temperature(config.get("temperature")):
             optimized["temperature"] = config.get("temperature")
         else:
-            optimized["temperature"] = DEEPSEEK_CREATIVE_TEMPERATURES.get(normalized_phase, 1.0)
+            optimized["temperature"] = default_temperature
 
     optimized["request_options"] = request_options
     optimized["omit_request_fields"] = sorted(omit_fields)
@@ -693,6 +770,12 @@ def generate_text_with_metadata(
         return response_text, metadata
 
     if provider == "gemini":
+        raw_model = config.get("model") or config.get("model_name")
+        canonical_model = _canonical_gemini_model_id(raw_model)
+        if canonical_model and canonical_model != str(raw_model or "").strip():
+            config = dict(config)
+            config["model"] = canonical_model
+            config["model_name"] = canonical_model
         config = _apply_gemini_defaults(
             config,
             phase=phase,
