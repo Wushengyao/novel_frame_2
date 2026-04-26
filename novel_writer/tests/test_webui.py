@@ -1102,6 +1102,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
 
         self.assertEqual(page.status, 200)
         self.assertIn("本章有声小说", page.body)
+        self.assertIn("生成模式", page.body)
         self.assertIn("/project/web/audiobook-file/chapter_0001/chapter_0001.wav", page.body)
 
     def test_audiobook_endpoint_accepts_reference_upload_and_creates_job(self) -> None:
@@ -1127,6 +1128,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                 "/project/web/audiobook",
                 {
                     "chapter_slug": "chapter_0001",
+                    "generation_mode": "simple",
                     "narrator_preset": "calm_male",
                     "character_voice_name": "林宇",
                     "character_prompt_text": "这是参考文本",
@@ -1147,6 +1149,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         _, kwargs = mocked_generate.call_args
         self.assertEqual(kwargs["chapter_refs"], ["chapter_0001"])
         self.assertEqual(kwargs["narrator_preset"], "calm_male")
+        self.assertEqual(kwargs["generation_mode"], "simple")
         self.assertTrue(kwargs["force"])
 
         voices = load_json(str(self.project_path / "audiobook" / "voices.json"))

@@ -69,6 +69,23 @@ def generate_segment(model: VoxCPM, segment: dict, runtime: dict) -> tuple[int, 
     return int(model.tts_model.sample_rate), np.asarray(wav, dtype=np.float32)
 
 
+def generate_voice_reference(model: VoxCPM, task: dict, runtime: dict) -> tuple[int, np.ndarray]:
+    text = str(task.get("prompt_text") or "").strip()
+    if not text:
+        raise ValueError("voice reference prompt_text is empty")
+    segment = {
+        "text": text,
+        "voice": {
+            "control_instruction": str(task.get("control_instruction") or "").strip(),
+            "reference_audio": "",
+            "prompt_text": "",
+            "cfg_value": task.get("cfg_value"),
+            "inference_timesteps": task.get("inference_timesteps"),
+        },
+    }
+    return generate_segment(model, segment, runtime)
+
+
 def build_failure_manifest(request_data: dict, message: str) -> dict:
     return {
         "chapter_slug": request_data.get("chapter_slug", ""),
@@ -79,6 +96,8 @@ def build_failure_manifest(request_data: dict, message: str) -> dict:
         "narrator_id": request_data.get("narrator_id", ""),
         "combined_audio": "",
         "segments": request_data.get("segments", []),
+        "generation_mode": request_data.get("generation_mode", "advanced"),
+        "voice_references": request_data.get("voice_references", []),
         "voxcpm_runtime": request_data.get("runtime", {}),
         "split_config": request_data.get("split_config", {}),
     }
@@ -92,6 +111,9 @@ def run_request(request_path: str | Path) -> dict:
     manifest_path = Path(request_data["manifest_path"])
     runtime = request_data.get("runtime") or {}
     segments = request_data.get("segments") or []
+    voice_references = [dict(item) for item in request_data.get("voice_references") or []]
+    reference_by_voice_id = {str(item.get("voice_id") or ""): item for item in voice_references}
+    reference_tasks = request_data.get("voice_reference_tasks") or []
     if not segments:
         raise RuntimeError("request contains no segments")
 
@@ -108,6 +130,24 @@ def run_request(request_path: str | Path) -> dict:
     sample_rate = 0
     silence_ms = max(0, int(runtime.get("silence_ms") or 260))
     started = time.time()
+
+    for task in reference_tasks:
+        reference_started = time.time()
+        reference_path = Path(str(task.get("reference_audio") or "")).resolve()
+        reference_path.parent.mkdir(parents=True, exist_ok=True)
+        if reference_path.exists():
+            record = reference_by_voice_id.get(str(task.get("voice_id") or ""))
+            if record is not None:
+                record["generated"] = False
+                record["duration_seconds"] = 0
+            continue
+        sample_rate, reference_audio = generate_voice_reference(model, task, runtime)
+        sf.write(str(reference_path), reference_audio, sample_rate)
+        record = reference_by_voice_id.get(str(task.get("voice_id") or ""))
+        if record is not None:
+            record["generated"] = True
+            record["duration_seconds"] = round(float(len(reference_audio)) / float(sample_rate), 3) if sample_rate else 0
+            record["elapsed_seconds"] = round(time.time() - reference_started, 3)
 
     for index, segment in enumerate(segments, start=1):
         segment_started = time.time()
@@ -161,6 +201,8 @@ def run_request(request_path: str | Path) -> dict:
         "sample_rate": sample_rate,
         "segment_count": len(rendered_segments),
         "segments": rendered_segments,
+        "generation_mode": request_data.get("generation_mode", "advanced"),
+        "voice_references": voice_references,
         "voxcpm_runtime": {
             "model_id": runtime.get("model_id") or "openbmb/VoxCPM2",
             "device": runtime.get("device") or "auto",

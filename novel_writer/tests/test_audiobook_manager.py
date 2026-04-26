@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,6 +27,16 @@ from audiobook_manager import (
 )
 from project_manager import create_state_snapshot, load_json, rollback_project, save_json
 from tests.test_support import create_test_project
+
+
+def _tiny_wav_bytes() -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(8000)
+        wav_file.writeframes(b"\x00\x00" * 80)
+    return buffer.getvalue()
 
 
 class AudiobookManagerTests(unittest.TestCase):
@@ -114,6 +127,156 @@ class AudiobookManagerTests(unittest.TestCase):
         self.assertEqual(captured["payload"]["chapter_slug"], "chapter_0001")
         self.assertGreaterEqual(len(captured["payload"]["segments"]), 3)
         self.assertIn("voice", captured["payload"]["segments"][0])
+        self.assertEqual(captured["payload"]["generation_mode"], "advanced")
+        self.assertGreaterEqual(len(captured["payload"]["voice_reference_tasks"]), 3)
+
+    def test_simple_mode_uses_one_reference_voice_for_all_segments(self) -> None:
+        captured = {}
+
+        def fake_run_worker(request_path: Path, runtime: dict) -> subprocess.CompletedProcess:
+            payload = load_json(str(request_path))
+            captured["payload"] = payload
+            save_json(
+                payload["manifest_path"],
+                {
+                    "chapter_slug": payload["chapter_slug"],
+                    "generated_at": "2026-04-20T00:00:00+00:00",
+                    "status": "succeeded",
+                    "combined_audio": "audiobook/chapter_0001/chapter_0001.wav",
+                    "generation_mode": payload["generation_mode"],
+                    "voice_references": payload["voice_references"],
+                    "segment_count": len(payload["segments"]),
+                    "segments": payload["segments"],
+                },
+            )
+            return subprocess.CompletedProcess(["worker"], 0, stdout="ok", stderr="")
+
+        with patch("audiobook_manager._run_worker", side_effect=fake_run_worker):
+            generate_audiobook_chapter(
+                self.project_path,
+                "chapter_0001",
+                force=True,
+                generation_mode="simple",
+                runtime_overrides={"backend": "local_worker"},
+            )
+
+        payload = captured["payload"]
+        self.assertEqual(payload["generation_mode"], "simple")
+        self.assertEqual(len(payload["voice_reference_tasks"]), 1)
+        self.assertEqual(len({item["voice"]["voice_id"] for item in payload["segments"]}), 1)
+        self.assertEqual(len({item["voice"]["reference_audio"] for item in payload["segments"]}), 1)
+        self.assertTrue(all(item["voice"]["mode"] == "reference" for item in payload["segments"]))
+
+    def test_advanced_mode_builds_distinct_reference_tasks_for_narrator_and_characters(self) -> None:
+        captured = {}
+
+        def fake_run_worker(request_path: Path, runtime: dict) -> subprocess.CompletedProcess:
+            payload = load_json(str(request_path))
+            captured["payload"] = payload
+            save_json(
+                payload["manifest_path"],
+                {
+                    "chapter_slug": payload["chapter_slug"],
+                    "generated_at": "2026-04-20T00:00:00+00:00",
+                    "status": "succeeded",
+                    "combined_audio": "audiobook/chapter_0001/chapter_0001.wav",
+                    "generation_mode": payload["generation_mode"],
+                    "voice_references": payload["voice_references"],
+                    "segment_count": len(payload["segments"]),
+                    "segments": payload["segments"],
+                },
+            )
+            return subprocess.CompletedProcess(["worker"], 0, stdout="ok", stderr="")
+
+        with patch("audiobook_manager._run_worker", side_effect=fake_run_worker):
+            generate_audiobook_chapter(
+                self.project_path,
+                "chapter_0001",
+                force=True,
+                generation_mode="advanced",
+                runtime_overrides={"backend": "local_worker"},
+            )
+
+        tasks = captured["payload"]["voice_reference_tasks"]
+        task_ids = {task["voice_id"] for task in tasks}
+        self.assertIn("narrator:warm_female", task_ids)
+        self.assertIn("character:林宇", task_ids)
+        self.assertIn("character:苏浅", task_ids)
+        linyu_task = next(task for task in tasks if task["voice_id"] == "character:林宇")
+        self.assertIn("负责行动", linyu_task["control_instruction"])
+        self.assertIn("黑发，沉稳", linyu_task["control_instruction"])
+
+    def test_uploaded_reference_is_not_replaced_by_auto_reference_task(self) -> None:
+        save_uploaded_voice_reference(
+            self.project_path,
+            target="林宇",
+            uploaded_file=UploadedVoiceFile(filename="linyu.wav", content=_tiny_wav_bytes()),
+            prompt_text="上传参考文本",
+        )
+        captured = {}
+
+        def fake_run_worker(request_path: Path, runtime: dict) -> subprocess.CompletedProcess:
+            payload = load_json(str(request_path))
+            captured["payload"] = payload
+            save_json(
+                payload["manifest_path"],
+                {
+                    "chapter_slug": payload["chapter_slug"],
+                    "generated_at": "2026-04-20T00:00:00+00:00",
+                    "status": "succeeded",
+                    "combined_audio": "audiobook/chapter_0001/chapter_0001.wav",
+                    "generation_mode": payload["generation_mode"],
+                    "voice_references": payload["voice_references"],
+                    "segment_count": len(payload["segments"]),
+                    "segments": payload["segments"],
+                },
+            )
+            return subprocess.CompletedProcess(["worker"], 0, stdout="ok", stderr="")
+
+        with patch("audiobook_manager._run_worker", side_effect=fake_run_worker):
+            generate_audiobook_chapter(
+                self.project_path,
+                "chapter_0001",
+                force=True,
+                generation_mode="advanced",
+                runtime_overrides={"backend": "local_worker"},
+            )
+
+        self.assertNotIn("character:林宇", {task["voice_id"] for task in captured["payload"]["voice_reference_tasks"]})
+        linyu_segments = [item for item in captured["payload"]["segments"] if item["speaker"] == "林宇"]
+        self.assertTrue(linyu_segments)
+        self.assertTrue(all(item["voice"]["reference_source"] == "uploaded" for item in linyu_segments))
+        self.assertTrue(all(item["voice"]["prompt_text"] == "上传参考文本" for item in linyu_segments))
+
+    def test_audio_frame_generates_reference_before_segments(self) -> None:
+        calls = []
+
+        class FakeAudioFrameClient:
+            def __init__(self, api_base: str) -> None:
+                self.api_base = api_base
+
+            def synthesize(self, **kwargs):
+                calls.append(kwargs)
+                return {"audio_base64": base64.b64encode(_tiny_wav_bytes()).decode("ascii")}
+
+        with patch("audiobook_manager.AudioFrameClient", FakeAudioFrameClient):
+            manifest = generate_audiobook_chapter(
+                self.project_path,
+                "chapter_0001",
+                force=True,
+                generation_mode="simple",
+                runtime_overrides={"backend": "audio_frame", "audio_frame_api_base": "http://127.0.0.1:9999"},
+            )
+
+        self.assertEqual(manifest["generation_mode"], "simple")
+        self.assertGreater(len(calls), 1)
+        self.assertEqual(calls[0]["reference_audio"], "")
+        self.assertIn("参考音频", calls[0]["text"])
+        self.assertTrue(calls[1]["reference_audio"])
+        self.assertEqual(calls[1]["prompt_text"], calls[0]["text"])
+        voices = load_json(str(self.project_path / "audiobook" / "voices.json"))
+        self.assertEqual(voices["simple_voice"]["reference_source"], "auto")
+        self.assertTrue((self.project_path / voices["simple_voice"]["reference_audio"]).exists())
 
     def test_generate_audiobook_chapter_uses_external_service_config(self) -> None:
         service_config = Path(self.temp_dir.name) / "external_services.json"

@@ -565,7 +565,14 @@ python3 app.py next --project ./output/novel_project_xxx --config ./runtime_conf
 
 ## 9. VoxCPM2 有声小说
 
-项目支持把章节拆分成旁白、对话和内心独白片段，再通过 VoxCPM2 worker 合成为 WAV。
+项目支持把章节拆分成旁白、对话和内心独白片段，再通过 VoxCPM2 worker 或 Audio Frame 合成为 WAV。
+
+有声小说有两种生成模式：
+
+- `advanced`：默认模式。旁白使用用户选择的旁白预设；人物根据 `characters.json` 中的人物设定生成各自音色。
+- `simple`：整章统一音色。所有旁白、对话和内心独白都使用同一个旁白预设音色。
+
+为了避免同一角色在不同段落里音色漂移，系统会先为每种实际使用的音色生成项目级参考 WAV，后续片段都克隆这段参考音频。用户上传的旁白或角色参考 WAV 会优先使用，不会被自动参考音频覆盖。
 
 推荐先在 `external_services.json` 中配置：
 
@@ -585,6 +592,12 @@ python3 app.py next --project ./output/novel_project_xxx --config ./runtime_conf
 
 ```bash
 python3 app.py audiobook --project ./output/novel_project_xxx --chapter latest
+```
+
+简单模式示例：
+
+```bash
+python3 app.py audiobook --project ./output/novel_project_xxx --chapter latest --audiobook-mode simple
 ```
 
 临时覆盖示例：

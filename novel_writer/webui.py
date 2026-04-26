@@ -26,6 +26,8 @@ from uuid import uuid4
 
 from app import run_next_chapter_from_progression, run_next_chapters
 from audiobook_manager import (
+    GENERATION_MODE_ADVANCED,
+    GENERATION_MODE_SIMPLE,
     UploadedVoiceFile,
     audiobook_file_path,
     ensure_voice_config,
@@ -33,6 +35,7 @@ from audiobook_manager import (
     get_audiobook_record,
     list_audiobook_records,
     narrator_preset_options,
+    normalize_generation_mode,
     save_uploaded_voice_reference,
 )
 from chapter_context import peek_next_context_for_mode
@@ -1481,6 +1484,20 @@ def _render_narrator_preset_options(project_path: Path, selected: str = "") -> s
         selected_attr = ' selected' if value == active else ""
         label = str(preset.get("label") or value).strip()
         options.append(f'<option value="{escape(value)}"{selected_attr}>{escape(label)}</option>')
+    return "".join(options)
+
+
+def _render_audiobook_mode_options(project_path: Path, selected: str = "") -> str:
+    config = ensure_voice_config(str(project_path))
+    active = normalize_generation_mode(selected or config.get("generation_mode"))
+    labels = {
+        GENERATION_MODE_ADVANCED: "进阶模式：旁白/角色分音色",
+        GENERATION_MODE_SIMPLE: "简单模式：整章统一音色",
+    }
+    options = []
+    for value in (GENERATION_MODE_ADVANCED, GENERATION_MODE_SIMPLE):
+        selected_attr = ' selected' if value == active else ""
+        options.append(f'<option value="{escape(value)}"{selected_attr}>{escape(labels[value])}</option>')
     return "".join(options)
 
 
@@ -3800,6 +3817,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             illustration_gallery = "".join(cards)
         audiobook_record = get_audiobook_record(str(project_path), chapter_slug)
         audiobook_player_html = _render_audiobook_player(project_id, audiobook_record)
+        audiobook_mode_options_html = _render_audiobook_mode_options(project_path)
         narrator_options_html = _render_narrator_preset_options(project_path)
         character_voice_options_html = _render_character_voice_options(project_path)
 
@@ -3868,6 +3886,11 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <form method="post" action="/project/{escape(project_id)}/audiobook" enctype="multipart/form-data">
               <fieldset{busy_attr}>
                 <input type="hidden" name="chapter_slug" value="{escape(chapter_slug)}">
+                <label>生成模式
+                  <select name="generation_mode">
+                    {audiobook_mode_options_html}
+                  </select>
+                </label>
                 <label>旁白音色
                   <select name="narrator_preset">
                     {narrator_options_html}
@@ -4450,6 +4473,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             )
         illustration_gallery = "".join(illustration_cards) or "<p>当前还没有章节插图。</p>"
         audiobook_gallery = _render_audiobook_records(project_id, audiobook_records)
+        audiobook_mode_options_html = _render_audiobook_mode_options(project_path)
         narrator_options_html = _render_narrator_preset_options(project_path)
         character_voice_options_html = _render_character_voice_options(project_path)
         latest_chapter_text = escape(chapters[-1]["text"]) if chapters else "还没有正文。"
@@ -4590,6 +4614,11 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                   <label>目标章节
                     <select name="chapter_slug">
                       {''.join(chapter_options)}
+                    </select>
+                  </label>
+                  <label>生成模式
+                    <select name="generation_mode">
+                      {audiobook_mode_options_html}
                     </select>
                   </label>
                   <label>旁白音色
@@ -5047,6 +5076,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 chapter_refs=[chapter_slug],
                 force=bool(form.get("force")),
                 narrator_preset=(form.get("narrator_preset") or "").strip(),
+                generation_mode=normalize_generation_mode(form.get("generation_mode")),
                 progress_callback=progress_callback,
             )
             result = results[0]

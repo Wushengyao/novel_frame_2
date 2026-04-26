@@ -17,7 +17,12 @@ from chapter_context import get_next_context_for_mode, peek_next_context_for_mod
 from common_utils import emit_progress, utc_now
 from console_logger import log_error, log_info, log_success, log_warning
 from context_builder import build_writer_context, resolve_effective_chapter_task
-from audiobook_manager import chapter_refs_for_all, generate_audiobook_chapters
+from audiobook_manager import (
+    GENERATION_MODE_ADVANCED,
+    GENERATION_MODE_SIMPLE,
+    chapter_refs_for_all,
+    generate_audiobook_chapters,
+)
 from illustration_manager import illustrate_chapters, illustrate_project_assets
 from llm_client import generate_text_with_metadata
 from outline_manager import (
@@ -788,6 +793,12 @@ def main() -> None:
     audiobook_parser.add_argument("--all", action="store_true", help="Generate audiobook WAV files for all chapters")
     audiobook_parser.add_argument("--force", action="store_true", help="Regenerate existing audiobook files")
     audiobook_parser.add_argument("--narrator-preset", default="", help="Narrator preset id to use")
+    audiobook_parser.add_argument(
+        "--audiobook-mode",
+        choices=(GENERATION_MODE_ADVANCED, GENERATION_MODE_SIMPLE),
+        default=GENERATION_MODE_ADVANCED,
+        help="Audiobook voice mode: advanced uses narrator/character voices, simple uses one voice for all segments",
+    )
     _add_audiobook_arguments(audiobook_parser)
 
     status_parser = subparsers.add_parser("status", help="Show project status")
@@ -982,6 +993,7 @@ def main() -> None:
             chapter_refs=chapter_refs,
             force=args.force,
             narrator_preset=args.narrator_preset,
+            generation_mode=args.audiobook_mode,
             runtime_overrides=_extract_audiobook_overrides(args) or None,
         )
         print(f"Processed audiobook chapters: {len(results)}")

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -31,6 +33,10 @@ AUDIOBOOK_DIR_NAME = "audiobook"
 VOICE_REFS_DIR_NAME = "voice_refs"
 VOICES_FILENAME = "voices.json"
 NARRATOR_SPEAKER = "旁白"
+VOICE_CONFIG_VERSION = 2
+GENERATION_MODE_ADVANCED = "advanced"
+GENERATION_MODE_SIMPLE = "simple"
+GENERATION_MODES = {GENERATION_MODE_ADVANCED, GENERATION_MODE_SIMPLE}
 
 DEFAULT_SPLIT_CONFIG = {
     "target_chars": 80,
@@ -138,6 +144,59 @@ def _normalize_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "").replace("\r", " ").replace("\n", " ")).strip()
 
 
+def normalize_generation_mode(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in GENERATION_MODES else GENERATION_MODE_ADVANCED
+
+
+def _signature(payload: dict) -> str:
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(serialized.encode("utf-8")).hexdigest()[:16]
+
+
+def _reference_source(entry: dict) -> str:
+    source = str((entry or {}).get("reference_source") or "").strip().lower()
+    if source in {"uploaded", "auto"}:
+        return source
+    if str((entry or {}).get("reference_audio") or "").strip():
+        return "uploaded"
+    return ""
+
+
+def _voice_defaults() -> dict:
+    return {
+        "reference_audio": "",
+        "prompt_text": "",
+        "reference_source": "",
+        "reference_signature": "",
+        "profile_signature": "",
+        "cfg_value": 2.0,
+        "inference_timesteps": 10,
+    }
+
+
+def _reference_prompt_text(label: str) -> str:
+    clean_label = _normalize_text(label) or "有声小说音色"
+    return f"这是{clean_label}的有声小说参考音频，用于后续章节保持稳定音色。"
+
+
+def _reference_abs_path(project_path: str | Path, reference_audio: str) -> Path:
+    reference_path = Path(reference_audio)
+    if not reference_path.is_absolute():
+        reference_path = Path(project_path) / reference_path
+    return reference_path.resolve()
+
+
+def _reference_exists(project_path: str | Path, entry: dict) -> bool:
+    reference_audio = str((entry or {}).get("reference_audio") or "").strip()
+    return bool(reference_audio and _reference_abs_path(project_path, reference_audio).exists())
+
+
+def _auto_reference_relative(voice_id: str, reference_signature: str) -> str:
+    safe_voice_id = re.sub(r"[^\w\-]+", "_", voice_id, flags=re.UNICODE).strip("_") or "voice"
+    return f"{AUDIOBOOK_DIR_NAME}/{VOICE_REFS_DIR_NAME}/auto_{safe_voice_id}_{reference_signature}.wav"
+
+
 def _all_characters(characters: dict) -> list[dict]:
     result = []
     for group in ("protagonists", "supporting"):
@@ -163,28 +222,97 @@ def _default_character_voice(character: dict) -> dict:
         control = f"中文有声小说角色音色，符合{name}的人物设定：{traits}。台词自然，情绪贴合剧情，避免夸张播音腔"
     else:
         control = f"中文有声小说角色音色，符合{name}的人物设定，台词自然，情绪贴合剧情"
-    return {
-        "control_instruction": control,
-        "reference_audio": "",
-        "prompt_text": "",
-        "cfg_value": 2.0,
-        "inference_timesteps": 10,
-    }
+    profile_signature = _signature(
+        {
+            "kind": "character",
+            "name": name,
+            "role": role,
+            "description": description,
+            "appearance": appearance,
+            "control_instruction": control,
+        }
+    )
+    voice = _voice_defaults()
+    voice.update(
+        {
+            "control_instruction": control,
+            "profile_signature": profile_signature,
+        }
+    )
+    return voice
+
+
+def _narrator_profile_signature(preset: dict) -> str:
+    return _signature(
+        {
+            "kind": "narrator",
+            "id": str(preset.get("id") or "").strip(),
+            "control_instruction": str(preset.get("control_instruction") or "").strip(),
+        }
+    )
+
+
+def _default_simple_voice(preset: dict) -> dict:
+    voice = _voice_defaults()
+    control = str(preset.get("control_instruction") or "").strip()
+    voice.update(
+        {
+            "control_instruction": control,
+            "profile_signature": _signature(
+                {
+                    "kind": "simple",
+                    "narrator_id": str(preset.get("id") or "").strip(),
+                    "control_instruction": control,
+                }
+            ),
+        }
+    )
+    return voice
+
+
+def _default_narrator_reference(preset: dict) -> dict:
+    voice = _voice_defaults()
+    voice["profile_signature"] = _narrator_profile_signature(preset)
+    return voice
+
+
+def _merge_voice_entry(default_voice: dict, existing: dict | None, *, preserve_control: bool = False) -> dict:
+    merged = dict(default_voice)
+    if isinstance(existing, dict):
+        merged.update(existing)
+        if not preserve_control:
+            merged["control_instruction"] = default_voice.get("control_instruction", merged.get("control_instruction", ""))
+        if str(existing.get("reference_audio") or "").strip() and not str(existing.get("reference_source") or "").strip():
+            merged["reference_source"] = "uploaded"
+    if default_voice.get("profile_signature"):
+        merged["profile_signature"] = default_voice["profile_signature"]
+    merged.setdefault("reference_source", _reference_source(merged))
+    merged.setdefault("reference_signature", "")
+    merged.setdefault("profile_signature", default_voice.get("profile_signature", ""))
+    merged.setdefault("prompt_text", "")
+    merged.setdefault("reference_audio", "")
+    merged.setdefault("cfg_value", default_voice.get("cfg_value", 2.0))
+    merged.setdefault("inference_timesteps", default_voice.get("inference_timesteps", 10))
+    return merged
+
+
+def _refresh_simple_voice_for_selected_narrator(config: dict) -> None:
+    preset = _selected_narrator(config)
+    existing = config.get("simple_voice") if isinstance(config.get("simple_voice"), dict) else {}
+    config["simple_voice"] = _merge_voice_entry(_default_simple_voice(preset), existing)
 
 
 def _default_voice_config(project_data: dict) -> dict:
     characters = _all_characters(project_data.get("characters") or {})
+    selected_preset = NARRATOR_PRESETS[0]
     return {
-        "version": 1,
+        "version": VOICE_CONFIG_VERSION,
         "updated_at": utc_now(),
-        "selected_narrator_id": NARRATOR_PRESETS[0]["id"],
+        "generation_mode": GENERATION_MODE_ADVANCED,
+        "selected_narrator_id": selected_preset["id"],
         "narrator_presets": NARRATOR_PRESETS,
-        "narrator_reference": {
-            "reference_audio": "",
-            "prompt_text": "",
-            "cfg_value": 2.0,
-            "inference_timesteps": 10,
-        },
+        "narrator_reference": _default_narrator_reference(selected_preset),
+        "simple_voice": _default_simple_voice(selected_preset),
         "character_voices": {
             str(character.get("name", "")).strip(): _default_character_voice(character)
             for character in characters
@@ -205,19 +333,19 @@ def ensure_voice_config(project_path: str | Path) -> dict:
         config = {}
 
     defaults = _default_voice_config(project_data)
-    config.setdefault("version", defaults["version"])
+    config["version"] = VOICE_CONFIG_VERSION
+    config["generation_mode"] = normalize_generation_mode(config.get("generation_mode") or defaults["generation_mode"])
     config.setdefault("selected_narrator_id", defaults["selected_narrator_id"])
     config["narrator_presets"] = defaults["narrator_presets"]
-    config.setdefault("narrator_reference", defaults["narrator_reference"])
+    config["narrator_reference"] = _merge_voice_entry(
+        _default_narrator_reference(_selected_narrator(config)),
+        config.get("narrator_reference") if isinstance(config.get("narrator_reference"), dict) else {},
+        preserve_control=True,
+    )
+    _refresh_simple_voice_for_selected_narrator(config)
     config.setdefault("character_voices", {})
     for name, default_voice in defaults["character_voices"].items():
-        existing = config["character_voices"].get(name)
-        if isinstance(existing, dict):
-            merged = dict(default_voice)
-            merged.update(existing)
-            config["character_voices"][name] = merged
-        else:
-            config["character_voices"][name] = default_voice
+        config["character_voices"][name] = _merge_voice_entry(default_voice, config["character_voices"].get(name))
     config["updated_at"] = utc_now()
     save_json(str(path), config)
     return config
@@ -225,6 +353,8 @@ def ensure_voice_config(project_path: str | Path) -> dict:
 
 def save_voice_config(project_path: str | Path, config: dict) -> dict:
     config = dict(config)
+    config["version"] = VOICE_CONFIG_VERSION
+    config["generation_mode"] = normalize_generation_mode(config.get("generation_mode"))
     config["updated_at"] = utc_now()
     save_json(str(_voices_path(project_path)), config)
     return config
@@ -248,6 +378,12 @@ def update_selected_narrator(project_path: str | Path, narrator_preset: str) -> 
     valid_ids = {str(item.get("id") or "").strip() for item in config.get("narrator_presets") or []}
     if requested and requested in valid_ids:
         config["selected_narrator_id"] = requested
+        config["narrator_reference"] = _merge_voice_entry(
+            _default_narrator_reference(_selected_narrator(config)),
+            config.get("narrator_reference") if isinstance(config.get("narrator_reference"), dict) else {},
+            preserve_control=True,
+        )
+        _refresh_simple_voice_for_selected_narrator(config)
         save_voice_config(project_path, config)
     return config
 
@@ -285,10 +421,15 @@ def save_uploaded_voice_reference(
     payload = {
         "reference_audio": relative,
         "prompt_text": str(prompt_text or "").strip(),
+        "reference_source": "uploaded",
+        "reference_signature": hashlib.sha1(uploaded_file.content).hexdigest()[:16],
     }
     if normalized_target == "narrator":
         config.setdefault("narrator_reference", {})
         config["narrator_reference"].update(payload)
+    elif normalized_target == "simple":
+        config.setdefault("simple_voice", {})
+        config["simple_voice"].update(payload)
     else:
         config.setdefault("character_voices", {})
         existing = config["character_voices"].setdefault(normalized_target, {})
@@ -588,50 +729,258 @@ def parse_chapter_segments(
     return segments
 
 
-def _voice_for_segment(project_path: str | Path, voice_config: dict, segment: dict) -> dict:
-    speaker = str(segment.get("speaker") or NARRATOR_SPEAKER).strip() or NARRATOR_SPEAKER
+def _voice_float(entry: dict, key: str) -> float:
+    try:
+        return float((entry or {}).get(key) or DEFAULT_AUDIOBOOK_RUNTIME[key])
+    except (TypeError, ValueError, KeyError):
+        return float(DEFAULT_AUDIOBOOK_RUNTIME.get(key, 2.0))
+
+
+def _voice_int(entry: dict, key: str) -> int:
+    try:
+        return int((entry or {}).get(key) or DEFAULT_AUDIOBOOK_RUNTIME[key])
+    except (TypeError, ValueError, KeyError):
+        return int(DEFAULT_AUDIOBOOK_RUNTIME.get(key, 10))
+
+
+def _voice_reference_plan(
+    project_path: str | Path,
+    *,
+    target_type: str,
+    target_name: str,
+    voice_id: str,
+    label: str,
+    control_instruction: str,
+    entry: dict,
+    profile_signature: str,
+) -> tuple[dict, dict, dict | None]:
+    entry = entry if isinstance(entry, dict) else {}
+    source = _reference_source(entry)
+    cfg_value = _voice_float(entry, "cfg_value")
+    inference_timesteps = _voice_int(entry, "inference_timesteps")
+    reference_prompt = str(entry.get("prompt_text") or "").strip() or _reference_prompt_text(label)
+    reference_signature = _signature(
+        {
+            "voice_id": voice_id,
+            "profile_signature": profile_signature,
+            "prompt_text": reference_prompt,
+            "control_instruction": control_instruction,
+        }
+    )
+
+    task: dict | None = None
+    if source == "uploaded":
+        relative_reference = str(entry.get("reference_audio") or "").strip()
+        if not relative_reference:
+            raise RuntimeError(f"{label} 的上传参考音频路径为空，无法生成有声章节。")
+        reference_path = _reference_abs_path(project_path, relative_reference)
+        if not reference_path.exists():
+            raise RuntimeError(f"{label} 的上传参考音频不存在：{relative_reference}")
+        reference_signature = str(entry.get("reference_signature") or reference_signature)
+    else:
+        planned_relative = _auto_reference_relative(voice_id, reference_signature)
+        entry_relative = str(entry.get("reference_audio") or "").strip()
+        if (
+            source == "auto"
+            and entry_relative
+            and str(entry.get("profile_signature") or "") == profile_signature
+            and str(entry.get("reference_signature") or "") == reference_signature
+            and _reference_exists(project_path, entry)
+        ):
+            relative_reference = entry_relative
+        elif (Path(project_path) / planned_relative).exists():
+            relative_reference = planned_relative
+        else:
+            relative_reference = planned_relative
+            task = {
+                "voice_id": voice_id,
+                "target_type": target_type,
+                "target_name": target_name,
+                "label": label,
+                "control_instruction": control_instruction,
+                "reference_audio": str(_reference_abs_path(project_path, relative_reference)),
+                "reference_audio_relative": relative_reference,
+                "prompt_text": reference_prompt,
+                "reference_source": "auto",
+                "reference_signature": reference_signature,
+                "profile_signature": profile_signature,
+                "cfg_value": cfg_value,
+                "inference_timesteps": inference_timesteps,
+            }
+        source = "auto"
+
+    reference_path = _reference_abs_path(project_path, relative_reference)
+    voice = {
+        "voice_id": voice_id,
+        "speaker": target_name or label,
+        "control_instruction": control_instruction,
+        "reference_audio": str(reference_path),
+        "prompt_text": reference_prompt if source == "auto" else str(entry.get("prompt_text") or "").strip(),
+        "reference_source": source,
+        "reference_signature": reference_signature,
+        "profile_signature": profile_signature,
+        "cfg_value": cfg_value,
+        "inference_timesteps": inference_timesteps,
+        "mode": "reference",
+    }
+    record = {
+        "voice_id": voice_id,
+        "target_type": target_type,
+        "target_name": target_name,
+        "label": label,
+        "reference_audio": relative_reference,
+        "prompt_text": voice["prompt_text"],
+        "reference_source": source,
+        "reference_signature": reference_signature,
+        "profile_signature": profile_signature,
+        "control_instruction": control_instruction,
+        "generated": bool(task),
+    }
+    return voice, record, task
+
+
+def _simple_voice_descriptor(project_path: str | Path, voice_config: dict) -> tuple[dict, dict, dict | None]:
+    preset = _selected_narrator(voice_config)
+    narrator_ref = voice_config.get("narrator_reference") if isinstance(voice_config.get("narrator_reference"), dict) else {}
+    if _reference_source(narrator_ref) == "uploaded":
+        entry = narrator_ref
+        target_type = "narrator"
+        target_name = NARRATOR_SPEAKER
+        voice_id = f"simple:{preset.get('id', 'default')}:uploaded_narrator"
+    else:
+        entry = voice_config.get("simple_voice") if isinstance(voice_config.get("simple_voice"), dict) else {}
+        target_type = "simple"
+        target_name = "统一音色"
+        voice_id = f"simple:{preset.get('id', 'default')}"
+    control = str((entry or {}).get("control_instruction") or preset.get("control_instruction") or "").strip()
+    profile_signature = _signature(
+        {
+            "kind": "simple",
+            "narrator_id": str(preset.get("id") or "").strip(),
+            "control_instruction": control,
+        }
+    )
+    return _voice_reference_plan(
+        project_path,
+        target_type=target_type,
+        target_name=target_name,
+        voice_id=voice_id,
+        label="统一音色",
+        control_instruction=control,
+        entry=entry,
+        profile_signature=profile_signature,
+    )
+
+
+def _advanced_voice_descriptor(
+    project_path: str | Path,
+    voice_config: dict,
+    speaker: str,
+) -> tuple[dict, dict, dict | None]:
     if speaker == NARRATOR_SPEAKER:
         preset = _selected_narrator(voice_config)
-        narrator_ref = voice_config.get("narrator_reference") or {}
-        voice = {
-            "voice_id": f"narrator:{preset.get('id', 'default')}",
-            "speaker": NARRATOR_SPEAKER,
-            "control_instruction": str(preset.get("control_instruction", "") or "").strip(),
-            "reference_audio": str(narrator_ref.get("reference_audio", "") or "").strip(),
-            "prompt_text": str(narrator_ref.get("prompt_text", "") or "").strip(),
-            "cfg_value": float(narrator_ref.get("cfg_value") or DEFAULT_AUDIOBOOK_RUNTIME["cfg_value"]),
-            "inference_timesteps": int(narrator_ref.get("inference_timesteps") or DEFAULT_AUDIOBOOK_RUNTIME["inference_timesteps"]),
-        }
-    else:
-        character_voice = (voice_config.get("character_voices") or {}).get(speaker) or {}
-        voice = {
-            "voice_id": f"character:{speaker}",
-            "speaker": speaker,
-            "control_instruction": str(character_voice.get("control_instruction", "") or "").strip(),
-            "reference_audio": str(character_voice.get("reference_audio", "") or "").strip(),
-            "prompt_text": str(character_voice.get("prompt_text", "") or "").strip(),
-            "cfg_value": float(character_voice.get("cfg_value") or DEFAULT_AUDIOBOOK_RUNTIME["cfg_value"]),
-            "inference_timesteps": int(character_voice.get("inference_timesteps") or DEFAULT_AUDIOBOOK_RUNTIME["inference_timesteps"]),
-        }
+        entry = voice_config.get("narrator_reference") if isinstance(voice_config.get("narrator_reference"), dict) else {}
+        control = str(preset.get("control_instruction") or "").strip()
+        return _voice_reference_plan(
+            project_path,
+            target_type="narrator",
+            target_name=NARRATOR_SPEAKER,
+            voice_id=f"narrator:{preset.get('id', 'default')}",
+            label=NARRATOR_SPEAKER,
+            control_instruction=control,
+            entry=entry,
+            profile_signature=_narrator_profile_signature(preset),
+        )
 
-    if voice["reference_audio"]:
-        reference_path = Path(voice["reference_audio"])
-        if not reference_path.is_absolute():
-            reference_path = Path(project_path) / reference_path
-        voice["reference_audio"] = str(reference_path.resolve())
-        voice["mode"] = "reference"
-    else:
-        voice["mode"] = "design"
-    return voice
+    character_voice = (voice_config.get("character_voices") or {}).get(speaker) or {}
+    if not isinstance(character_voice, dict):
+        character_voice = {}
+    control = str(character_voice.get("control_instruction") or f"中文有声小说角色音色，符合{speaker}的人物设定，台词自然，情绪贴合剧情").strip()
+    profile_signature = str(character_voice.get("profile_signature") or "") or _signature(
+        {"kind": "character", "name": speaker, "control_instruction": control}
+    )
+    return _voice_reference_plan(
+        project_path,
+        target_type="character",
+        target_name=speaker,
+        voice_id=f"character:{speaker}",
+        label=speaker,
+        control_instruction=control,
+        entry=character_voice,
+        profile_signature=profile_signature,
+    )
 
 
-def _build_worker_segments(project_path: str | Path, voice_config: dict, segments: list[dict]) -> list[dict]:
+def _build_voice_plan(
+    project_path: str | Path,
+    voice_config: dict,
+    segments: list[dict],
+    generation_mode: str,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    mode = normalize_generation_mode(generation_mode)
+    voice_cache: dict[str, dict] = {}
+    reference_records: dict[str, dict] = {}
+    reference_tasks: dict[str, dict] = {}
+
+    if mode == GENERATION_MODE_SIMPLE:
+        voice, record, task = _simple_voice_descriptor(project_path, voice_config)
+        voice_cache["__simple__"] = voice
+        reference_records[voice["voice_id"]] = record
+        if task:
+            reference_tasks[voice["voice_id"]] = task
+
     worker_segments = []
     for segment in segments:
         item = dict(segment)
-        item["voice"] = _voice_for_segment(project_path, voice_config, item)
+        if mode == GENERATION_MODE_SIMPLE:
+            voice = voice_cache["__simple__"]
+        else:
+            speaker = str(item.get("speaker") or NARRATOR_SPEAKER).strip() or NARRATOR_SPEAKER
+            cache_key = speaker
+            if cache_key not in voice_cache:
+                voice, record, task = _advanced_voice_descriptor(project_path, voice_config, speaker)
+                voice_cache[cache_key] = voice
+                reference_records[voice["voice_id"]] = record
+                if task:
+                    reference_tasks[voice["voice_id"]] = task
+            voice = voice_cache[cache_key]
+        item["voice"] = dict(voice)
         worker_segments.append(item)
-    return worker_segments
+
+    return worker_segments, list(reference_records.values()), list(reference_tasks.values())
+
+
+def _apply_voice_reference_records(project_path: str | Path, voice_config: dict, voice_references: list[dict]) -> dict:
+    changed = False
+    for reference in voice_references or []:
+        if str(reference.get("reference_source") or "").strip() != "auto":
+            continue
+        payload = {
+            "reference_audio": str(reference.get("reference_audio") or "").strip(),
+            "prompt_text": str(reference.get("prompt_text") or "").strip(),
+            "reference_source": "auto",
+            "reference_signature": str(reference.get("reference_signature") or "").strip(),
+            "profile_signature": str(reference.get("profile_signature") or "").strip(),
+        }
+        if not payload["reference_audio"]:
+            continue
+        target_type = str(reference.get("target_type") or "").strip()
+        target_name = str(reference.get("target_name") or "").strip()
+        if target_type == "narrator":
+            entry = voice_config.setdefault("narrator_reference", {})
+        elif target_type == "simple":
+            entry = voice_config.setdefault("simple_voice", {})
+        elif target_type == "character" and target_name:
+            entry = voice_config.setdefault("character_voices", {}).setdefault(target_name, {})
+        else:
+            continue
+        if _reference_source(entry) == "uploaded":
+            continue
+        entry.update(payload)
+        changed = True
+    if changed:
+        return save_voice_config(project_path, voice_config)
+    return voice_config
 
 
 def get_audiobook_record(project_path: str | Path, chapter_slug: str) -> dict | None:
@@ -757,6 +1106,38 @@ def _run_audio_frame_service(request_payload: dict, runtime_overrides: dict | No
     manifest_path = Path(request_payload["manifest_path"])
     segments_dir.mkdir(parents=True, exist_ok=True)
 
+    voice_references = [dict(item) for item in request_payload.get("voice_references") or []]
+    reference_by_voice_id = {str(item.get("voice_id") or ""): item for item in voice_references}
+    reference_tasks = request_payload.get("voice_reference_tasks") or []
+    for index, task in enumerate(reference_tasks, start=1):
+        emit_progress(
+            progress_callback,
+            "audiobook_voice_reference",
+            f"Audio Frame 正在生成参考音色 {index}/{len(reference_tasks)}",
+            current=index - 1,
+            total=len(reference_tasks),
+        )
+        response = client.synthesize(
+            text=str(task.get("prompt_text") or ""),
+            control_instruction=str(task.get("control_instruction") or ""),
+            reference_audio="",
+            prompt_text="",
+            cfg_value=float(task.get("cfg_value") or request_payload["runtime"].get("cfg_value") or 2.0),
+            normalize=bool(request_payload["runtime"].get("normalize", True)),
+            denoise=False,
+            inference_timesteps=int(
+                task.get("inference_timesteps") or request_payload["runtime"].get("inference_timesteps") or 10
+            ),
+            timeout=int(runtime.get("timeout") or 0),
+        )
+        reference_path = Path(str(task.get("reference_audio") or "")).resolve()
+        reference_path.parent.mkdir(parents=True, exist_ok=True)
+        reference_path.write_bytes(base64.b64decode(str(response.get("audio_base64") or "")))
+        record = reference_by_voice_id.get(str(task.get("voice_id") or ""))
+        if record is not None:
+            record["generated"] = True
+            record["duration_seconds"] = round(_wav_duration_seconds(reference_path), 3)
+
     generated_paths: list[Path] = []
     manifest_segments = []
     segments = request_payload.get("segments") or []
@@ -765,7 +1146,7 @@ def _run_audio_frame_service(request_payload: dict, runtime_overrides: dict | No
         emit_progress(
             progress_callback,
             "audiobook_audio_frame",
-            f"Audio Frame 姝ｅ湪鍚堟垚 {index}/{len(segments)}",
+            f"Audio Frame 正在合成 {index}/{len(segments)}",
             current=index - 1,
             total=len(segments),
         )
@@ -807,6 +1188,8 @@ def _run_audio_frame_service(request_payload: dict, runtime_overrides: dict | No
             "segment_count": len(manifest_segments),
             "segments": manifest_segments,
             "narrator_id": request_payload.get("narrator_id", ""),
+            "generation_mode": request_payload.get("generation_mode", GENERATION_MODE_ADVANCED),
+            "voice_references": voice_references,
             "split_config": request_payload.get("split_config", {}),
             "audio_frame": {
                 "api_base": runtime["api_base"],
@@ -821,6 +1204,7 @@ def generate_audiobook_chapter(
     *,
     force: bool = False,
     narrator_preset: str = "",
+    generation_mode: str = GENERATION_MODE_ADVANCED,
     runtime_overrides: dict | None = None,
     split_config: dict | None = None,
     progress_callback=None,
@@ -838,7 +1222,11 @@ def generate_audiobook_chapter(
             emit_progress(progress_callback, "audiobook_reused", f"{chapter_slug} 已复用已有音频")
             return existing
 
+    resolved_generation_mode = normalize_generation_mode(generation_mode)
     voice_config = update_selected_narrator(project_path, narrator_preset) if narrator_preset else ensure_voice_config(project_path)
+    if voice_config.get("generation_mode") != resolved_generation_mode:
+        voice_config["generation_mode"] = resolved_generation_mode
+        voice_config = save_voice_config(project_path, voice_config)
     project_data = load_project(str(project_path))
     split_config_resolved = dict(DEFAULT_SPLIT_CONFIG)
     split_config_resolved.update(split_config or {})
@@ -856,6 +1244,12 @@ def generate_audiobook_chapter(
         if segments_dir.exists():
             shutil.rmtree(segments_dir)
     segments_dir.mkdir(parents=True, exist_ok=True)
+    worker_segments, voice_references, voice_reference_tasks = _build_voice_plan(
+        project_path,
+        voice_config,
+        segments,
+        resolved_generation_mode,
+    )
 
     request_payload = {
         "project_path": str(project_path.resolve()),
@@ -866,7 +1260,10 @@ def generate_audiobook_chapter(
         "manifest_path": str(manifest_path.resolve()),
         "combined_audio_path": str((record_dir / f"{chapter_slug}.wav").resolve()),
         "narrator_id": str(voice_config.get("selected_narrator_id") or ""),
-        "segments": _build_worker_segments(project_path, voice_config, segments),
+        "generation_mode": resolved_generation_mode,
+        "segments": worker_segments,
+        "voice_references": voice_references,
+        "voice_reference_tasks": voice_reference_tasks,
         "runtime": runtime,
         "split_config": split_config_resolved,
     }
@@ -887,6 +1284,7 @@ def generate_audiobook_chapter(
         raise RuntimeError(f"VoxCPM2 worker 未生成 manifest.json。\n{detail}")
 
     manifest = load_json(str(manifest_path))
+    voice_config = _apply_voice_reference_records(project_path, voice_config, manifest.get("voice_references") or [])
     manifest["reused"] = False
     emit_progress(progress_callback, "audiobook_done", f"{chapter_slug} 的有声章节已完成", current=len(segments), total=len(segments))
     return manifest
@@ -898,6 +1296,7 @@ def generate_audiobook_chapters(
     chapter_refs: list[str] | None = None,
     force: bool = False,
     narrator_preset: str = "",
+    generation_mode: str = GENERATION_MODE_ADVANCED,
     runtime_overrides: dict | None = None,
     progress_callback=None,
 ) -> list[dict]:
@@ -917,6 +1316,7 @@ def generate_audiobook_chapters(
                 chapter_ref,
                 force=force,
                 narrator_preset=narrator_preset,
+                generation_mode=generation_mode,
                 runtime_overrides=runtime_overrides,
                 progress_callback=progress_callback,
             )
