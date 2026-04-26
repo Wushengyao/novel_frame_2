@@ -426,6 +426,23 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("后台任务已启动", page.body)
         self.assertIn("正在写第 1 章", page.body)
 
+    def test_failed_job_page_renders_error_on_first_load(self) -> None:
+        job = webui.JOB_REGISTRY.create_job(
+            kind="continue",
+            title="background continue",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+        )
+        webui.JOB_REGISTRY.finish_failure(
+            job["id"],
+            "当前项目已有写作任务正在运行，请稍后再试。\n\nTraceback line",
+        )
+
+        page = self._get(f"/job/{job['id']}")
+        self.assertEqual(page.status, 200)
+        self.assertIn("当前项目已有写作任务正在运行", page.body)
+        self.assertIn("Traceback line", page.body)
+
     def test_continue_guided_rejects_blank_custom_option_without_user_idea(self) -> None:
         session = {
             "session_id": "session_web_custom",

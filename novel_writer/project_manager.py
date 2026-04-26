@@ -124,6 +124,12 @@ ROLLBACK_SUMMARY_KEYS = (
     "next_chapter_goal",
 )
 PROJECT_WRITE_LOCK_FILENAME = ".project_write.lock"
+PROJECT_WRITE_LOCK_PROCESS_MARKERS = (
+    "webui.py",
+    "app.py",
+    "python",
+    "uv",
+)
 
 
 class ProjectWriteLockError(RuntimeError):
@@ -184,6 +190,8 @@ class ProjectWriteLock:
                 self._acquired = True
                 return self
             except FileExistsError as exc:
+                if self._discard_stale_lock():
+                    continue
                 if self.timeout <= 0 or time.monotonic() >= deadline:
                     raise ProjectWriteLockError(self._busy_message()) from exc
                 time.sleep(self.poll_interval)
@@ -210,8 +218,66 @@ class ProjectWriteLock:
         )
 
 
+    def _discard_stale_lock(self) -> bool:
+        try:
+            lock_text = self.lock_path.read_text(encoding="utf-8")
+            lock_data = json.loads(lock_text)
+        except (OSError, ValueError, TypeError):
+            return False
+
+        if _lock_owner_process_still_active(lock_data):
+            return False
+
+        try:
+            if self.lock_path.read_text(encoding="utf-8") != lock_text:
+                return False
+            self.lock_path.unlink()
+            return True
+        except OSError:
+            return False
+
+
 def acquire_project_write_lock(project_path: str, *, owner: str = "", timeout: float = 0) -> ProjectWriteLock:
     return ProjectWriteLock(project_path, owner=owner, timeout=timeout)
+
+
+def _process_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _read_process_cmdline(pid: int) -> str | None:
+    proc_cmdline = Path("/proc") / str(pid) / "cmdline"
+    try:
+        raw = proc_cmdline.read_bytes()
+    except OSError:
+        return None
+    return raw.replace(b"\0", b" ").decode("utf-8", errors="replace").strip().lower()
+
+
+def _lock_owner_process_still_active(lock_data: object) -> bool:
+    if not isinstance(lock_data, dict):
+        return True
+    try:
+        pid = int(lock_data.get("pid", 0) or 0)
+    except (TypeError, ValueError):
+        return True
+    if not _process_exists(pid):
+        return False
+
+    cmdline = _read_process_cmdline(pid)
+    if cmdline is None:
+        return True
+    return any(marker in cmdline for marker in PROJECT_WRITE_LOCK_PROCESS_MARKERS)
 
 
 def normalize_planning_mode(mode: object, default: str = DEFAULT_PLANNING_MODE) -> str:

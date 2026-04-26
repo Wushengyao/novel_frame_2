@@ -80,6 +80,29 @@ class ProjectManagerTests(unittest.TestCase):
 
             self.assertFalse((project_path / ".project_write.lock").exists())
 
+    def test_project_write_lock_recovers_stale_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="lock_stale")
+            lock_path = project_path / ".project_write.lock"
+            save_json(
+                str(lock_path),
+                {
+                    "pid": 999999999,
+                    "owner": "old-run",
+                    "created_at": "2026-04-26T00:00:00+00:00",
+                    "project_path": str(project_path),
+                    "token": "old-token",
+                },
+            )
+
+            with patch("project_manager._lock_owner_process_still_active", return_value=False):
+                with acquire_project_write_lock(str(project_path), owner="new-run") as lock:
+                    self.assertTrue(lock.lock_path.exists())
+                    lock_data = read_json(lock.lock_path)
+                    self.assertEqual(lock_data["owner"], "new-run")
+
+            self.assertFalse(lock_path.exists())
+
     def test_update_project_stats_records_token_and_cost_totals(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp), project_id="cost_totals")

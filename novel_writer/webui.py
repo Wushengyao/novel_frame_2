@@ -1819,6 +1819,36 @@ def _render_job_events(events: object) -> str:
     return "".join(rows) or '<li class="muted">暂无任务日志。</li>'
 
 
+def _job_error_summary(job: dict) -> str:
+    error = str(job.get("error") or "").strip()
+    if not error:
+        return ""
+    first_line = ""
+    for line in error.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if not first_line:
+            first_line = line
+        if "Error" in line or "Exception" in line or line.startswith("project_manager."):
+            first_line = line
+            break
+    if len(first_line) > 360:
+        return first_line[:357].rstrip() + "..."
+    return first_line
+
+
+def _render_job_error_box(job: dict) -> str:
+    error = str(job.get("error") or "").strip()
+    display = "block" if error else "none"
+    return (
+        f'<div id="job-error-box" class="status-box" style="display:{display}">'
+        "<strong>错误信息</strong>"
+        f'<div id="job-error" class="mono">{escape(error)}</div>'
+        "</div>"
+    )
+
+
 def _render_job_cards(jobs: list[dict], empty_text: str) -> str:
     if not jobs:
         return f'<p class="muted">{escape(empty_text)}</p>'
@@ -1842,6 +1872,12 @@ def _render_job_cards(jobs: list[dict], empty_text: str) -> str:
                 "</div>"
                 f'<div class="muted">进度：{current}/{total}</div>'
             )
+        error_summary = _job_error_summary(job)
+        error_html = (
+            f'<div class="warning-box"><strong>失败原因：</strong>{escape(error_summary)}</div>'
+            if error_summary
+            else ""
+        )
         cards.append(
             f"""
             <div class="job-card">
@@ -1850,6 +1886,7 @@ def _render_job_cards(jobs: list[dict], empty_text: str) -> str:
                 <span class="status-pill {escape(_job_status_class(job.get('status', '')))}">{escape(_job_status_label(job.get('status', '')))}</span>
               </div>
               <div class="muted">{escape(job.get('message', '') or '等待状态更新')}</div>
+              {error_html}
               {progress}
               <div class="muted">更新时间：{escape(job.get('updated_at', ''))}</div>
               {action}
@@ -4219,9 +4256,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <span>更新时间：<span id="job-updated">{escape(job.get("updated_at", ""))}</span></span>
             </div>
             <div class="button-row" id="job-actions"></div>
-            <div id="job-error-box" class="status-box" style="display:none">
+            <div id="job-error-box" class="status-box" style="display:{'block' if job.get('error') else 'none'}">
               <strong>错误信息</strong>
-              <div id="job-error" class="mono"></div>
+              <div id="job-error" class="mono">{escape(job.get("error", ""))}</div>
             </div>
           </section>
           <section class="panel">
@@ -4249,7 +4286,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             if (ch === "&") return "&amp;";
             if (ch === "<") return "&lt;";
             if (ch === ">") return "&gt;";
-            if (ch === "\"") return "&quot;";
+            if (ch === '"') return "&quot;";
             return "&#39;";
           }});
           const renderEvents = (events) => {{
