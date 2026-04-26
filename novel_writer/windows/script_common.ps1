@@ -167,7 +167,7 @@ function Get-DefaultModelForProvider {
 	switch (Normalize-Provider $Provider) {
 		"gemini" { return "gemini-3.1-flash-lite-preview" }
 		"grok" { return "grok-4.20-beta-latest-non-reasoning" }
-		"deepseek" { return "deepseek-reasoner" }
+		"deepseek" { return "deepseek-v4-pro" }
 		"doubao" { return "doubao-seed-2-0-pro-260215" }
 		"ollama" { return "llama3.2" }
 	}

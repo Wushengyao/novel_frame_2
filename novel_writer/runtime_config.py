@@ -27,7 +27,7 @@ API_KEY_PROVIDERS = {"gemini", "grok", "deepseek", "doubao"}
 DEFAULT_MODELS = {
     "gemini": "gemini-3.1-flash-lite-preview",
     "grok": "grok-4.20-beta-latest-non-reasoning",
-    "deepseek": "deepseek-chat",
+    "deepseek": "deepseek-v4-flash",
     "doubao": "doubao-seed-1-8-251228",
     "openai_compatible": "",
     "ollama": "llama3.2",
@@ -66,8 +66,8 @@ DEFAULT_MODEL_PRESETS = {
         "grok-4.20-beta-latest-non-reasoning",
     ],
     "deepseek": [
-        "deepseek-chat",
-        "deepseek-reasoner",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
     ],
     "doubao": [
         "doubao-seed-1-8-251228",

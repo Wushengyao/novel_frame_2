@@ -112,7 +112,7 @@ default_model_for_provider() {
   case "$provider" in
     gemini) printf '%s\n' "gemini-3.1-pro-preview" ;;
     grok) printf '%s\n' "grok-4.20-beta-latest-reasoning" ;;
-    deepseek) printf '%s\n' "deepseek-reasoner" ;;
+    deepseek) printf '%s\n' "deepseek-v4-pro" ;;
     doubao) printf '%s\n' "doubao-seed-2-0-pro-260215" ;;
     ollama) printf '%s\n' "qwen3.5:35b" ;;
   esac
@@ -281,7 +281,7 @@ resolved_planning_mode = os.environ.get("NOVEL_PLANNING_MODE_OVERRIDE", "").stri
 default_models = {
   "gemini": "gemini-3.1-pro-preview",
   "grok": "grok-4.20-beta-latest-reasoning",
-  "deepseek": "deepseek-reasoner",
+  "deepseek": "deepseek-v4-pro",
   "doubao": "doubao-seed-2-0-pro-260215",
   "ollama": "llama3.2",
 }
