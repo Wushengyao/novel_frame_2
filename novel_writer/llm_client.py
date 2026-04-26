@@ -20,6 +20,72 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 120
 OLLAMA_MIN_TIMEOUT_SECONDS = 900
 LLM_LOG_FILENAME = "llm_interactions.jsonl"
 SENSITIVE_CONFIG_KEYS = {"api_key", "api_base", "model_name", "model"}
+CREATIVE_PHASES = {
+    "writer",
+    "rewrite",
+    "polish",
+    "illustration_prompt",
+}
+STRUCTURED_PHASES = {
+    "init",
+    "outline",
+    "craft_brief",
+    "quality_review",
+    "summary",
+}
+PROVIDER_CREATIVE_TEMPERATURES = {
+    "gemini": {
+        "writer": 1.0,
+        "rewrite": 0.8,
+        "polish": 0.8,
+        "illustration_prompt": 0.7,
+    },
+    "grok": {
+        "writer": 1.0,
+        "rewrite": 0.9,
+        "polish": 0.9,
+        "illustration_prompt": 0.8,
+    },
+    "doubao": {
+        "writer": 0.9,
+        "rewrite": 0.8,
+        "polish": 0.8,
+        "illustration_prompt": 0.7,
+    },
+    "ollama": {
+        "writer": 0.9,
+        "rewrite": 0.7,
+        "polish": 0.8,
+        "illustration_prompt": 0.7,
+    },
+}
+PROVIDER_STRUCTURED_TEMPERATURES = {
+    "gemini": 0.2,
+    "grok": 0.2,
+    "doubao": 0.2,
+    "ollama": 0.2,
+}
+LEGACY_DEFAULT_TEMPERATURES = {0.8, 0.9, 1.0}
+DEEPSEEK_V4_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
+DEEPSEEK_CREATIVE_TEMPERATURES = {
+    "writer": 1.3,
+    "rewrite": 1.1,
+    "polish": 1.2,
+    "illustration_prompt": 1.0,
+}
+DEEPSEEK_REASONING_PHASES = {
+    "init",
+    "outline",
+    "craft_brief",
+    "quality_review",
+    "summary",
+}
+DEEPSEEK_THINKING_INACTIVE_FIELDS = (
+    "temperature",
+    "top_p",
+    "presence_penalty",
+    "frequency_penalty",
+)
 
 
 def _coerce_llm_log_enabled(value: object) -> bool:
@@ -258,6 +324,304 @@ def _normalize_optional_text(value: object) -> str:
     return str(value or "").strip()
 
 
+def _normalize_model_id(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _is_nonempty(value: object) -> bool:
+    return value not in (None, "")
+
+
+def _is_legacy_default_temperature(value: object) -> bool:
+    try:
+        temperature = float(value)
+    except (TypeError, ValueError):
+        return False
+    return any(abs(temperature - default) < 0.000001 for default in LEGACY_DEFAULT_TEMPERATURES)
+
+
+def _is_json_response_format(response_format: str = "") -> bool:
+    return _normalize_optional_text(response_format).lower() in {
+        "json",
+        "json_object",
+        "application/json",
+    }
+
+
+def _phase_uses_structured_defaults(phase: str, response_format: str = "") -> bool:
+    return str(phase or "").strip().lower() in STRUCTURED_PHASES or _is_json_response_format(response_format)
+
+
+def _phase_uses_creative_defaults(phase: str) -> bool:
+    return str(phase or "").strip().lower() in CREATIVE_PHASES
+
+
+def _apply_temperature_defaults(
+    config: dict[str, Any],
+    *,
+    provider: str,
+    phase: str,
+    response_format: str,
+) -> dict[str, Any]:
+    raw_temperature = config.get("temperature")
+    if _is_nonempty(raw_temperature) and not _is_legacy_default_temperature(raw_temperature):
+        return config
+
+    normalized_phase = str(phase or "").strip().lower()
+    next_temperature: float | None = None
+    if _phase_uses_structured_defaults(normalized_phase, response_format):
+        next_temperature = PROVIDER_STRUCTURED_TEMPERATURES.get(provider)
+    elif _phase_uses_creative_defaults(normalized_phase):
+        next_temperature = PROVIDER_CREATIVE_TEMPERATURES.get(provider, {}).get(normalized_phase)
+
+    if next_temperature is None:
+        return config
+    optimized = dict(config)
+    optimized["temperature"] = next_temperature
+    return optimized
+
+
+def _coerce_thinking(value: object) -> dict[str, str] | None:
+    if isinstance(value, dict):
+        thinking_type = str(value.get("type") or "").strip().lower()
+    elif isinstance(value, bool):
+        thinking_type = "enabled" if value else "disabled"
+    else:
+        thinking_type = str(value or "").strip().lower()
+    if thinking_type in {"enabled", "disabled"}:
+        return {"type": thinking_type}
+    return None
+
+
+def _merge_request_options(body: dict[str, Any], options: object) -> None:
+    if not isinstance(options, dict):
+        return
+    for key, value in options.items():
+        if not _is_nonempty(value):
+            continue
+        body[str(key)] = value
+
+
+def _request_fields_to_omit(config: dict[str, Any]) -> set[str]:
+    raw_fields = config.get("omit_request_fields")
+    if isinstance(raw_fields, (list, tuple, set)):
+        return {str(field).strip() for field in raw_fields if str(field).strip()}
+    return set()
+
+
+def _merge_generation_config(config: dict[str, Any], generation_config: object) -> None:
+    if not isinstance(generation_config, dict):
+        return
+    for key, value in generation_config.items():
+        if not _is_nonempty(value):
+            continue
+        config[str(key)] = value
+
+
+def _gemini_model_family(model: str) -> str:
+    normalized = _normalize_model_id(model)
+    if normalized.startswith("gemini-3"):
+        return "gemini-3"
+    if normalized.startswith("gemini-2.5"):
+        return "gemini-2.5"
+    return ""
+
+
+def _apply_gemini_defaults(
+    config: dict[str, Any],
+    *,
+    phase: str,
+    response_format: str,
+) -> dict[str, Any]:
+    model = _normalize_model_id(config.get("model") or config.get("model_name"))
+    optimized = _apply_temperature_defaults(
+        config,
+        provider="gemini",
+        phase=phase,
+        response_format=response_format,
+    )
+    generation_config = (
+        dict(optimized.get("generation_config") or {})
+        if isinstance(optimized.get("generation_config"), dict)
+        else {}
+    )
+    if _is_nonempty(generation_config.get("thinkingConfig")):
+        optimized = dict(optimized)
+        optimized["generation_config"] = generation_config
+        return optimized
+
+    family = _gemini_model_family(model)
+    normalized_phase = str(phase or "").strip().lower()
+    if family == "gemini-3":
+        if _phase_uses_creative_defaults(normalized_phase):
+            thinking_level = "minimal" if "flash" in model else "low"
+        elif _phase_uses_structured_defaults(normalized_phase, response_format):
+            thinking_level = "high"
+        else:
+            thinking_level = "low"
+        generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
+    elif family == "gemini-2.5":
+        if _phase_uses_creative_defaults(normalized_phase) and "flash" in model:
+            thinking_budget = 0
+        elif _phase_uses_structured_defaults(normalized_phase, response_format):
+            thinking_budget = -1
+        else:
+            thinking_budget = 0 if "flash" in model else -1
+        generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+
+    if generation_config:
+        optimized = dict(optimized)
+        optimized["generation_config"] = generation_config
+    return optimized
+
+
+def _is_grok_reasoning_model(model: str) -> bool:
+    normalized = _normalize_model_id(model)
+    if "non-reasoning" in normalized:
+        return False
+    return "reasoning" in normalized or normalized.endswith("-reasoning")
+
+
+def _apply_grok_defaults(
+    config: dict[str, Any],
+    *,
+    phase: str,
+    response_format: str,
+) -> dict[str, Any]:
+    optimized = _apply_temperature_defaults(
+        config,
+        provider="grok",
+        phase=phase,
+        response_format=response_format,
+    )
+    model = _normalize_model_id(optimized.get("model") or optimized.get("model_name"))
+    request_options = (
+        dict(optimized.get("request_options") or {})
+        if isinstance(optimized.get("request_options"), dict)
+        else {}
+    )
+    request_options.pop("reasoning_effort", None)
+    if _is_json_response_format(response_format):
+        request_options.setdefault("response_format", {"type": "json_object"})
+    optimized = dict(optimized)
+    optimized["request_options"] = request_options
+    if _is_grok_reasoning_model(model):
+        optimized["timeout"] = max(_resolve_timeout(optimized, "grok"), 3600)
+    return optimized
+
+
+def _apply_doubao_defaults(
+    config: dict[str, Any],
+    *,
+    phase: str,
+    response_format: str,
+) -> dict[str, Any]:
+    optimized = _apply_temperature_defaults(
+        config,
+        provider="doubao",
+        phase=phase,
+        response_format=response_format,
+    )
+    model = _normalize_model_id(optimized.get("model") or optimized.get("model_name"))
+    if "doubao-seed" not in model:
+        return optimized
+
+    request_options = (
+        dict(optimized.get("request_options") or {})
+        if isinstance(optimized.get("request_options"), dict)
+        else {}
+    )
+    if _coerce_thinking(request_options.get("thinking")) is None:
+        thinking_type = "enabled" if _phase_uses_structured_defaults(phase, response_format) else "disabled"
+        request_options["thinking"] = {"type": thinking_type}
+    optimized = dict(optimized)
+    optimized["request_options"] = request_options
+    return optimized
+
+
+def _apply_ollama_defaults(
+    config: dict[str, Any],
+    *,
+    phase: str,
+    response_format: str,
+) -> dict[str, Any]:
+    optimized = _apply_temperature_defaults(
+        config,
+        provider="ollama",
+        phase=phase,
+        response_format=response_format,
+    )
+    request_options = (
+        dict(optimized.get("request_options") or {})
+        if isinstance(optimized.get("request_options"), dict)
+        else {}
+    )
+    if _is_json_response_format(response_format):
+        request_options.setdefault("response_format", {"type": "json_object"})
+    optimized = dict(optimized)
+    optimized["request_options"] = request_options
+    return optimized
+
+
+def _apply_deepseek_v4_defaults(
+    config: dict[str, Any],
+    *,
+    phase: str,
+    response_format: str,
+) -> dict[str, Any]:
+    model = _normalize_model_id(config.get("model") or config.get("model_name"))
+    if model not in DEEPSEEK_V4_MODELS:
+        return config
+
+    optimized = dict(config)
+    request_options = (
+        dict(config.get("request_options") or {})
+        if isinstance(config.get("request_options"), dict)
+        else {}
+    )
+    omit_fields = _request_fields_to_omit(config)
+
+    normalized_phase = str(phase or "").strip().lower()
+    explicit_thinking = _coerce_thinking(request_options.get("thinking"))
+    if explicit_thinking is None:
+        explicit_thinking = _coerce_thinking(config.get("thinking"))
+
+    json_task = _is_json_response_format(response_format)
+    reasoning_task = normalized_phase in DEEPSEEK_REASONING_PHASES or json_task
+    if explicit_thinking is None:
+        thinking = (
+            {"type": "disabled"}
+            if normalized_phase in DEEPSEEK_CREATIVE_TEMPERATURES
+            else {"type": "enabled" if reasoning_task else "disabled"}
+        )
+    else:
+        thinking = explicit_thinking
+    request_options["thinking"] = thinking
+
+    if thinking["type"] == "enabled":
+        if json_task:
+            request_options.setdefault("response_format", {"type": "json_object"})
+        if not _is_nonempty(request_options.get("reasoning_effort")) and not _is_nonempty(
+            config.get("reasoning_effort")
+        ):
+            request_options["reasoning_effort"] = "max" if normalized_phase == "quality_review" else "high"
+        elif _is_nonempty(config.get("reasoning_effort")) and not _is_nonempty(
+            request_options.get("reasoning_effort")
+        ):
+            request_options["reasoning_effort"] = str(config.get("reasoning_effort")).strip()
+        omit_fields.update(DEEPSEEK_THINKING_INACTIVE_FIELDS)
+    else:
+        request_options.pop("reasoning_effort", None)
+        if _is_nonempty(config.get("temperature")) and not _is_legacy_default_temperature(config.get("temperature")):
+            optimized["temperature"] = config.get("temperature")
+        else:
+            optimized["temperature"] = DEEPSEEK_CREATIVE_TEMPERATURES.get(normalized_phase, 1.0)
+
+    optimized["request_options"] = request_options
+    optimized["omit_request_fields"] = sorted(omit_fields)
+    return optimized
+
+
 def _build_openai_messages(prompt: str, system_prompt: str = "") -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
     normalized_system_prompt = _normalize_optional_text(system_prompt)
@@ -268,8 +632,7 @@ def _build_openai_messages(prompt: str, system_prompt: str = "") -> list[dict[st
 
 
 def _is_json_response_requested(prompt: str, response_format: str = "") -> bool:
-    normalized_format = _normalize_optional_text(response_format).lower()
-    if normalized_format in {"json", "json_object", "application/json"}:
+    if _is_json_response_format(response_format):
         return True
     return "输出 JSON" in prompt or "输出必须是合法 JSON" in prompt
 
@@ -305,6 +668,9 @@ def generate_text_with_metadata(
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        for field in _request_fields_to_omit(config):
+            body.pop(field, None)
+        _merge_request_options(body, config.get("request_options"))
         endpoint = _normalize_chat_url(api_base)
         headers = _build_openai_compatible_headers(api_key)
         payload, request_attempts = _request_json(endpoint, headers, body, timeout)
@@ -327,6 +693,11 @@ def generate_text_with_metadata(
         return response_text, metadata
 
     if provider == "gemini":
+        config = _apply_gemini_defaults(
+            config,
+            phase=phase,
+            response_format=response_format,
+        )
         api_key = config.get("api_key", "")
         model = config.get("model") or config.get("model_name")
         temperature = config.get("temperature", 1.0)
@@ -366,6 +737,7 @@ def generate_text_with_metadata(
                 "responseMimeType": response_mime_type,
             },
         }
+        _merge_generation_config(body["generationConfig"], config.get("generation_config"))
         normalized_system_prompt = _normalize_optional_text(system_prompt)
         if normalized_system_prompt:
             body["systemInstruction"] = {
@@ -393,6 +765,11 @@ def generate_text_with_metadata(
     if provider == "grok":
         grok_config = dict(config)
         grok_config["api_base"] = grok_config.get("api_base", "").strip() or "https://api.x.ai/v1"
+        grok_config = _apply_grok_defaults(
+            grok_config,
+            phase=phase,
+            response_format=response_format,
+        )
         text, metadata = generate_text_with_metadata(
             prompt,
             {**grok_config, "model_provider": "openai_compatible"},
@@ -407,6 +784,11 @@ def generate_text_with_metadata(
         deepseek_config = dict(config)
         deepseek_config["api_base"] = (
             deepseek_config.get("api_base", "").strip() or "https://api.deepseek.com/v1"
+        )
+        deepseek_config = _apply_deepseek_v4_defaults(
+            deepseek_config,
+            phase=phase,
+            response_format=response_format,
         )
         text, metadata = generate_text_with_metadata(
             prompt,
@@ -424,6 +806,11 @@ def generate_text_with_metadata(
             doubao_config.get("api_base", "").strip()
             or "https://ark.cn-beijing.volces.com/api/v3"
         )
+        doubao_config = _apply_doubao_defaults(
+            doubao_config,
+            phase=phase,
+            response_format=response_format,
+        )
         text, metadata = generate_text_with_metadata(
             prompt,
             {**doubao_config, "model_provider": "openai_compatible"},
@@ -438,6 +825,11 @@ def generate_text_with_metadata(
         ollama_config = dict(config)
         ollama_config["api_base"] = (
             ollama_config.get("api_base", "").strip() or "http://127.0.0.1:11434/v1"
+        )
+        ollama_config = _apply_ollama_defaults(
+            ollama_config,
+            phase=phase,
+            response_format=response_format,
         )
         ollama_config["timeout"] = _resolve_timeout(ollama_config, "ollama")
         text, metadata = generate_text_with_metadata(
