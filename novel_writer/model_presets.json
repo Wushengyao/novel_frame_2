@@ -58,5 +58,11 @@
       "value": "mistral:7b",
       "label": "mistral:7b"
     }
+  ],
+  "llama_cpp": [
+    {
+      "value": "local-model",
+      "label": "local-model"
+    }
   ]
 }

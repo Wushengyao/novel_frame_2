@@ -445,6 +445,41 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(request_body["temperature"], 0.2)
         self.assertEqual(request_body["response_format"], {"type": "json_object"})
 
+    def test_llama_cpp_uses_8080_openai_compatible_defaults(self) -> None:
+        config = {
+            "model_provider": "llama_cpp",
+            "model": "local-model",
+            "api_key": "",
+            "temperature": 0.9,
+            "max_tokens": 4000,
+            "timeout": 120,
+        }
+        response_payload = {
+            "choices": [{"message": {"content": "{\"ok\": true}"}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        }
+
+        with patch(
+            "llm_client._request_json",
+            return_value=(response_payload, 1),
+        ) as mocked_request:
+            text, metadata = generate_text_with_metadata(
+                "return JSON",
+                config,
+                log_context={"phase": "summary"},
+                response_format="json",
+            )
+
+        endpoint, headers, request_body, timeout = mocked_request.call_args.args
+        self.assertEqual(endpoint, "http://127.0.0.1:8080/v1/chat/completions")
+        self.assertNotIn("Authorization", headers)
+        self.assertEqual(request_body["model"], "local-model")
+        self.assertEqual(request_body["temperature"], 0.2)
+        self.assertEqual(request_body["response_format"], {"type": "json_object"})
+        self.assertEqual(timeout, 900)
+        self.assertEqual(text, "{\"ok\": true}")
+        self.assertEqual(metadata["provider"], "llama_cpp")
+
 
 if __name__ == "__main__":
     unittest.main()

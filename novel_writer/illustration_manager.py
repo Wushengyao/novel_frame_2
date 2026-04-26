@@ -74,8 +74,7 @@ def _normalize_checkpoint_name(name: str) -> str:
     normalized = str(name or "").strip().replace("\\", "/")
     if not normalized:
         return ""
-    separator = "\\" if os.name == "nt" else "/"
-    return normalized.replace("/", separator)
+    return normalized
 
 
 def _trim_text(text: str, limit: int = 2600) -> str:
@@ -773,10 +772,10 @@ def _generate_prompt_payload(
     project_data = load_project(project_path)
     provider = str((llm_config or {}).get("model_provider", "") or "").strip().lower()
     has_remote_credentials = bool((llm_config or {}).get("api_key"))
-    has_local_ollama = provider == "ollama" and bool((llm_config or {}).get("api_base")) and bool(
+    has_local_llm = provider in {"ollama", "llama_cpp"} and bool((llm_config or {}).get("api_base")) and bool(
         (llm_config or {}).get("model") or (llm_config or {}).get("model_name")
     )
-    if llm_config and llm_config.get("model_provider") and (has_remote_credentials or has_local_ollama):
+    if llm_config and llm_config.get("model_provider") and (has_remote_credentials or has_local_llm):
         prompt = build_illustration_prompt(project_data, chapter_text, user_request=user_request)
         try:
             emit_progress(progress_callback, "illustration_prompt", "正在生成插图提示词")

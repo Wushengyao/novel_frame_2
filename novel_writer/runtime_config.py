@@ -15,6 +15,7 @@ SUPPORTED_PROVIDERS = {
     "doubao",
     "openai_compatible",
     "ollama",
+    "llama_cpp",
 }
 WEB_SELECTABLE_PROVIDERS = {
     "gemini",
@@ -22,8 +23,14 @@ WEB_SELECTABLE_PROVIDERS = {
     "deepseek",
     "doubao",
     "ollama",
+    "llama_cpp",
 }
 API_KEY_PROVIDERS = {"gemini", "grok", "deepseek", "doubao"}
+PROVIDER_ALIASES = {
+    "llama.cpp": "llama_cpp",
+    "llama-cpp": "llama_cpp",
+    "llamacpp": "llama_cpp",
+}
 DEFAULT_MODELS = {
     "gemini": "gemini-3.1-flash-lite-preview",
     "grok": "grok-4.20-beta-latest-non-reasoning",
@@ -31,13 +38,16 @@ DEFAULT_MODELS = {
     "doubao": "doubao-seed-1-8-251228",
     "openai_compatible": "",
     "ollama": "llama3.2",
+    "llama_cpp": "local-model",
 }
 DEFAULT_API_BASES = {
     "doubao": "https://ark.cn-beijing.volces.com/api/v3",
     "ollama": "http://127.0.0.1:11434/v1",
+    "llama_cpp": "http://127.0.0.1:8080/v1",
 }
 DEFAULT_TIMEOUTS = {
     "ollama": 900,
+    "llama_cpp": 900,
 }
 WRITING_QUALITY_LIGHT = "light"
 WRITING_QUALITY_BALANCED = "balanced"
@@ -80,6 +90,9 @@ DEFAULT_MODEL_PRESETS = {
         "qwen2.5:14b",
         "mistral:7b",
     ],
+    "llama_cpp": [
+        "local-model",
+    ],
 }
 RUNTIME_OVERRIDE_KEYS = (
     "provider",
@@ -113,6 +126,7 @@ def _coerce_bool(raw_value: object, default: bool = False) -> bool:
 
 def normalize_provider(provider: object, default: str = "gemini") -> str:
     normalized = str(provider or "").strip().lower()
+    normalized = PROVIDER_ALIASES.get(normalized, normalized)
     if normalized in SUPPORTED_PROVIDERS:
         return normalized
     return default
@@ -205,7 +219,7 @@ def resolve_timeout_for_provider(provider: str, raw_value: object) -> int:
         timeout = default_timeout
     if timeout <= 0:
         timeout = default_timeout
-    if normalize_provider(provider) == "ollama":
+    if normalize_provider(provider) in {"ollama", "llama_cpp"}:
         return max(timeout, default_timeout)
     return timeout
 
@@ -217,6 +231,7 @@ def api_key_for_provider(provider: str, api_keys: dict[str, str]) -> str:
         "deepseek": api_keys.get("DEEPSEEK_API_KEY", ""),
         "doubao": api_keys.get("DOUBAO_API_KEY", ""),
         "ollama": api_keys.get("OLLAMA_API_KEY", ""),
+        "llama_cpp": api_keys.get("LLAMA_CPP_API_KEY", ""),
         "openai_compatible": api_keys.get("OPENAI_API_KEY", ""),
     }
     return mapping.get(normalize_provider(provider, default="openai_compatible"), "")

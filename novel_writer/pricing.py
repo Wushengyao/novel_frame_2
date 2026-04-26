@@ -261,7 +261,7 @@ def estimate_llm_cost(
     )
     counts = _token_counts(usage)
 
-    if normalized_provider == "ollama":
+    if normalized_provider in {"ollama", "llama_cpp"}:
         return _priced(
             normalized_provider,
             canonical_model,
@@ -269,7 +269,7 @@ def estimate_llm_cost(
             TokenRates(0.0, 0.0, 0.0),
             LOCAL_SOURCE,
             status="local",
-            reason="Local Ollama inference; API cost is not estimated.",
+            reason=f"Local {normalized_provider} inference; API cost is not estimated.",
         )
 
     if normalized_provider == "deepseek":

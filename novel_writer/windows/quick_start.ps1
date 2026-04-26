@@ -36,7 +36,7 @@ $DefaultQualityMaxTokens = ""
 $DefaultQualityTimeout = ""
 
 if (-not $PSBoundParameters.ContainsKey("Provider")) {
-	$Provider = Prompt-OptionalValue -PromptText "Provider (gemini/grok/deepseek/doubao/ollama)" -DefaultValue $Provider
+	$Provider = Prompt-OptionalValue -PromptText "Provider (gemini/grok/deepseek/doubao/ollama/llama_cpp)" -DefaultValue $Provider
 }
 $Provider = Normalize-Provider $Provider
 

@@ -97,15 +97,19 @@ class PricingTests(unittest.TestCase):
         self.assertEqual(estimate["pricing_status"], "priced")
         self.assertAlmostEqual(estimate["estimated_cost_usd"], expected)
 
-    def test_ollama_is_zero_cost_and_doubao_is_unpriced(self) -> None:
+    def test_local_backends_are_zero_cost_and_doubao_is_unpriced(self) -> None:
         usage = {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
 
         local = estimate_llm_cost("ollama", "llama3.2", usage)
+        llama_cpp = estimate_llm_cost("llama_cpp", "local-model", usage)
         unpriced = estimate_llm_cost("doubao", "doubao-seed-1-8-251228", usage)
 
         self.assertEqual(local["pricing_status"], "local")
         self.assertEqual(local["estimated_cost_usd"], 0.0)
         self.assertEqual(local["priced_tokens"], 150)
+        self.assertEqual(llama_cpp["pricing_status"], "local")
+        self.assertEqual(llama_cpp["estimated_cost_usd"], 0.0)
+        self.assertEqual(llama_cpp["priced_tokens"], 150)
         self.assertEqual(unpriced["pricing_status"], "unpriced")
         self.assertEqual(unpriced["unpriced_tokens"], 150)
         self.assertEqual(unpriced["estimated_cost_usd"], 0.0)

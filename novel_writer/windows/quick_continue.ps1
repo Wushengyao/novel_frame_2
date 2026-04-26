@@ -62,7 +62,7 @@ if (-not $PSBoundParameters.ContainsKey("UserRequest")) {
 	$UserRequest = Prompt-OptionalValue -PromptText "User request (optional)"
 }
 if (-not $PSBoundParameters.ContainsKey("ProviderOverride")) {
-	$ProviderOverride = Prompt-OptionalValue -PromptText "Provider override (optional: gemini/grok/deepseek/doubao/ollama)"
+	$ProviderOverride = Prompt-OptionalValue -PromptText "Provider override (optional: gemini/grok/deepseek/doubao/ollama/llama_cpp)"
 }
 if (-not $PSBoundParameters.ContainsKey("PlanningModeOverride")) {
 	$PlanningModeOverride = Prompt-OptionalValue -PromptText "Planning mode override (optional: none/volume/chapter)"

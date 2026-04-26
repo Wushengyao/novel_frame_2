@@ -45,7 +45,7 @@ PYTHON_EXE="$(resolve_python_exe)"
 log_info "quick_start: 已加载脚本和 API keys。"
 
 if [[ $# -lt 1 ]]; then
-  PROVIDER="$(normalize_provider "$(prompt_optional_value "Provider (gemini/grok/deepseek/doubao/ollama)" "$DEFAULT_PROVIDER")")"
+  PROVIDER="$(normalize_provider "$(prompt_optional_value "Provider (gemini/grok/deepseek/doubao/ollama/llama_cpp)" "$DEFAULT_PROVIDER")")"
 else
   PROVIDER="$(normalize_provider "${1:-$DEFAULT_PROVIDER}")"
 fi

@@ -163,8 +163,8 @@ def _ensure_outline_model_config(config: dict) -> None:
         raise OutlineGenerationError("大纲生成失败：缺少模型名称。")
     if provider == "openai_compatible" and (not api_key or not api_base):
         raise OutlineGenerationError("大纲生成失败：openai_compatible 缺少 api_key 或 api_base。")
-    if provider == "ollama" and not api_base:
-        raise OutlineGenerationError("大纲生成失败：ollama 缺少 api_base。")
+    if provider in {"ollama", "llama_cpp"} and not api_base:
+        raise OutlineGenerationError(f"大纲生成失败：{provider} 缺少 api_base。")
     if provider in {"gemini", "grok", "deepseek", "doubao"} and not api_key:
         raise OutlineGenerationError(f"大纲生成失败：provider={provider} 缺少 api_key。")
 

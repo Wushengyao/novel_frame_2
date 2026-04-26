@@ -691,6 +691,20 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(captured["config"]["quality_model"]["api_key"], "gemini-key")
         self.assertNotIn("temperature", captured["config"]["quality_model"])
 
+        with patch("webui.init_project", side_effect=fake_init_project):
+            webui._create_project(
+                {
+                    "provider": "llamacpp",
+                    "story_request": "local llama.cpp story",
+                },
+                {},
+            )
+
+        self.assertEqual(captured["config"]["model_provider"], "llama_cpp")
+        self.assertEqual(captured["config"]["model_name"], "local-model")
+        self.assertEqual(captured["config"]["api_base"], "http://127.0.0.1:8080/v1")
+        self.assertEqual(captured["config"]["timeout"], 900)
+
     def test_runtime_overrides_include_quality_and_review_modes(self) -> None:
         overrides = webui._runtime_overrides_from_form(
             {

@@ -73,6 +73,7 @@ load_api_keys() {
     export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
     export DOUBAO_API_KEY="${DOUBAO_API_KEY:-}"
     export OLLAMA_API_KEY="${OLLAMA_API_KEY:-}"
+    export LLAMA_CPP_API_KEY="${LLAMA_CPP_API_KEY:-}"
     log_warning "未找到 API key 文件: $keys_file，后续将仅依赖环境变量或无需 API key 的 provider。"
     return 0
   fi
@@ -84,9 +85,10 @@ load_api_keys() {
 normalize_provider() {
   local provider="${1:-}"
   case "$provider" in
-    gemini|grok|deepseek|doubao|ollama) printf '%s\n' "$provider" ;;
+    gemini|grok|deepseek|doubao|ollama|llama_cpp) printf '%s\n' "$provider" ;;
+    llama.cpp|llama-cpp|llamacpp) printf '%s\n' "llama_cpp" ;;
     *)
-      echo "不支持的 provider: $provider（可选: gemini / grok / deepseek / doubao / ollama）" >&2
+      echo "不支持的 provider: $provider（可选: gemini / grok / deepseek / doubao / ollama / llama_cpp）" >&2
       exit 1
       ;;
   esac
@@ -115,6 +117,7 @@ default_model_for_provider() {
     deepseek) printf '%s\n' "deepseek-v4-pro" ;;
     doubao) printf '%s\n' "doubao-seed-2-0-pro-260215" ;;
     ollama) printf '%s\n' "qwen3.5:35b" ;;
+    llama_cpp) printf '%s\n' "local-model" ;;
   esac
 }
 
@@ -125,6 +128,7 @@ default_api_base_for_provider() {
     gemini|grok|deepseek) printf '%s\n' "" ;;
     doubao) printf '%s\n' "https://ark.cn-beijing.volces.com/api/v3" ;;
     ollama) printf '%s\n' "http://127.0.0.1:11434/v1" ;;
+    llama_cpp) printf '%s\n' "http://127.0.0.1:8080/v1" ;;
   esac
 }
 
@@ -132,7 +136,7 @@ default_timeout_for_provider() {
   local provider
   provider="$(normalize_provider "$1")"
   case "$provider" in
-    ollama) printf '%s\n' "900" ;;
+    ollama|llama_cpp) printf '%s\n' "900" ;;
     gemini|grok|deepseek|doubao) printf '%s\n' "120" ;;
   esac
 }
@@ -146,13 +150,14 @@ api_key_for_provider() {
     deepseek) printf '%s\n' "${DEEPSEEK_API_KEY:-}" ;;
     doubao) printf '%s\n' "${DOUBAO_API_KEY:-}" ;;
     ollama) printf '%s\n' "${OLLAMA_API_KEY:-}" ;;
+    llama_cpp) printf '%s\n' "${LLAMA_CPP_API_KEY:-}" ;;
   esac
 }
 
 ensure_api_key_present() {
   local provider="$1"
   local api_key="$2"
-  if [[ "$provider" == "ollama" ]]; then
+  if [[ "$provider" == "ollama" || "$provider" == "llama_cpp" ]]; then
     return 0
   fi
   if [[ -z "$api_key" ]]; then
@@ -200,6 +205,7 @@ output_root.mkdir(parents=True, exist_ok=True)
 provider = os.environ["NOVEL_PROVIDER"]
 default_timeouts = {
     "ollama": 900,
+    "llama_cpp": 900,
     "gemini": 120,
     "grok": 120,
     "deepseek": 120,
@@ -284,10 +290,12 @@ default_models = {
   "deepseek": "deepseek-v4-pro",
   "doubao": "doubao-seed-2-0-pro-260215",
   "ollama": "llama3.2",
+  "llama_cpp": "local-model",
 }
 default_api_bases = {
   "doubao": "https://ark.cn-beijing.volces.com/api/v3",
   "ollama": "http://127.0.0.1:11434/v1",
+  "llama_cpp": "http://127.0.0.1:8080/v1",
 }
 default_timeouts = {
   "gemini": 120,
@@ -295,6 +303,7 @@ default_timeouts = {
   "deepseek": 120,
   "doubao": 120,
   "ollama": 900,
+  "llama_cpp": 900,
 }
 
 model_name_override = os.environ.get("NOVEL_MODEL_NAME_OVERRIDE", "").strip()
@@ -322,8 +331,8 @@ data = {
     "timeout": int(
       os.environ.get("NOVEL_TIMEOUT_OVERRIDE", "")
       or (
-        max(int(saved.get("timeout", 0) or 0), default_timeouts.get("ollama", 900))
-        if resolved_provider == "ollama"
+        max(int(saved.get("timeout", 0) or 0), default_timeouts.get(resolved_provider, 900))
+        if resolved_provider in {"ollama", "llama_cpp"}
         else (saved.get("timeout", default_timeouts.get(resolved_provider, 120)))
       )
     ),
@@ -386,6 +395,7 @@ default_timeouts = {
   "deepseek": 120,
   "doubao": 120,
   "ollama": 900,
+  "llama_cpp": 900,
 }
 
 data = {
@@ -400,8 +410,8 @@ data = {
   "timeout": int(
     os.environ.get("NOVEL_TIMEOUT_OVERRIDE", "")
     or (
-      max(int(saved.get("timeout", 0) or 0), default_timeouts.get("ollama", 900))
-      if resolved_provider == "ollama"
+      max(int(saved.get("timeout", 0) or 0), default_timeouts.get(resolved_provider, 900))
+      if resolved_provider in {"ollama", "llama_cpp"}
       else (saved.get("timeout", default_timeouts.get(resolved_provider, 120)))
     )
   ),

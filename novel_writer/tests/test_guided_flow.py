@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from argparse import Namespace
@@ -437,7 +438,7 @@ class GuidedFlowTests(unittest.TestCase):
             config_path.write_text(json.dumps(runtime_config("chapter"), ensure_ascii=False, indent=2), encoding="utf-8")
             result = subprocess.run(
                 [
-                    "python3",
+                    sys.executable,
                     str(Path(__file__).resolve().parents[1] / "app.py"),
                     "next",
                     "--project",

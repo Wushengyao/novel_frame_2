@@ -88,6 +88,15 @@ from runtime_config import (
 from version import APP_NAME, DISPLAY_VERSION, HTTP_SERVER_TOKEN, WEBUI_NAME
 from web_auth import AuthService, LoginAttemptGuard, WebAuthSettings, load_auth_settings
 
+if not hasattr(os, "getuid"):
+    def _windows_getuid() -> int:
+        try:
+            return int(os.environ.get("UID") or 0)
+        except ValueError:
+            return 0
+
+    os.getuid = _windows_getuid  # type: ignore[attr-defined]
+
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parent
@@ -1153,11 +1162,18 @@ def _enqueue_progression_job(
     return job
 
 
-def _render_provider_options(selected: str = "") -> str:
-    options = ['<option value="">沿用项目设置</option>']
+def _render_provider_options(selected: str = "", *, include_project_default: bool = True) -> str:
+    options = ['<option value="">沿用项目设置</option>'] if include_project_default else []
     for provider in sorted(WEB_SELECTABLE_PROVIDERS):
         selected_attr = ' selected' if selected == provider else ""
         options.append(f'<option value="{provider}"{selected_attr}>{provider}</option>')
+    return "".join(options)
+
+
+def _render_quality_provider_options() -> str:
+    options = ['<option value="">inherit main provider</option>']
+    for provider in sorted(WEB_SELECTABLE_PROVIDERS):
+        options.append(f'<option value="{provider}">{provider}</option>')
     return "".join(options)
 
 
@@ -1214,12 +1230,7 @@ def _render_runtime_override_fields(
     <div class="two-col">
       <label>Quality Provider
         <select name="quality_provider">
-          <option value="">inherit main provider</option>
-          <option value="gemini">gemini</option>
-          <option value="grok">grok</option>
-          <option value="deepseek">deepseek</option>
-          <option value="doubao">doubao</option>
-          <option value="ollama">ollama</option>
+          {_render_quality_provider_options()}
         </select>
       </label>
       <label>Quality Model
@@ -1294,7 +1305,8 @@ def _render_runtime_override_fields(
 
 def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_callback=None) -> str:
     provider = (form.get("provider") or "gemini").strip().lower()
-    if provider not in {"gemini", "grok", "deepseek", "doubao", "ollama"}:
+    provider = _normalize_provider_for_ui(provider, default="")
+    if provider not in WEB_SELECTABLE_PROVIDERS:
         raise RuntimeError(f"unsupported provider: {provider}")
 
     api_key = _api_key_for_provider(provider, api_keys)
@@ -3087,11 +3099,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 <div class="two-col">
                   <label>模型后端
                     <select name="provider" data-model-provider-select data-base-provider="gemini">
-                      <option value="gemini" selected>gemini</option>
-                      <option value="grok">grok</option>
-                      <option value="deepseek">deepseek</option>
-                      <option value="doubao">doubao</option>
-                      <option value="ollama">ollama</option>
+                      {_render_provider_options("gemini", include_project_default=False)}
                     </select>
                   </label>
                   <label>模型预设
@@ -3146,12 +3154,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 <div class="two-col">
                   <label>Quality Provider
                     <select name="quality_provider">
-                      <option value="">inherit main provider</option>
-                      <option value="gemini">gemini</option>
-                      <option value="grok">grok</option>
-                      <option value="deepseek">deepseek</option>
-                      <option value="doubao">doubao</option>
-                      <option value="ollama">ollama</option>
+                      {_render_quality_provider_options()}
                     </select>
                   </label>
                   <label>Quality Model
@@ -3310,12 +3313,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 <div class="two-col">
                   <label>临时后端覆盖
                     <select name="provider">
-                      <option value="">沿用项目设置</option>
-                      <option value="gemini">gemini</option>
-                      <option value="grok">grok</option>
-                      <option value="deepseek">deepseek</option>
-                      <option value="doubao">doubao</option>
-                      <option value="ollama">ollama</option>
+                      {_render_provider_options()}
                     </select>
                   </label>
                   <div></div>

@@ -118,6 +118,7 @@ function Get-ApiKeys {
 			DEEPSEEK_API_KEY = ""
 			DOUBAO_API_KEY = ""
 			OLLAMA_API_KEY = ""
+			LLAMA_CPP_API_KEY = ""
 		}
 	}
 
@@ -128,6 +129,7 @@ function Get-ApiKeys {
 		DEEPSEEK_API_KEY = ""
 		DOUBAO_API_KEY = ""
 		OLLAMA_API_KEY = ""
+		LLAMA_CPP_API_KEY = ""
 	}
 
 	foreach ($name in @($keys.Keys)) {
@@ -157,7 +159,11 @@ function Normalize-Provider {
 		"deepseek" { return "deepseek" }
 		"doubao" { return "doubao" }
 		"ollama" { return "ollama" }
-		default { throw "Unsupported provider: $Name (allowed: gemini / grok / deepseek / doubao / ollama)" }
+		"llama_cpp" { return "llama_cpp" }
+		"llama.cpp" { return "llama_cpp" }
+		"llama-cpp" { return "llama_cpp" }
+		"llamacpp" { return "llama_cpp" }
+		default { throw "Unsupported provider: $Name (allowed: gemini / grok / deepseek / doubao / ollama / llama_cpp)" }
 	}
 }
 
@@ -170,6 +176,7 @@ function Get-DefaultModelForProvider {
 		"deepseek" { return "deepseek-v4-pro" }
 		"doubao" { return "doubao-seed-2-0-pro-260215" }
 		"ollama" { return "llama3.2" }
+		"llama_cpp" { return "local-model" }
 	}
 }
 
@@ -179,6 +186,7 @@ function Get-DefaultApiBaseForProvider {
 	switch (Normalize-Provider $Provider) {
 		"doubao" { return "https://ark.cn-beijing.volces.com/api/v3" }
 		"ollama" { return "http://127.0.0.1:11434/v1" }
+		"llama_cpp" { return "http://127.0.0.1:8080/v1" }
 		default { return "" }
 	}
 }
@@ -188,6 +196,7 @@ function Get-DefaultTimeoutForProvider {
 
 	switch (Normalize-Provider $Provider) {
 		"ollama" { return 900 }
+		"llama_cpp" { return 900 }
 		default { return 120 }
 	}
 }
@@ -217,6 +226,7 @@ function Get-ApiKeyForProvider {
 		"deepseek" { return $ApiKeys["DEEPSEEK_API_KEY"] }
 		"doubao" { return $ApiKeys["DOUBAO_API_KEY"] }
 		"ollama" { return $ApiKeys["OLLAMA_API_KEY"] }
+		"llama_cpp" { return $ApiKeys["LLAMA_CPP_API_KEY"] }
 	}
 }
 
@@ -227,7 +237,7 @@ function Ensure-ApiKeyPresent {
 		[string]$ProjectRoot
 	)
 
-	if ((Normalize-Provider $Provider) -eq "ollama") {
+	if ((Normalize-Provider $Provider) -in @("ollama", "llama_cpp")) {
 		return
 	}
 
@@ -248,7 +258,7 @@ function Resolve-ProviderTimeout {
 	}
 
 	$resolvedTimeout = [int]$Timeout
-	if ((Normalize-Provider $Provider) -eq "ollama" -and $resolvedTimeout -lt $defaultTimeout) {
+	if ((Normalize-Provider $Provider) -in @("ollama", "llama_cpp") -and $resolvedTimeout -lt $defaultTimeout) {
 		return $defaultTimeout
 	}
 

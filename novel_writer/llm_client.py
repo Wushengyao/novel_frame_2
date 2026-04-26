@@ -1,4 +1,4 @@
-"""LLM client with OpenAI-compatible, Gemini, Grok, DeepSeek, Doubao, and Ollama backends."""
+"""LLM client with OpenAI-compatible, Gemini, Grok, DeepSeek, Doubao, Ollama, and llama.cpp backends."""
 
 from __future__ import annotations
 
@@ -17,7 +17,8 @@ from common_utils import utc_now
 
 
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120
-OLLAMA_MIN_TIMEOUT_SECONDS = 900
+LOCAL_LLM_MIN_TIMEOUT_SECONDS = 900
+LOCAL_OPENAI_COMPATIBLE_PROVIDERS = {"ollama", "llama_cpp"}
 LLM_LOG_FILENAME = "llm_interactions.jsonl"
 SENSITIVE_CONFIG_KEYS = {"api_key", "api_base", "model_name", "model"}
 CREATIVE_PHASES = {
@@ -58,12 +59,19 @@ PROVIDER_CREATIVE_TEMPERATURES = {
         "polish": 0.8,
         "illustration_prompt": 0.7,
     },
+    "llama_cpp": {
+        "writer": 0.9,
+        "rewrite": 0.7,
+        "polish": 0.8,
+        "illustration_prompt": 0.7,
+    },
 }
 PROVIDER_STRUCTURED_TEMPERATURES = {
     "gemini": 0.2,
     "grok": 0.2,
     "doubao": 0.2,
     "ollama": 0.2,
+    "llama_cpp": 0.2,
 }
 LEGACY_DEFAULT_TEMPERATURES = {0.8, 0.9, 1.0}
 GEMINI_MODEL_ALIASES = {
@@ -181,7 +189,11 @@ def _normalize_chat_url(api_base: str) -> str:
 
 
 def _resolve_timeout(config: dict[str, Any], provider: str) -> int:
-    default_timeout = OLLAMA_MIN_TIMEOUT_SECONDS if provider == "ollama" else DEFAULT_REQUEST_TIMEOUT_SECONDS
+    default_timeout = (
+        LOCAL_LLM_MIN_TIMEOUT_SECONDS
+        if provider in LOCAL_OPENAI_COMPATIBLE_PROVIDERS
+        else DEFAULT_REQUEST_TIMEOUT_SECONDS
+    )
     raw_timeout = config.get("timeout", default_timeout)
     try:
         timeout = int(raw_timeout)
@@ -190,8 +202,8 @@ def _resolve_timeout(config: dict[str, Any], provider: str) -> int:
 
     if timeout <= 0:
         timeout = default_timeout
-    if provider == "ollama":
-        return max(timeout, OLLAMA_MIN_TIMEOUT_SECONDS)
+    if provider in LOCAL_OPENAI_COMPATIBLE_PROVIDERS:
+        return max(timeout, LOCAL_LLM_MIN_TIMEOUT_SECONDS)
     return timeout
 
 
@@ -622,6 +634,30 @@ def _apply_ollama_defaults(
     return optimized
 
 
+def _apply_llama_cpp_defaults(
+    config: dict[str, Any],
+    *,
+    phase: str,
+    response_format: str,
+) -> dict[str, Any]:
+    optimized = _apply_temperature_defaults(
+        config,
+        provider="llama_cpp",
+        phase=phase,
+        response_format=response_format,
+    )
+    request_options = (
+        dict(optimized.get("request_options") or {})
+        if isinstance(optimized.get("request_options"), dict)
+        else {}
+    )
+    if _is_json_response_format(response_format):
+        request_options.setdefault("response_format", {"type": "json_object"})
+    optimized = dict(optimized)
+    optimized["request_options"] = request_options
+    return optimized
+
+
 def _apply_deepseek_v4_defaults(
     config: dict[str, Any],
     *,
@@ -914,9 +950,30 @@ def generate_text_with_metadata(
         metadata["provider"] = "ollama"
         return text, metadata
 
+    if provider == "llama_cpp":
+        llama_cpp_config = dict(config)
+        llama_cpp_config["api_base"] = (
+            llama_cpp_config.get("api_base", "").strip() or "http://127.0.0.1:8080/v1"
+        )
+        llama_cpp_config = _apply_llama_cpp_defaults(
+            llama_cpp_config,
+            phase=phase,
+            response_format=response_format,
+        )
+        llama_cpp_config["timeout"] = _resolve_timeout(llama_cpp_config, "llama_cpp")
+        text, metadata = generate_text_with_metadata(
+            prompt,
+            {**llama_cpp_config, "model_provider": "openai_compatible"},
+            log_context=log_context,
+            system_prompt=system_prompt,
+            response_format=response_format,
+        )
+        metadata["provider"] = "llama_cpp"
+        return text, metadata
+
     raise ValueError(
         "Unsupported model_provider. Expected one of: "
-        "'openai_compatible', 'gemini', 'grok', 'deepseek', 'doubao', 'ollama'."
+        "'openai_compatible', 'gemini', 'grok', 'deepseek', 'doubao', 'ollama', 'llama_cpp'."
     )
 
 
