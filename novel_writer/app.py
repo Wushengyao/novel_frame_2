@@ -72,6 +72,8 @@ from runtime_config import (
     WRITING_QUALITY_MODES,
     extract_llm_config,
     load_runtime_config,
+    merge_quality_model_configs,
+    sanitize_runtime_overrides,
 )
 from state_updater import update_plot_state
 from version import APP_NAME, DISPLAY_VERSION
@@ -173,6 +175,19 @@ def _extract_audiobook_overrides(args: argparse.Namespace) -> dict:
     if getattr(args, "voxcpm_no_normalize", False):
         mapping["normalize"] = False
     return {key: value for key, value in mapping.items() if value not in (None, "")}
+
+
+def _quality_model_overrides_from_args(args: argparse.Namespace) -> dict:
+    return sanitize_runtime_overrides(
+        {
+            "quality_provider": getattr(args, "quality_provider", None),
+            "quality_model_name": getattr(args, "quality_model", None),
+            "quality_api_base": getattr(args, "quality_api_base", None),
+            "quality_temperature": getattr(args, "quality_temperature", None),
+            "quality_max_tokens": getattr(args, "quality_max_tokens", None),
+            "quality_timeout": getattr(args, "quality_timeout", None),
+        }
+    )
 
 
 def _launch_background_illustration_job(
@@ -579,6 +594,13 @@ def _print_status(project_path: str) -> None:
     print(f"Latest Snapshot: {latest_snapshot if latest_snapshot is not None else 'none'}")
     print(f"Provider: {llm_config.get('model_provider', '')}")
     print(f"Model: {llm_config.get('model_name') or llm_config.get('model', '')}")
+    quality_model = llm_config.get("quality_model") if isinstance(llm_config.get("quality_model"), dict) else {}
+    if quality_model:
+        quality_provider = quality_model.get("model_provider") or llm_config.get("model_provider", "")
+        quality_model_name = quality_model.get("model_name") or quality_model.get("model") or "default"
+        print(f"Quality Model: {quality_provider}/{quality_model_name}")
+    else:
+        print("Quality Model: inherit main")
     print(f"Planning Mode: {normalize_planning_mode(project.get('planning_mode'))}")
     print(f"Writing Quality Mode: {llm_config.get('writing_quality_mode', 'balanced')}")
     print(f"Review Mode: {llm_config.get('review_mode', 'auto')}")
@@ -684,6 +706,12 @@ def main() -> None:
         choices=tuple(sorted(REVIEW_MODES)),
         help="Override quality review behavior for this run",
     )
+    next_parser.add_argument("--quality-provider", help="Override provider for craft brief/review/rewrite")
+    next_parser.add_argument("--quality-model", help="Override model name for craft brief/review/rewrite")
+    next_parser.add_argument("--quality-api-base", help="Override API base for craft brief/review/rewrite")
+    next_parser.add_argument("--quality-temperature", type=float, help="Override temperature for craft brief/review/rewrite")
+    next_parser.add_argument("--quality-max-tokens", type=int, help="Override max tokens for craft brief/review/rewrite")
+    next_parser.add_argument("--quality-timeout", type=int, help="Override timeout for craft brief/review/rewrite")
     next_parser.add_argument("--illustrate", action="store_true", help="Generate chapter illustrations")
     next_parser.add_argument("--illustration-request", default="", help="Optional extra art direction")
     next_parser.add_argument(
@@ -797,6 +825,10 @@ def main() -> None:
             config["writing_quality_mode"] = args.writing_quality_mode
         if args.review_mode:
             config["review_mode"] = args.review_mode
+        quality_overrides = _quality_model_overrides_from_args(args)
+        if quality_overrides.get("quality_model"):
+            existing_quality_model = config.get("quality_model") if isinstance(config.get("quality_model"), dict) else {}
+            config["quality_model"] = merge_quality_model_configs(existing_quality_model, quality_overrides["quality_model"])
         runtime_overrides = {
             key: value
             for key, value in {
@@ -806,6 +838,8 @@ def main() -> None:
             }.items()
             if value
         }
+        if quality_overrides.get("quality_model"):
+            runtime_overrides["quality_model"] = quality_overrides["quality_model"]
         if has_progression:
             chapter_paths = [
                 run_next_chapter_from_progression(

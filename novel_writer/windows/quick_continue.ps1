@@ -24,6 +24,12 @@ $DefaultTemperatureOverride = ""
 $DefaultMaxTokensOverride = ""
 $DefaultTimeoutOverride = ""
 $DefaultPlanningModeOverride = ""
+$DefaultQualityProviderOverride = ""
+$DefaultQualityModelNameOverride = ""
+$DefaultQualityApiBaseOverride = ""
+$DefaultQualityTemperatureOverride = ""
+$DefaultQualityMaxTokensOverride = ""
+$DefaultQualityTimeoutOverride = ""
 $DefaultContinueMode = "direct"
 $DefaultGuidedOptionCount = 4
 $DefaultGuidedFeedback = ""
@@ -91,6 +97,16 @@ $temperatureOverride = if ($env:NOVEL_TEMPERATURE_OVERRIDE) { $env:NOVEL_TEMPERA
 $maxTokensOverride = if ($env:NOVEL_MAX_TOKENS_OVERRIDE) { $env:NOVEL_MAX_TOKENS_OVERRIDE } else { $DefaultMaxTokensOverride }
 $timeoutOverride = if ($env:NOVEL_TIMEOUT_OVERRIDE) { $env:NOVEL_TIMEOUT_OVERRIDE } else { $DefaultTimeoutOverride }
 $planningModeOverride = if ($env:NOVEL_PLANNING_MODE_OVERRIDE) { Normalize-PlanningMode $env:NOVEL_PLANNING_MODE_OVERRIDE } elseif ($PlanningModeOverride) { $PlanningModeOverride } else { $DefaultPlanningModeOverride }
+$qualityProviderOverride = if ($env:NOVEL_QUALITY_PROVIDER) { Normalize-Provider $env:NOVEL_QUALITY_PROVIDER } elseif ($DefaultQualityProviderOverride) { Normalize-Provider $DefaultQualityProviderOverride } else { "" }
+$qualityModelNameOverride = if ($env:NOVEL_QUALITY_MODEL_NAME) { $env:NOVEL_QUALITY_MODEL_NAME } else { $DefaultQualityModelNameOverride }
+$qualityApiBaseOverride = if ($env:NOVEL_QUALITY_API_BASE) { $env:NOVEL_QUALITY_API_BASE } else { $DefaultQualityApiBaseOverride }
+$qualityTemperatureOverride = if ($env:NOVEL_QUALITY_TEMPERATURE) { $env:NOVEL_QUALITY_TEMPERATURE } else { $DefaultQualityTemperatureOverride }
+$qualityMaxTokensOverride = if ($env:NOVEL_QUALITY_MAX_TOKENS) { $env:NOVEL_QUALITY_MAX_TOKENS } else { $DefaultQualityMaxTokensOverride }
+$qualityTimeoutOverride = if ($env:NOVEL_QUALITY_TIMEOUT) { $env:NOVEL_QUALITY_TIMEOUT } else { $DefaultQualityTimeoutOverride }
+$savedQualityProvider = if ($saved.quality_model -and $saved.quality_model.model_provider) { Normalize-Provider "$($saved.quality_model.model_provider)" } else { "" }
+$effectiveQualityProvider = if ($qualityProviderOverride) { $qualityProviderOverride } elseif ($savedQualityProvider) { $savedQualityProvider } else { "" }
+$qualityApiKey = if ($effectiveQualityProvider) { Get-ApiKeyForProvider -Provider $effectiveQualityProvider -ApiKeys $apiKeys } else { "" }
+if ($effectiveQualityProvider) { Ensure-ApiKeyPresent -Provider $effectiveQualityProvider -ApiKey $qualityApiKey -ProjectRoot $ProjectRoot }
 
 if ($ContinueMode -eq "guided" -and $ChapterCount -ne 1) {
 	Write-Warning "Guided mode only writes 1 chapter. ChapterCount has been forced to 1."
@@ -116,7 +132,14 @@ try {
 		-TemperatureOverride $temperatureOverride `
 		-MaxTokensOverride $maxTokensOverride `
 		-TimeoutOverride $timeoutOverride `
-		-PlanningModeOverride $planningModeOverride
+		-PlanningModeOverride $planningModeOverride `
+		-QualityProviderOverride $qualityProviderOverride `
+		-QualityModelNameOverride $qualityModelNameOverride `
+		-QualityApiBaseOverride $qualityApiBaseOverride `
+		-QualityApiKey $qualityApiKey `
+		-QualityTemperatureOverride $qualityTemperatureOverride `
+		-QualityMaxTokensOverride $qualityMaxTokensOverride `
+		-QualityTimeoutOverride $qualityTimeoutOverride
 
 	if ($ContinueMode -eq "guided") {
 		$optionsArgs = @(

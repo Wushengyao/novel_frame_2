@@ -361,7 +361,14 @@ function Write-InitConfig {
 		[double]$Temperature,
 		[int]$MaxTokens,
 		[int]$Timeout,
-		[string]$PlanningMode = "chapter"
+		[string]$PlanningMode = "chapter",
+		[string]$QualityProvider = "",
+		[string]$QualityModelName = "",
+		[string]$QualityApiBase = "",
+		[string]$QualityApiKey = "",
+		[string]$QualityTemperature = "",
+		[string]$QualityMaxTokens = "",
+		[string]$QualityTimeout = ""
 	)
 
 	$outputRoot = Join-Path $ProjectRoot "output"
@@ -384,6 +391,18 @@ function Write-InitConfig {
 		max_tokens = $MaxTokens
 		timeout = $Timeout
 	}
+	$qualityModel = [ordered]@{}
+	if ($QualityProvider) { $qualityModel.model_provider = Normalize-Provider $QualityProvider }
+	if ($QualityModelName) {
+		$qualityModel.model_name = $QualityModelName
+		$qualityModel.model = $QualityModelName
+	}
+	if ($QualityApiBase) { $qualityModel.api_base = $QualityApiBase }
+	if ($QualityApiKey) { $qualityModel.api_key = $QualityApiKey }
+	if ($QualityTemperature) { $qualityModel.temperature = [double]$QualityTemperature }
+	if ($QualityMaxTokens) { $qualityModel.max_tokens = [int]$QualityMaxTokens }
+	if ($QualityTimeout) { $qualityModel.timeout = [int]$QualityTimeout }
+	if ($qualityModel.Count -gt 0) { $config.quality_model = $qualityModel }
 
 	Write-Utf8JsonFile -Path $OutputPath -Data $config
 }
@@ -399,7 +418,14 @@ function Write-ContinueConfig {
 		[string]$TemperatureOverride = "",
 		[string]$MaxTokensOverride = "",
 		[string]$TimeoutOverride = "",
-		[string]$PlanningModeOverride = ""
+		[string]$PlanningModeOverride = "",
+		[string]$QualityProviderOverride = "",
+		[string]$QualityModelNameOverride = "",
+		[string]$QualityApiBaseOverride = "",
+		[string]$QualityApiKey = "",
+		[string]$QualityTemperatureOverride = "",
+		[string]$QualityMaxTokensOverride = "",
+		[string]$QualityTimeoutOverride = ""
 	)
 
 	$project = Get-ProjectJson -ProjectPath $ProjectPath
@@ -472,6 +498,40 @@ function Write-ContinueConfig {
 		timeout = $timeout
 		planning_mode = $planningMode
 	}
+	$qualityModel = [ordered]@{}
+	if ($saved.quality_model) {
+		$savedQuality = $saved.quality_model
+		if ($savedQuality.model_provider) { $qualityModel.model_provider = "$($savedQuality.model_provider)" }
+		if ($savedQuality.model_name) {
+			$qualityModel.model_name = "$($savedQuality.model_name)"
+			$qualityModel.model = "$($savedQuality.model_name)"
+		}
+		elseif ($savedQuality.model) {
+			$qualityModel.model_name = "$($savedQuality.model)"
+			$qualityModel.model = "$($savedQuality.model)"
+		}
+		if ($savedQuality.api_base) { $qualityModel.api_base = "$($savedQuality.api_base)" }
+		if ($null -ne $savedQuality.temperature) { $qualityModel.temperature = [double]$savedQuality.temperature }
+		if ($null -ne $savedQuality.max_tokens) { $qualityModel.max_tokens = [int]$savedQuality.max_tokens }
+		if ($null -ne $savedQuality.timeout) { $qualityModel.timeout = [int]$savedQuality.timeout }
+	}
+	if ($QualityProviderOverride) {
+		$qualityModel.model_provider = Normalize-Provider $QualityProviderOverride
+		if (-not $QualityModelNameOverride) {
+			$qualityModel.Remove("model_name")
+			$qualityModel.Remove("model")
+		}
+	}
+	if ($QualityModelNameOverride) {
+		$qualityModel.model_name = $QualityModelNameOverride
+		$qualityModel.model = $QualityModelNameOverride
+	}
+	if ($QualityApiBaseOverride) { $qualityModel.api_base = $QualityApiBaseOverride }
+	if ($QualityApiKey) { $qualityModel.api_key = $QualityApiKey }
+	if ($QualityTemperatureOverride) { $qualityModel.temperature = [double]$QualityTemperatureOverride }
+	if ($QualityMaxTokensOverride) { $qualityModel.max_tokens = [int]$QualityMaxTokensOverride }
+	if ($QualityTimeoutOverride) { $qualityModel.timeout = [int]$QualityTimeoutOverride }
+	if ($qualityModel.Count -gt 0) { $config.quality_model = $qualityModel }
 
 	Write-Utf8JsonFile -Path $OutputPath -Data $config
 }

@@ -586,6 +586,24 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(captured["config"]["writing_quality_mode"], "high")
         self.assertEqual(captured["config"]["review_mode"], "manual")
 
+        with patch("webui.init_project", side_effect=fake_init_project):
+            webui._create_project(
+                {
+                    "provider": "ollama",
+                    "model_preset": "qwen2.5:14b",
+                    "story_request": "娴嬭瘯鏁呬簨",
+                    "quality_provider": "gemini",
+                    "quality_model_name": "gemini-2.5-pro",
+                    "quality_temperature": "0.4",
+                },
+                {"OLLAMA_API_KEY": "", "GEMINI_API_KEY": "gemini-key"},
+            )
+
+        self.assertEqual(captured["config"]["quality_model"]["model_provider"], "gemini")
+        self.assertEqual(captured["config"]["quality_model"]["model_name"], "gemini-2.5-pro")
+        self.assertEqual(captured["config"]["quality_model"]["api_key"], "gemini-key")
+        self.assertEqual(captured["config"]["quality_model"]["temperature"], "0.4")
+
     def test_runtime_overrides_include_quality_and_review_modes(self) -> None:
         overrides = webui._runtime_overrides_from_form(
             {
@@ -616,6 +634,40 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         )
         self.assertEqual(config["writing_quality_mode"], "high")
         self.assertEqual(config["review_mode"], "manual")
+
+    def test_runtime_config_resolves_quality_model_overrides(self) -> None:
+        project = load_json(str(self.project_path / "project.json"))
+        project["llm_config"]["quality_model"] = {
+            "model_provider": "gemini",
+            "model_name": "gemini-2.5-pro",
+            "api_key": "",
+        }
+        save_json(str(self.project_path / "project.json"), project)
+
+        config = webui._build_runtime_config(
+            self.project_path,
+            {"quality_model": {"model_name": "gemini-2.5-flash", "temperature": "0.2"}},
+            {"OLLAMA_API_KEY": "", "GEMINI_API_KEY": "gemini-key"},
+        )
+
+        self.assertEqual(config["model_name"], "llama3.2")
+        self.assertEqual(config["quality_model"]["model_provider"], "gemini")
+        self.assertEqual(config["quality_model"]["model_name"], "gemini-2.5-flash")
+        self.assertEqual(config["quality_model"]["api_key"], "gemini-key")
+        self.assertEqual(config["quality_model"]["temperature"], "0.2")
+
+    def test_runtime_overrides_include_quality_model_fields(self) -> None:
+        overrides = webui._runtime_overrides_from_form(
+            {
+                "quality_provider": "gemini",
+                "quality_model_name": "gemini-2.5-pro",
+                "quality_temperature": "0.3",
+            }
+        )
+
+        self.assertEqual(overrides["quality_model"]["model_provider"], "gemini")
+        self.assertEqual(overrides["quality_model"]["model_name"], "gemini-2.5-pro")
+        self.assertEqual(overrides["quality_model"]["temperature"], "0.3")
 
     def test_runtime_overrides_includes_log_llm_payload_when_checked(self) -> None:
         overrides = webui._runtime_overrides_from_form(

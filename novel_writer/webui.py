@@ -687,6 +687,46 @@ def _resolve_model_name_from_form(form: dict[str, str]) -> str:
     return (form.get("model_name") or "").strip()
 
 
+def _quality_model_from_form(form: dict[str, str], api_keys: dict[str, str] | None = None) -> dict:
+    provider = _normalize_provider_for_ui(form.get("quality_provider"), default="")
+    model_name = (form.get("quality_model_name") or "").strip()
+    api_base = (form.get("quality_api_base") or "").strip()
+    quality_model: dict[str, object] = {}
+    if provider:
+        quality_model["model_provider"] = provider
+    if model_name:
+        quality_model["model_name"] = model_name
+        quality_model["model"] = model_name
+    if api_base:
+        quality_model["api_base"] = api_base
+    for form_key, config_key in (
+        ("quality_temperature", "temperature"),
+        ("quality_max_tokens", "max_tokens"),
+        ("quality_timeout", "timeout"),
+    ):
+        value = (form.get(form_key) or "").strip()
+        if value:
+            quality_model[config_key] = value
+    if provider and api_keys is not None:
+        quality_model["api_key"] = _api_key_for_provider(provider, api_keys)
+    return quality_model
+
+
+def _quality_model_label(llm_config: dict) -> str:
+    quality_model = llm_config.get("quality_model") if isinstance(llm_config.get("quality_model"), dict) else {}
+    if not quality_model:
+        return "inherit main"
+    provider = str(quality_model.get("model_provider") or llm_config.get("model_provider") or "").strip()
+    model = str(quality_model.get("model_name") or quality_model.get("model") or "").strip()
+    if provider and model:
+        return f"{provider}/{model}"
+    if provider:
+        return f"{provider}/default"
+    if model:
+        return f"main/{model}"
+    return "inherit main"
+
+
 def _model_blank_label(provider: str, *, base_model: str, provider_explicit: bool) -> str:
     effective_provider = _normalize_provider_for_ui(provider, default="gemini")
     default_model = _default_model_for_provider(effective_provider)
@@ -858,7 +898,7 @@ def _load_saved_runtime_config(project_path: Path) -> dict:
     return shared_load_runtime_config(str(project_path))
 
 
-def _runtime_overrides_from_form(form: dict[str, str]) -> dict[str, str]:
+def _runtime_overrides_from_form(form: dict[str, str]) -> dict[str, object]:
     log_llm_payload = bool(form.get("log_llm_payload"))
     return sanitize_runtime_overrides(
         {
@@ -872,6 +912,7 @@ def _runtime_overrides_from_form(form: dict[str, str]) -> dict[str, str]:
             "timeout": form.get("timeout"),
             "api_base": form.get("api_base"),
             "log_llm_payload": "1" if log_llm_payload else "",
+            "quality_model": _quality_model_from_form(form),
         }
     )
 
@@ -1002,6 +1043,44 @@ def _render_runtime_override_fields(
         if include_quality_fields
         else ""
     )
+    quality_model_fields_html = (
+        """
+    <div class="two-col">
+      <label>Quality Provider
+        <select name="quality_provider">
+          <option value="">inherit main provider</option>
+          <option value="gemini">gemini</option>
+          <option value="grok">grok</option>
+          <option value="deepseek">deepseek</option>
+          <option value="doubao">doubao</option>
+          <option value="ollama">ollama</option>
+        </select>
+      </label>
+      <label>Quality Model
+        <input type="text" name="quality_model_name" placeholder="inherit main model">
+      </label>
+    </div>
+    <div class="two-col">
+      <label>Quality API Base
+        <input type="text" name="quality_api_base" placeholder="inherit or provider default">
+      </label>
+      <label>Quality Timeout
+        <input type="number" name="quality_timeout" placeholder="inherit or provider default">
+      </label>
+    </div>
+    <div class="two-col">
+      <label>Quality Temperature
+        <input type="number" step="0.1" name="quality_temperature" placeholder="inherit main">
+      </label>
+      <label>Quality Max Tokens
+        <input type="number" name="quality_max_tokens" placeholder="inherit main">
+      </label>
+    </div>
+    <div class="muted">Optional advanced model used only for craft brief, quality review, and rewrite.</div>
+        """
+        if include_quality_fields
+        else ""
+    )
     return f"""
     <div class="two-col">
       <label>临时后端覆盖
@@ -1013,6 +1092,7 @@ def _render_runtime_override_fields(
     </div>
     {planning_help_html}
     {quality_fields_html}
+    {quality_model_fields_html}
     <div class="two-col">
       <label>模型预设
         <select
@@ -1083,6 +1163,9 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_cal
         "max_tokens": int(form.get("max_tokens") or 4000),
         "timeout": _resolve_timeout_for_provider(provider, form.get("timeout") or _default_timeout_for_provider(provider)),
     }
+    quality_model = _quality_model_from_form(form, api_keys)
+    if quality_model:
+        config["quality_model"] = quality_model
 
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as tmp:
         json.dump(config, tmp, ensure_ascii=False, indent=2)
@@ -2769,6 +2852,38 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                   </label>
                 </div>
                 <div class="muted">默认平衡模式会先生成短蓝图，写后保存质检报告；高质量模式可在自动审稿失败时重写一次。</div>
+                <div class="two-col">
+                  <label>Quality Provider
+                    <select name="quality_provider">
+                      <option value="">inherit main provider</option>
+                      <option value="gemini">gemini</option>
+                      <option value="grok">grok</option>
+                      <option value="deepseek">deepseek</option>
+                      <option value="doubao">doubao</option>
+                      <option value="ollama">ollama</option>
+                    </select>
+                  </label>
+                  <label>Quality Model
+                    <input type="text" name="quality_model_name" placeholder="inherit main model">
+                  </label>
+                </div>
+                <div class="two-col">
+                  <label>Quality API Base
+                    <input type="text" name="quality_api_base" placeholder="inherit or provider default">
+                  </label>
+                  <label>Quality Timeout
+                    <input type="number" name="quality_timeout" placeholder="inherit or provider default">
+                  </label>
+                </div>
+                <div class="two-col">
+                  <label>Quality Temperature
+                    <input type="number" step="0.1" name="quality_temperature" placeholder="inherit main">
+                  </label>
+                  <label>Quality Max Tokens
+                    <input type="number" name="quality_max_tokens" placeholder="inherit main">
+                  </label>
+                </div>
+                <div class="muted">Optional advanced model used only for craft brief, quality review, and rewrite.</div>
                 <button type="submit">创建项目</button>
               </form>
             </section>
@@ -2881,6 +2996,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <p><strong>Planning:</strong>{escape(_planning_mode_label(project.get("planning_mode", DEFAULT_PLANNING_MODE)))}</p>
               <p><strong>Quality:</strong>{escape(_quality_mode_label((project.get("llm_config") or {}).get("writing_quality_mode", DEFAULT_WRITING_QUALITY_MODE)))}</p>
               <p><strong>Review:</strong>{escape(_review_mode_label((project.get("llm_config") or {}).get("review_mode", DEFAULT_REVIEW_MODE)))}</p>
+              <p><strong>Quality Model:</strong>{escape(_quality_model_label(project.get("llm_config") or {}))}</p>
             </section>
             <section class="panel">
               <h3>后台任务</h3>
@@ -3656,6 +3772,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 <p><strong>Planning:</strong>{escape(_planning_mode_label(planning_mode))}</p>
                 <p><strong>Quality:</strong>{escape(_quality_mode_label(project_llm_config.get("writing_quality_mode", DEFAULT_WRITING_QUALITY_MODE)))}</p>
                 <p><strong>Review:</strong>{escape(_review_mode_label(project_llm_config.get("review_mode", DEFAULT_REVIEW_MODE)))}</p>
+                <p><strong>Quality Model:</strong>{escape(_quality_model_label(project_llm_config))}</p>
               </div>
             </section>
             <section class="panel">

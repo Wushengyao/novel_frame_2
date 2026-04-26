@@ -43,10 +43,17 @@ def _resolve_log_path(config: dict[str, Any]) -> Path | None:
 
 
 def _mask_config_for_log(config: dict[str, Any]) -> dict[str, Any]:
-    masked = dict(config)
-    for key in SENSITIVE_CONFIG_KEYS:
-        if key in masked:
-            masked[key] = "***"
+    def mask_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: "***" if key in SENSITIVE_CONFIG_KEYS else mask_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [mask_value(item) for item in value]
+        return value
+
+    masked = mask_value(config)
     masked.pop("project_path", None)
     return masked
 

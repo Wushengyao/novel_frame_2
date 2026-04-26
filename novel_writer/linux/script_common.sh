@@ -220,6 +220,35 @@ data = {
     "max_tokens": int(os.environ["NOVEL_MAX_TOKENS"]),
     "timeout": int(os.environ.get("NOVEL_TIMEOUT") or default_timeouts.get(provider, 120)),
 }
+quality_model = {}
+quality_provider = os.environ.get("NOVEL_QUALITY_PROVIDER", "").strip()
+quality_model_name = os.environ.get("NOVEL_QUALITY_MODEL_NAME", "").strip()
+if quality_provider:
+    quality_model["model_provider"] = quality_provider
+    if not quality_model_name:
+        quality_model.pop("model_name", None)
+        quality_model.pop("model", None)
+if quality_model_name:
+    quality_model["model_name"] = quality_model_name
+    quality_model["model"] = quality_model_name
+for env_name, key in (
+    ("NOVEL_QUALITY_API_BASE", "api_base"),
+    ("NOVEL_QUALITY_API_KEY", "api_key"),
+    ("NOVEL_QUALITY_TEMPERATURE", "temperature"),
+    ("NOVEL_QUALITY_MAX_TOKENS", "max_tokens"),
+    ("NOVEL_QUALITY_TIMEOUT", "timeout"),
+):
+    value = os.environ.get(env_name, "").strip()
+    if not value:
+        continue
+    if key == "temperature":
+        quality_model[key] = float(value)
+    elif key in {"max_tokens", "timeout"}:
+        quality_model[key] = int(value)
+    else:
+        quality_model[key] = value
+if quality_model:
+    data["quality_model"] = quality_model
 
 outline_request = os.environ.get("NOVEL_OUTLINE_REQUEST", "").strip()
 if outline_request:
@@ -299,6 +328,36 @@ data = {
       )
     ),
 }
+saved_quality = saved.get("quality_model") if isinstance(saved.get("quality_model"), dict) else {}
+quality_model = dict(saved_quality)
+quality_provider = os.environ.get("NOVEL_QUALITY_PROVIDER", "").strip()
+quality_model_name = os.environ.get("NOVEL_QUALITY_MODEL_NAME", "").strip()
+if quality_provider:
+    quality_model["model_provider"] = quality_provider
+    if not quality_model_name:
+        quality_model.pop("model_name", None)
+        quality_model.pop("model", None)
+if quality_model_name:
+    quality_model["model_name"] = quality_model_name
+    quality_model["model"] = quality_model_name
+for env_name, key in (
+    ("NOVEL_QUALITY_API_BASE", "api_base"),
+    ("NOVEL_QUALITY_API_KEY", "api_key"),
+    ("NOVEL_QUALITY_TEMPERATURE", "temperature"),
+    ("NOVEL_QUALITY_MAX_TOKENS", "max_tokens"),
+    ("NOVEL_QUALITY_TIMEOUT", "timeout"),
+):
+    value = os.environ.get(env_name, "").strip()
+    if not value:
+        continue
+    if key == "temperature":
+        quality_model[key] = float(value)
+    elif key in {"max_tokens", "timeout"}:
+        quality_model[key] = int(value)
+    else:
+        quality_model[key] = value
+if quality_model:
+    data["quality_model"] = quality_model
 
 with open(config_path, "w", encoding="utf-8") as fh:
     json.dump(data, fh, ensure_ascii=False, indent=2)

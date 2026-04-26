@@ -23,6 +23,7 @@ from runtime_config import (
     WRITING_QUALITY_LIGHT,
     normalize_review_mode,
     normalize_writing_quality_mode,
+    resolve_quality_model_config,
 )
 
 
@@ -179,6 +180,24 @@ def quality_review_path(project_path: str, chapter_number: int, attempt: int) ->
     return Path(project_path) / QUALITY_REVIEW_DIR_NAME / f"chapter_{chapter_number:04d}_attempt_{attempt}.json"
 
 
+def _quality_request_config(config: dict, log_context: dict[str, Any], phase: str) -> tuple[dict, dict[str, Any], dict[str, object]]:
+    request_config, uses_quality_model = resolve_quality_model_config(config)
+    request_log_context = {
+        **log_context,
+        "phase": phase,
+        "uses_quality_model": uses_quality_model,
+    }
+    telemetry_extra: dict[str, object] = {"uses_quality_model": uses_quality_model}
+    if uses_quality_model:
+        provider = str(request_config.get("model_provider", "") or "")
+        model = str(request_config.get("model_name") or request_config.get("model") or "")
+        request_log_context["quality_model_provider"] = provider
+        request_log_context["quality_model"] = model
+        telemetry_extra["quality_model_provider"] = provider
+        telemetry_extra["quality_model"] = model
+    return request_config, request_log_context, telemetry_extra
+
+
 def generate_craft_brief(
     project_path: str,
     prompt_context: dict,
@@ -190,19 +209,19 @@ def generate_craft_brief(
     chapter_number = int((prompt_context.get("task_card") or {}).get("chapter_number", 0) or 0)
     fallback = fallback_craft_brief(prompt_context)
     prompt = build_craft_brief_prompt(prompt_context)
+    request_config, request_log_context, quality_extra = _quality_request_config(config, log_context, "craft_brief")
     record_context_telemetry(
         project_path,
         "craft_brief",
         prompt_chars=len(prompt),
         section_chars=prompt_context.get("section_chars"),
         planning_mode=config.get("planning_mode", ""),
-        extra={"target_chapter_number": chapter_number},
+        extra={"target_chapter_number": chapter_number, **quality_extra},
     )
-    request_log_context = {**log_context, "phase": "craft_brief"}
     try:
         log_info("craft_brief: requesting model brief")
         emit_progress(progress_callback, "craft_brief", "Generating chapter craft brief")
-        response_text, metadata = generate_text_with_metadata(prompt, config, log_context=request_log_context)
+        response_text, metadata = generate_text_with_metadata(prompt, request_config, log_context=request_log_context)
         update_project_stats(project_path, phase="craft_brief", success=True, usage=metadata.get("usage"))
     except Exception as exc:  # pragma: no cover - resilience path
         update_project_stats(project_path, phase="craft_brief", success=False, usage=None)
@@ -235,19 +254,20 @@ def review_chapter_draft(
 ) -> dict:
     chapter_number = int((prompt_context.get("task_card") or {}).get("chapter_number", 0) or 0)
     prompt = build_quality_review_prompt(prompt_context, draft_text, strict=strict)
+    request_config, request_log_context, quality_extra = _quality_request_config(config, log_context, "quality_review")
     record_context_telemetry(
         project_path,
         "quality_review",
         prompt_chars=len(prompt),
         section_chars=prompt_context.get("section_chars"),
         planning_mode=config.get("planning_mode", ""),
-        extra={"target_chapter_number": chapter_number, "attempt": attempt, "strict": strict},
+        extra={"target_chapter_number": chapter_number, "attempt": attempt, "strict": strict, **quality_extra},
     )
-    request_log_context = {**log_context, "phase": "quality_review", "attempt": attempt}
+    request_log_context["attempt"] = attempt
     try:
         log_info(f"quality_review: requesting review attempt={attempt}")
         emit_progress(progress_callback, "quality_review", f"Reviewing chapter draft (attempt {attempt})")
-        response_text, metadata = generate_text_with_metadata(prompt, config, log_context=request_log_context)
+        response_text, metadata = generate_text_with_metadata(prompt, request_config, log_context=request_log_context)
         update_project_stats(project_path, phase="quality_review", success=True, usage=metadata.get("usage"))
     except Exception as exc:  # pragma: no cover - resilience path
         update_project_stats(project_path, phase="quality_review", success=False, usage=None)
@@ -279,19 +299,19 @@ def rewrite_chapter_draft(
 ) -> str:
     chapter_number = int((prompt_context.get("task_card") or {}).get("chapter_number", 0) or 0)
     prompt = build_rewrite_prompt(prompt_context, draft_text, review_report)
+    request_config, request_log_context, quality_extra = _quality_request_config(config, log_context, "rewrite")
     record_context_telemetry(
         project_path,
         "rewrite",
         prompt_chars=len(prompt),
         section_chars=prompt_context.get("section_chars"),
         planning_mode=config.get("planning_mode", ""),
-        extra={"target_chapter_number": chapter_number},
+        extra={"target_chapter_number": chapter_number, **quality_extra},
     )
-    request_log_context = {**log_context, "phase": "rewrite"}
     try:
         log_info("rewrite: requesting improved chapter draft")
         emit_progress(progress_callback, "rewrite", "Rewriting chapter draft after quality review")
-        response_text, metadata = generate_text_with_metadata(prompt, config, log_context=request_log_context)
+        response_text, metadata = generate_text_with_metadata(prompt, request_config, log_context=request_log_context)
         update_project_stats(project_path, phase="rewrite", success=True, usage=metadata.get("usage"))
         return response_text
     except Exception:

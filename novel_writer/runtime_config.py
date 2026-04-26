@@ -92,6 +92,14 @@ RUNTIME_OVERRIDE_KEYS = (
     "review_mode",
     "log_llm_payload",
 )
+QUALITY_MODEL_OVERRIDE_KEYS = {
+    "quality_provider": "model_provider",
+    "quality_model_name": "model_name",
+    "quality_api_base": "api_base",
+    "quality_temperature": "temperature",
+    "quality_max_tokens": "max_tokens",
+    "quality_timeout": "timeout",
+}
 
 
 def _coerce_bool(raw_value: object, default: bool = False) -> bool:
@@ -215,9 +223,121 @@ def api_key_for_provider(provider: str, api_keys: dict[str, str]) -> str:
     return mapping.get(normalize_provider(provider, default="openai_compatible"), "")
 
 
-def sanitize_runtime_overrides(overrides: dict | None) -> dict[str, str]:
+def _is_nonempty(value: object) -> bool:
+    return value not in (None, "")
+
+
+def _clean_quality_model_config(raw: object, *, include_api_key: bool = True) -> dict:
+    source = raw if isinstance(raw, dict) else {}
+    quality_model: dict[str, object] = {}
+
+    provider = normalize_provider(source.get("model_provider") or source.get("provider"), default="")
+    if provider:
+        quality_model["model_provider"] = provider
+
+    model = str(source.get("model_name") or source.get("model") or "").strip()
+    if model:
+        quality_model["model_name"] = model
+        quality_model["model"] = model
+
+    api_base = str(source.get("api_base", "") or "").strip()
+    if api_base:
+        quality_model["api_base"] = api_base
+
+    if include_api_key:
+        api_key = str(source.get("api_key", "") or "").strip()
+        if api_key:
+            quality_model["api_key"] = api_key
+
+    for key in ("temperature", "max_tokens", "timeout"):
+        value = source.get(key)
+        if _is_nonempty(value):
+            quality_model[key] = value
+
+    return quality_model
+
+
+def quality_model_configured(raw: object) -> bool:
+    return bool(_clean_quality_model_config(raw, include_api_key=False))
+
+
+def merge_quality_model_configs(base: object, override: object) -> dict:
+    merged = _clean_quality_model_config(base)
+    override_clean = _clean_quality_model_config(override)
+    if override_clean.get("model_provider") and not (override_clean.get("model_name") or override_clean.get("model")):
+        merged.pop("model_name", None)
+        merged.pop("model", None)
+    merged.update(override_clean)
+    if "model_name" in merged:
+        merged["model"] = merged["model_name"]
+    elif "model" in merged:
+        merged["model_name"] = merged["model"]
+    return merged
+
+
+def resolve_quality_model_config(config: dict) -> tuple[dict, bool]:
+    raw_quality_model = _clean_quality_model_config(config.get("quality_model"))
+    if not quality_model_configured(raw_quality_model):
+        resolved = dict(config)
+        resolved.pop("quality_model", None)
+        return resolved, False
+
+    base_provider = normalize_provider(config.get("model_provider"), default="openai_compatible")
+    raw_provider = str(raw_quality_model.get("model_provider", "") or "").strip()
+    provider = normalize_provider(raw_provider, default=base_provider)
+    provider_changed = provider != base_provider
+
+    base_model = str(config.get("model_name") or config.get("model") or "").strip()
+    raw_model = str(raw_quality_model.get("model_name") or raw_quality_model.get("model") or "").strip()
+    model = raw_model or (default_model_for_provider(provider) if raw_provider else base_model)
+
+    raw_api_base = str(raw_quality_model.get("api_base", "") or "").strip()
+    api_base = raw_api_base or (
+        default_api_base_for_provider(provider)
+        if provider_changed
+        else str(config.get("api_base", "") or "").strip()
+    )
+
+    raw_api_key = str(raw_quality_model.get("api_key", "") or "").strip()
+    api_key = raw_api_key or (
+        str(config.get("api_key", "") or "").strip()
+        if provider == base_provider
+        else ""
+    )
+
+    timeout_value = raw_quality_model.get("timeout")
+    if not _is_nonempty(timeout_value):
+        timeout_value = default_timeout_for_provider(provider) if provider_changed else config.get("timeout")
+    temperature_value = raw_quality_model.get("temperature")
+    if not _is_nonempty(temperature_value):
+        temperature_value = config.get("temperature", 0.8)
+    max_tokens_value = raw_quality_model.get("max_tokens")
+    if not _is_nonempty(max_tokens_value):
+        max_tokens_value = config.get("max_tokens", 4000)
+
+    resolved = dict(config)
+    resolved.pop("quality_model", None)
+    resolved.update(
+        {
+            "model_provider": provider,
+            "model_name": model,
+            "model": model,
+            "api_base": api_base,
+            "api_key": api_key,
+            "temperature": float(temperature_value),
+            "max_tokens": int(max_tokens_value),
+            "timeout": resolve_timeout_for_provider(
+                provider,
+                timeout_value or default_timeout_for_provider(provider),
+            ),
+        }
+    )
+    return resolved, True
+
+
+def sanitize_runtime_overrides(overrides: dict | None) -> dict[str, object]:
     raw = overrides if isinstance(overrides, dict) else {}
-    sanitized: dict[str, str] = {}
+    sanitized: dict[str, object] = {}
     for key in RUNTIME_OVERRIDE_KEYS:
         value = raw.get(key)
         if value in (None, ""):
@@ -237,6 +357,21 @@ def sanitize_runtime_overrides(overrides: dict | None) -> dict[str, str]:
             sanitized[key] = normalize_review_mode(value)
             continue
         sanitized[key] = str(value).strip()
+    quality_model = _clean_quality_model_config(raw.get("quality_model"))
+    for raw_key, quality_key in QUALITY_MODEL_OVERRIDE_KEYS.items():
+        value = raw.get(raw_key)
+        if value in (None, ""):
+            continue
+        if quality_key == "model_provider":
+            normalized = normalize_provider(value, default="")
+            if normalized:
+                quality_model[quality_key] = normalized
+            continue
+        quality_model[quality_key] = str(value).strip()
+        if quality_key == "model_name":
+            quality_model["model"] = str(value).strip()
+    if quality_model:
+        sanitized["quality_model"] = quality_model
     return sanitized
 
 
@@ -257,6 +392,9 @@ def _normalized_llm_config(raw: dict) -> dict:
         "review_mode": normalize_review_mode(raw.get("review_mode")),
         "log_llm_payload": _coerce_bool(raw.get("log_llm_payload")),
     }
+    quality_model = _clean_quality_model_config(raw.get("quality_model"))
+    if quality_model:
+        config["quality_model"] = quality_model
     return config
 
 
@@ -328,4 +466,18 @@ def build_runtime_config(project_path: str | Path, overrides: dict[str, object],
     }
     if provider_requires_api_key(provider) and not runtime["api_key"]:
         raise RuntimeError(f"provider={provider} missing API key, please fill api_keys.sh")
+    quality_model = merge_quality_model_configs(saved.get("quality_model"), runtime_overrides.get("quality_model"))
+    if quality_model:
+        quality_provider = normalize_provider(quality_model.get("model_provider"), default=provider)
+        if not str(quality_model.get("api_key", "") or "").strip():
+            quality_model["api_key"] = (
+                runtime["api_key"]
+                if quality_provider == provider
+                else api_key_for_provider(quality_provider, api_keys)
+            )
+        runtime["quality_model"] = quality_model
+        quality_runtime, _ = resolve_quality_model_config(runtime)
+        quality_provider = normalize_provider(quality_runtime.get("model_provider"), default=provider)
+        if provider_requires_api_key(quality_provider) and not str(quality_runtime.get("api_key", "") or "").strip():
+            raise RuntimeError(f"quality provider={quality_provider} missing API key, please fill api_keys.sh")
     return runtime

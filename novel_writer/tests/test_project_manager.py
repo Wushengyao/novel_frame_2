@@ -9,6 +9,7 @@ from unittest.mock import patch
 from project_manager import (
     ProjectWriteLockError,
     _generate_initial_story_data,
+    _build_persisted_llm_config,
     _prune_initial_supporting_characters,
     acquire_project_write_lock,
     rollback_project,
@@ -20,6 +21,26 @@ from tests.test_support import create_test_project, read_json
 
 
 class ProjectManagerTests(unittest.TestCase):
+    def test_persisted_llm_config_keeps_quality_model_but_clears_api_key(self) -> None:
+        persisted = _build_persisted_llm_config(
+            {
+                "model_provider": "ollama",
+                "model_name": "llama3.2",
+                "api_key": "main-key",
+                "quality_model": {
+                    "model_provider": "gemini",
+                    "model_name": "gemini-2.5-pro",
+                    "api_key": "quality-key",
+                    "temperature": 0.4,
+                },
+            }
+        )
+
+        self.assertEqual(persisted["api_key"], "")
+        self.assertEqual(persisted["quality_model"]["api_key"], "")
+        self.assertEqual(persisted["quality_model"]["model_name"], "gemini-2.5-pro")
+        self.assertEqual(persisted["quality_model"]["temperature"], 0.4)
+
     def test_project_write_lock_rejects_same_project_reentry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp), project_id="lock_same")

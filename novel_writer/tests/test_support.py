@@ -23,6 +23,7 @@ def create_test_project(
     planning_mode: str = "chapter",
     writing_quality_mode: str = "light",
     review_mode: str = "auto",
+    quality_model: dict | None = None,
 ) -> Path:
     project_path = base_dir / f"novel_project_{project_id}"
     project_path.mkdir(parents=True, exist_ok=True)
@@ -39,6 +40,22 @@ def create_test_project(
     ):
         (project_path / name).mkdir(exist_ok=True)
 
+    llm_config = {
+        "model_provider": "ollama",
+        "model": "llama3.2",
+        "model_name": "llama3.2",
+        "api_base": "http://127.0.0.1:11434/v1",
+        "api_key": "",
+        "temperature": 0.8,
+        "max_tokens": 4000,
+        "timeout": 900,
+        "planning_mode": planning_mode,
+        "writing_quality_mode": writing_quality_mode,
+        "review_mode": review_mode,
+    }
+    if quality_model:
+        llm_config["quality_model"] = quality_model
+
     save_json(
         str(project_path / "project.json"),
         {
@@ -51,19 +68,7 @@ def create_test_project(
             "created_at": "2026-04-20T00:00:00+00:00",
             "updated_at": "2026-04-20T00:00:00+00:00",
             "chapter_count": 0,
-            "llm_config": {
-                "model_provider": "ollama",
-                "model": "llama3.2",
-                "model_name": "llama3.2",
-                "api_base": "http://127.0.0.1:11434/v1",
-                "api_key": "",
-                "temperature": 0.8,
-                "max_tokens": 4000,
-                "timeout": 900,
-                "planning_mode": planning_mode,
-                "writing_quality_mode": writing_quality_mode,
-                "review_mode": review_mode,
-            },
+            "llm_config": llm_config,
         },
     )
     save_json(
@@ -181,8 +186,9 @@ def runtime_config(
     *,
     writing_quality_mode: str = "light",
     review_mode: str = "auto",
+    quality_model: dict | None = None,
 ) -> dict:
-    return {
+    config = {
         "model_provider": "ollama",
         "model": "llama3.2",
         "model_name": "llama3.2",
@@ -195,3 +201,6 @@ def runtime_config(
         "writing_quality_mode": writing_quality_mode,
         "review_mode": review_mode,
     }
+    if quality_model:
+        config["quality_model"] = quality_model
+    return config

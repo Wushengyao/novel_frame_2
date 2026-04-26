@@ -28,6 +28,12 @@ $DefaultTemperature = "1.0"
 $DefaultMaxTokens = "10240"
 $DefaultTimeout = ""
 $DefaultPlanningMode = "chapter"
+$DefaultQualityProvider = ""
+$DefaultQualityModelName = ""
+$DefaultQualityApiBase = ""
+$DefaultQualityTemperature = ""
+$DefaultQualityMaxTokens = ""
+$DefaultQualityTimeout = ""
 
 if (-not $PSBoundParameters.ContainsKey("Provider")) {
 	$Provider = Prompt-OptionalValue -PromptText "Provider (gemini/grok/deepseek/doubao/ollama)" -DefaultValue $Provider
@@ -74,6 +80,14 @@ $apiBase = if ($env:NOVEL_API_BASE) { $env:NOVEL_API_BASE } elseif ($DefaultApiB
 $temperature = if ($env:NOVEL_TEMPERATURE) { [double]$env:NOVEL_TEMPERATURE } else { [double]$DefaultTemperature }
 $maxTokens = if ($env:NOVEL_MAX_TOKENS) { [int]$env:NOVEL_MAX_TOKENS } else { [int]$DefaultMaxTokens }
 $timeout = if ($env:NOVEL_TIMEOUT) { [int]$env:NOVEL_TIMEOUT } elseif ($DefaultTimeout) { [int]$DefaultTimeout } else { Get-DefaultTimeoutForProvider $Provider }
+$qualityProvider = if ($env:NOVEL_QUALITY_PROVIDER) { Normalize-Provider $env:NOVEL_QUALITY_PROVIDER } elseif ($DefaultQualityProvider) { Normalize-Provider $DefaultQualityProvider } else { "" }
+$qualityModelName = if ($env:NOVEL_QUALITY_MODEL_NAME) { $env:NOVEL_QUALITY_MODEL_NAME } else { $DefaultQualityModelName }
+$qualityApiBase = if ($env:NOVEL_QUALITY_API_BASE) { $env:NOVEL_QUALITY_API_BASE } else { $DefaultQualityApiBase }
+$qualityTemperature = if ($env:NOVEL_QUALITY_TEMPERATURE) { $env:NOVEL_QUALITY_TEMPERATURE } else { $DefaultQualityTemperature }
+$qualityMaxTokens = if ($env:NOVEL_QUALITY_MAX_TOKENS) { $env:NOVEL_QUALITY_MAX_TOKENS } else { $DefaultQualityMaxTokens }
+$qualityTimeout = if ($env:NOVEL_QUALITY_TIMEOUT) { $env:NOVEL_QUALITY_TIMEOUT } else { $DefaultQualityTimeout }
+$qualityApiKey = if ($qualityProvider) { Get-ApiKeyForProvider -Provider $qualityProvider -ApiKeys $apiKeys } else { "" }
+if ($qualityProvider) { Ensure-ApiKeyPresent -Provider $qualityProvider -ApiKey $qualityApiKey -ProjectRoot $ProjectRoot }
 
 $outputRoot = Join-Path $ProjectRoot "output"
 $existingProjects = @()
@@ -97,7 +111,14 @@ try {
 		-Temperature $temperature `
 		-MaxTokens $maxTokens `
 		-Timeout $timeout `
-		-PlanningMode $PlanningMode
+		-PlanningMode $PlanningMode `
+		-QualityProvider $qualityProvider `
+		-QualityModelName $qualityModelName `
+		-QualityApiBase $qualityApiBase `
+		-QualityApiKey $qualityApiKey `
+		-QualityTemperature $qualityTemperature `
+		-QualityMaxTokens $qualityMaxTokens `
+		-QualityTimeout $qualityTimeout
 
 	$initResult = Invoke-NativeCommandCapture -Executable $pythonExe -Arguments @(
 		(Join-Path $ProjectRoot "app.py"),

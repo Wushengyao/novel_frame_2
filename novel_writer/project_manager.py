@@ -381,8 +381,32 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return merged
 
 
+def _build_quality_model_config(config: dict, *, include_api_key: bool) -> dict:
+    raw = config.get("quality_model") if isinstance(config.get("quality_model"), dict) else {}
+    quality_model: dict[str, object] = {}
+    provider = str(raw.get("model_provider") or raw.get("provider") or "").strip().lower()
+    if provider:
+        quality_model["model_provider"] = provider
+    model = str(raw.get("model_name") or raw.get("model") or "").strip()
+    if model:
+        quality_model["model_name"] = model
+        quality_model["model"] = model
+    api_base = str(raw.get("api_base", "") or "").strip()
+    if api_base:
+        quality_model["api_base"] = api_base
+    if include_api_key:
+        api_key = str(raw.get("api_key", "") or "").strip()
+        if api_key:
+            quality_model["api_key"] = api_key
+    for key in ("temperature", "max_tokens", "timeout"):
+        value = raw.get(key)
+        if value not in (None, ""):
+            quality_model[key] = value
+    return quality_model
+
+
 def _build_llm_config(config: dict) -> dict:
-    return {
+    llm_config = {
         "model_provider": config.get("model_provider", "openai_compatible"),
         "model": config.get("model") or config.get("model_name", ""),
         "model_name": config.get("model_name") or config.get("model", ""),
@@ -395,11 +419,17 @@ def _build_llm_config(config: dict) -> dict:
         "writing_quality_mode": config.get("writing_quality_mode", "balanced"),
         "review_mode": config.get("review_mode", "auto"),
     }
+    quality_model = _build_quality_model_config(config, include_api_key=True)
+    if quality_model:
+        llm_config["quality_model"] = quality_model
+    return llm_config
 
 
 def _build_persisted_llm_config(config: dict) -> dict:
     persisted = _build_llm_config(config)
     persisted["api_key"] = ""
+    if isinstance(persisted.get("quality_model"), dict):
+        persisted["quality_model"]["api_key"] = ""
     return persisted
 
 

@@ -4,10 +4,11 @@ import json
 import subprocess
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
-from app import run_next_chapter, run_next_chapter_from_progression, run_next_chapters
+from app import _quality_model_overrides_from_args, run_next_chapter, run_next_chapter_from_progression, run_next_chapters
 from project_manager import ProjectWriteLockError, acquire_project_write_lock
 from progression_manager import CUSTOM_PROGRESSION_OPTION_ID, generate_progression_options
 
@@ -15,6 +16,24 @@ from tests.test_support import create_test_project, read_json, runtime_config
 
 
 class GuidedFlowTests(unittest.TestCase):
+    def test_cli_quality_model_overrides_are_nested(self) -> None:
+        overrides = _quality_model_overrides_from_args(
+            Namespace(
+                quality_provider="gemini",
+                quality_model="gemini-2.5-pro",
+                quality_api_base="",
+                quality_temperature=0.4,
+                quality_max_tokens=6000,
+                quality_timeout=180,
+            )
+        )
+
+        self.assertEqual(overrides["quality_model"]["model_provider"], "gemini")
+        self.assertEqual(overrides["quality_model"]["model_name"], "gemini-2.5-pro")
+        self.assertEqual(overrides["quality_model"]["temperature"], "0.4")
+        self.assertEqual(overrides["quality_model"]["max_tokens"], "6000")
+        self.assertEqual(overrides["quality_model"]["timeout"], "180")
+
     def _summary_payload(self, next_goal: str = "继续推进下一步") -> dict:
         return {
             "chapter_summary": "本章完成了当前推进。",
@@ -246,11 +265,24 @@ class GuidedFlowTests(unittest.TestCase):
             ):
                 chapter_path = run_next_chapter(
                     str(project_path),
-                    runtime_config("chapter", writing_quality_mode="balanced"),
+                    runtime_config(
+                        "chapter",
+                        writing_quality_mode="balanced",
+                        quality_model={"model_name": "qwen2.5:14b", "temperature": 0.3},
+                    ),
                 )
 
             self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "平衡模式正文")
             mocked_writer_generate.assert_called_once()
+            self.assertEqual(mocked_writer_generate.call_args.args[1]["model_name"], "llama3.2")
+            self.assertEqual(
+                [call.args[1]["model_name"] for call in mocked_quality_generate.call_args_list],
+                ["qwen2.5:14b", "qwen2.5:14b"],
+            )
+            self.assertEqual(
+                [call.args[1]["temperature"] for call in mocked_quality_generate.call_args_list],
+                [0.3, 0.3],
+            )
             phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
             self.assertEqual(phases, ["craft_brief", "quality_review"])
             craft_brief = read_json(project_path / "craft_briefs" / "chapter_0001.json")
@@ -278,11 +310,20 @@ class GuidedFlowTests(unittest.TestCase):
             ):
                 chapter_path = run_next_chapter(
                     str(project_path),
-                    runtime_config("chapter", writing_quality_mode="high", review_mode="auto"),
+                    runtime_config(
+                        "chapter",
+                        writing_quality_mode="high",
+                        review_mode="auto",
+                        quality_model={"model_provider": "ollama", "model_name": "qwen2.5:14b"},
+                    ),
                 )
 
             self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "重写后的正文")
             phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
+            self.assertEqual(
+                [call.args[1]["model_name"] for call in mocked_quality_generate.call_args_list],
+                ["qwen2.5:14b", "qwen2.5:14b", "qwen2.5:14b"],
+            )
             self.assertEqual(phases, ["craft_brief", "quality_review", "rewrite"])
             review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")
             self.assertFalse(review["passed"])
