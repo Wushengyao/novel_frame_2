@@ -43,6 +43,7 @@ from quality_manager import (
     quality_mode_allows_rewrite,
     quality_mode_uses_craft_brief,
     quality_mode_uses_review,
+    quality_review_available,
     quality_review_passed,
     review_chapter_draft,
     rewrite_chapter_draft,
@@ -406,7 +407,11 @@ def run_next_chapter(
             log_context=log_context_payload,
             progress_callback=progress_callback,
         )
-        if quality_mode_allows_rewrite(writing_quality_mode, review_mode) and not quality_review_passed(review):
+        if (
+            quality_mode_allows_rewrite(writing_quality_mode, review_mode)
+            and not quality_review_passed(review)
+            and quality_review_available(review)
+        ):
             try:
                 rewritten_text = rewrite_chapter_draft(
                     project_path,
@@ -417,9 +422,23 @@ def run_next_chapter(
                     log_context=log_context_payload,
                     progress_callback=progress_callback,
                 )
-                chapter_text = normalize_chapter_text(rewritten_text)
             except Exception as exc:  # pragma: no cover - keep original draft if rewrite fails
                 log_warning(f"rewrite: failed; keeping original draft. reason={exc}")
+            else:
+                chapter_text = normalize_chapter_text(rewritten_text)
+                try:
+                    review_chapter_draft(
+                        project_path,
+                        prompt_context,
+                        chapter_text,
+                        config,
+                        attempt=2,
+                        strict=True,
+                        log_context=log_context_payload,
+                        progress_callback=progress_callback,
+                    )
+                except Exception as exc:  # pragma: no cover - keep rewritten draft if post-review persistence fails
+                    log_warning(f"post_rewrite_review: failed; keeping rewritten draft. reason={exc}")
     emit_progress(progress_callback, "chapter_save", "Saving chapter file")
     chapter_path = save_chapter(project_path, chapter_text)
     log_success(f"next_chapter: saved to {chapter_path}")

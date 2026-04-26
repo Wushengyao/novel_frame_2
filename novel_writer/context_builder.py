@@ -1300,6 +1300,7 @@ def _build_craft_brief_block(craft_brief: dict | None, *, max_chars: int) -> str
         ("感官调色", "sensory_palette"),
         ("新鲜互动", "fresh_interaction_patterns"),
         ("禁用重复", "forbidden_repeats"),
+        ("验收标准", "success_criteria"),
         ("补充", "focus_notes"),
     )
     for label, key in mapping:

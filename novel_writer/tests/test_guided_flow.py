@@ -67,6 +67,11 @@ class GuidedFlowTests(unittest.TestCase):
             "sensory_palette": ["冷白灯", "金属焦味", "远处震动"],
             "fresh_interaction_patterns": ["用手势和设备读数交叉确认，而不是反复推门观察"],
             "forbidden_repeats": ["不要再写三人在门后短暂停顿后小心推门"],
+            "success_criteria": [
+                "开章用异常冷光形成具体压力。",
+                "三人通过新的协作方式确认信号源。",
+                "结尾留下新的线索或代价。",
+            ],
             "focus_notes": "保持生存压力，同时让互动方式更有变化。",
         }
 
@@ -288,9 +293,10 @@ class GuidedFlowTests(unittest.TestCase):
             craft_brief = read_json(project_path / "craft_briefs" / "chapter_0001.json")
             review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")
             self.assertEqual(craft_brief["chapter_hook"], self._craft_brief_payload()["chapter_hook"])
+            self.assertEqual(craft_brief["success_criteria"], self._craft_brief_payload()["success_criteria"])
             self.assertTrue(review["passed"])
 
-    def test_high_quality_mode_rewrites_once_when_auto_review_fails(self) -> None:
+    def test_high_quality_mode_rewrites_once_and_reviews_rewrite_when_auto_review_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp), project_id="quality_high")
 
@@ -300,6 +306,7 @@ class GuidedFlowTests(unittest.TestCase):
                     (json.dumps(self._craft_brief_payload(), ensure_ascii=False), {"usage": {}}),
                     (json.dumps(self._review_payload(passed=False, score=4), ensure_ascii=False), {"usage": {}}),
                     ("重写后的正文", {"usage": {}}),
+                    (json.dumps(self._review_payload(passed=True, score=8), ensure_ascii=False), {"usage": {}}),
                 ],
             ) as mocked_quality_generate, patch(
                 "app.generate_text_with_metadata",
@@ -322,11 +329,74 @@ class GuidedFlowTests(unittest.TestCase):
             phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
             self.assertEqual(
                 [call.args[1]["model_name"] for call in mocked_quality_generate.call_args_list],
-                ["qwen2.5:14b", "qwen2.5:14b", "qwen2.5:14b"],
+                ["qwen2.5:14b", "qwen2.5:14b", "qwen2.5:14b", "qwen2.5:14b"],
             )
-            self.assertEqual(phases, ["craft_brief", "quality_review", "rewrite"])
+            self.assertEqual(phases, ["craft_brief", "quality_review", "rewrite", "quality_review"])
+            review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")
+            second_review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_2.json")
+            self.assertFalse(review["passed"])
+            self.assertTrue(second_review["passed"])
+
+    def test_unavailable_quality_review_does_not_trigger_auto_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="quality_unavailable")
+
+            with patch(
+                "quality_manager.generate_text_with_metadata",
+                side_effect=[
+                    (json.dumps(self._craft_brief_payload(), ensure_ascii=False), {"usage": {}}),
+                    RuntimeError("review timeout"),
+                    RuntimeError("review retry timeout"),
+                ],
+            ) as mocked_quality_generate, patch(
+                "app.generate_text_with_metadata",
+                return_value=("质检不可用时保留的原始正文", {"usage": {}}),
+            ), patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ):
+                chapter_path = run_next_chapter(
+                    str(project_path),
+                    runtime_config("chapter", writing_quality_mode="high", review_mode="auto"),
+                )
+
+            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "质检不可用时保留的原始正文")
+            phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
+            self.assertEqual(phases, ["craft_brief", "quality_review", "quality_review"])
             review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")
             self.assertFalse(review["passed"])
+            self.assertTrue(review["review_unavailable"])
+            self.assertEqual(review["scores"]["task_completion"], 0.0)
+
+    def test_quality_review_parse_failure_retries_before_saving_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="quality_retry")
+
+            with patch(
+                "quality_manager.generate_text_with_metadata",
+                side_effect=[
+                    (json.dumps(self._craft_brief_payload(), ensure_ascii=False), {"usage": {}}),
+                    ("not json", {"usage": {}}),
+                    (json.dumps(self._review_payload(passed=True, score=8), ensure_ascii=False), {"usage": {}}),
+                ],
+            ) as mocked_quality_generate, patch(
+                "app.generate_text_with_metadata",
+                return_value=("解析重试后保留的正文", {"usage": {}}),
+            ), patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ):
+                chapter_path = run_next_chapter(
+                    str(project_path),
+                    runtime_config("chapter", writing_quality_mode="balanced", review_mode="auto"),
+                )
+
+            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "解析重试后保留的正文")
+            phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
+            self.assertEqual(phases, ["craft_brief", "quality_review", "quality_review"])
+            review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")
+            self.assertTrue(review["passed"])
+            self.assertFalse(review["review_unavailable"])
 
     def test_manual_review_mode_saves_report_without_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

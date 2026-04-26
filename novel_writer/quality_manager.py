@@ -40,6 +40,7 @@ REVIEW_SCORE_KEYS = (
 )
 REVIEW_PASS_AVERAGE = 7.0
 REVIEW_PASS_MINIMUM = 5.0
+QUALITY_REVIEW_SCHEMA_VERSION = 2
 
 
 def _coerce_score(value: object) -> float:
@@ -78,6 +79,64 @@ def _normalize_string_list(value: object, *, max_items: int = 8) -> list[str]:
     return result
 
 
+def _normalize_score_reasons(value: object) -> dict[str, str]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        key: str(source.get(key) or "").strip()
+        for key in REVIEW_SCORE_KEYS
+        if str(source.get(key) or "").strip()
+    }
+
+
+def _normalize_issue_objects(value: object, *, max_items: int = 8, default_severity: str = "major") -> list[dict[str, str]]:
+    items = value if isinstance(value, list) else [value] if value not in (None, "") else []
+    result: list[dict[str, str]] = []
+    seen = set()
+    for item in items:
+        if isinstance(item, dict):
+            text = str(item.get("issue") or item.get("description") or item.get("summary") or "").strip()
+            evidence = str(item.get("evidence") or item.get("example") or "").strip()
+            fix = str(item.get("fix") or item.get("guidance") or item.get("recommendation") or "").strip()
+            category = str(item.get("category") or "").strip()
+            severity = str(item.get("severity") or default_severity).strip().lower() or default_severity
+        else:
+            text = str(item or "").strip()
+            evidence = ""
+            fix = ""
+            category = ""
+            severity = default_severity
+        if not text:
+            continue
+        dedupe_key = (category, severity, text, evidence, fix)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        result.append(
+            {
+                "category": category,
+                "severity": severity,
+                "issue": text,
+                "evidence": evidence,
+                "fix": fix,
+            }
+        )
+        if len(result) >= max_items:
+            break
+    return result
+
+
+def _has_blocker(review: dict) -> bool:
+    issues = review.get("blocking_issues") if isinstance(review, dict) else []
+    if not isinstance(issues, list):
+        return False
+    for issue in issues:
+        if isinstance(issue, dict):
+            severity = str(issue.get("severity") or "").strip().lower()
+            if severity == "blocker":
+                return True
+    return False
+
+
 def normalize_craft_brief(payload: dict | None, fallback: dict | None = None) -> dict:
     source = payload if isinstance(payload, dict) else {}
     fallback_source = fallback if isinstance(fallback, dict) else {}
@@ -95,6 +154,7 @@ def normalize_craft_brief(payload: dict | None, fallback: dict | None = None) ->
             max_items=6,
         ),
         "forbidden_repeats": _normalize_string_list(source.get("forbidden_repeats") or fallback_source.get("forbidden_repeats"), max_items=8),
+        "success_criteria": _normalize_string_list(source.get("success_criteria") or fallback_source.get("success_criteria"), max_items=5),
         "focus_notes": str(source.get("focus_notes") or fallback_source.get("focus_notes") or "").strip(),
     }
 
@@ -119,14 +179,20 @@ def fallback_craft_brief(prompt_context: dict) -> dict:
             "sensory_palette": ["选择与本章地点相关的两到三种感官细节"],
             "fresh_interaction_patterns": ["用新的动作逻辑和互动方式表现关系，不重复上一章姿态"],
             "forbidden_repeats": forbidden_repeats,
+            "success_criteria": [
+                f"完成或明确推进本章任务：{objective}" if objective else "完成或明确推进本章任务卡的核心目标。",
+                "关键行动有清楚的当前压力、人物选择和可见结果。",
+                "结尾形成新的信息、代价、决定或悬念，避免原地空转。",
+            ],
             "focus_notes": "这是本地兜底蓝图；优先保证任务完成、场景推进和写法变化。",
         }
     )
 
 
-def normalize_quality_review(payload: dict | None, *, fallback_passed: bool = True) -> dict:
+def normalize_quality_review(payload: dict | None, *, fallback_passed: bool = False, review_unavailable: bool = False) -> dict:
     source = payload if isinstance(payload, dict) else {}
     raw_scores = source.get("scores") if isinstance(source.get("scores"), dict) else {}
+    unavailable = review_unavailable or _coerce_bool(source.get("review_unavailable"), default=False)
     if not source:
         default_score = 10.0 if fallback_passed else 0.0
         scores = {key: default_score for key in REVIEW_SCORE_KEYS}
@@ -146,23 +212,39 @@ def normalize_quality_review(payload: dict | None, *, fallback_passed: bool = Tr
             for key in REVIEW_SCORE_KEYS
         }
     average = sum(scores.values()) / len(REVIEW_SCORE_KEYS)
-    computed_passed = average >= REVIEW_PASS_AVERAGE and min(scores.values()) >= REVIEW_PASS_MINIMUM
+    blocking_issues = _normalize_issue_objects(source.get("blocking_issues"), max_items=8, default_severity="blocker")
+    computed_passed = (
+        average >= REVIEW_PASS_AVERAGE
+        and min(scores.values()) >= REVIEW_PASS_MINIMUM
+        and not any(issue.get("severity") == "blocker" for issue in blocking_issues)
+        and not unavailable
+    )
     explicit_passed = _coerce_bool(source.get("passed"), default=computed_passed) if "passed" in source else computed_passed
-    passed = (explicit_passed and computed_passed) if source else fallback_passed
+    passed = (explicit_passed and computed_passed) if source else (fallback_passed and not unavailable)
     return {
+        "schema_version": QUALITY_REVIEW_SCHEMA_VERSION,
         "scores": scores,
         "average_score": round(average, 2),
         "passed": passed,
+        "review_unavailable": unavailable,
+        "score_reasons": _normalize_score_reasons(source.get("score_reasons")),
         "strengths": _normalize_string_list(source.get("strengths"), max_items=8),
         "issues": _normalize_string_list(source.get("issues"), max_items=8),
+        "blocking_issues": blocking_issues,
+        "nice_to_have": _normalize_string_list(source.get("nice_to_have"), max_items=8),
         "revision_guidance": str(source.get("revision_guidance", "") or "").strip(),
+        "rewrite_plan": _normalize_string_list(source.get("rewrite_plan"), max_items=8),
         "repeat_examples": _normalize_string_list(source.get("repeat_examples"), max_items=8),
     }
 
 
 def quality_review_passed(review: dict) -> bool:
     if not isinstance(review, dict):
-        return True
+        return False
+    if bool(review.get("review_unavailable", False)):
+        return False
+    if _has_blocker(review):
+        return False
     if not bool(review.get("passed", True)):
         return False
     scores = review.get("scores") if isinstance(review.get("scores"), dict) else {}
@@ -170,6 +252,10 @@ def quality_review_passed(review: dict) -> bool:
         return True
     values = [_coerce_score(scores.get(key)) for key in REVIEW_SCORE_KEYS]
     return sum(values) / len(values) >= REVIEW_PASS_AVERAGE and min(values) >= REVIEW_PASS_MINIMUM
+
+
+def quality_review_available(review: dict) -> bool:
+    return isinstance(review, dict) and not bool(review.get("review_unavailable", False))
 
 
 def craft_brief_path(project_path: str, chapter_number: int) -> Path:
@@ -264,23 +350,35 @@ def review_chapter_draft(
         extra={"target_chapter_number": chapter_number, "attempt": attempt, "strict": strict, **quality_extra},
     )
     request_log_context["attempt"] = attempt
-    try:
-        log_info(f"quality_review: requesting review attempt={attempt}")
-        emit_progress(progress_callback, "quality_review", f"Reviewing chapter draft (attempt {attempt})")
-        response_text, metadata = generate_text_with_metadata(prompt, request_config, log_context=request_log_context)
-        update_project_stats(project_path, phase="quality_review", success=True, usage=metadata.get("usage"))
-    except Exception as exc:  # pragma: no cover - resilience path
-        update_project_stats(project_path, phase="quality_review", success=False, usage=None)
-        log_warning(f"quality_review: using passing fallback report, reason: {exc}")
-        review = normalize_quality_review(None, fallback_passed=True)
-        review["fallback_reason"] = str(exc)
-    else:
+    review = None
+    last_error = ""
+    for request_attempt in (1, 2):
+        request_log_context["quality_request_attempt"] = request_attempt
+        try:
+            log_info(f"quality_review: requesting review attempt={attempt} request_attempt={request_attempt}")
+            message = f"Reviewing chapter draft (attempt {attempt})"
+            if request_attempt > 1:
+                message += " retry"
+            emit_progress(progress_callback, "quality_review", message)
+            response_text, metadata = generate_text_with_metadata(prompt, request_config, log_context=request_log_context)
+            update_project_stats(project_path, phase="quality_review", success=True, usage=metadata.get("usage"))
+        except Exception as exc:  # pragma: no cover - resilience path
+            update_project_stats(project_path, phase="quality_review", success=False, usage=None)
+            last_error = str(exc)
+            log_warning(f"quality_review: request failed attempt={attempt} request_attempt={request_attempt}, reason: {exc}")
+            continue
+
         try:
             review = normalize_quality_review(extract_json_object(response_text, "Could not parse JSON from quality review response."))
+            break
         except Exception as exc:  # pragma: no cover - malformed model output fallback
-            log_warning(f"quality_review: using passing fallback report, reason: {exc}")
-            review = normalize_quality_review(None, fallback_passed=True)
-            review["fallback_reason"] = str(exc)
+            last_error = str(exc)
+            log_warning(f"quality_review: response parse failed attempt={attempt} request_attempt={request_attempt}, reason: {exc}")
+
+    if review is None:
+        log_warning(f"quality_review: unavailable after retry; saving non-passing fallback report, reason: {last_error}")
+        review = normalize_quality_review(None, fallback_passed=False, review_unavailable=True)
+        review["fallback_reason"] = last_error
 
     save_json(str(quality_review_path(project_path, chapter_number, attempt)), review)
     log_success(f"quality_review: saved chapter_{chapter_number:04d}_attempt_{attempt}.json")
@@ -354,6 +452,7 @@ __all__ = [
     "quality_mode_allows_rewrite",
     "quality_mode_uses_craft_brief",
     "quality_mode_uses_review",
+    "quality_review_available",
     "quality_review_passed",
     "quality_review_path",
     "review_chapter_draft",

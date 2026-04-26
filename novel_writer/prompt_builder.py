@@ -708,10 +708,11 @@ def build_craft_brief_prompt(data: dict) -> str:
 5. `action_reasoning` 写清人物采取关键行动的直接原因、压力与选择依据
 6. `forbidden_repeats` 必须列出需要避开的上一章表层动作、姿态、句式或结尾套路
 7. `fresh_interaction_patterns` 要给出新的互动方式，不要只写“更细腻”“更紧张”这类抽象要求
-8. 不要输出解释，不要输出 Markdown
+8. `success_criteria` 给出 2 到 5 条本章必须兑现的可检查目标，用于写后质检
+9. 不要输出解释，不要输出 Markdown
 
 输出 JSON 骨架：
-{{"chapter_hook":"","context_bridge":"","dramatic_question":"","conflict_pressure":"","action_reasoning":"","emotional_turn":"","scene_movement":[],"sensory_palette":[],"fresh_interaction_patterns":[],"forbidden_repeats":[],"focus_notes":""}}
+{{"chapter_hook":"","context_bridge":"","dramatic_question":"","conflict_pressure":"","action_reasoning":"","emotional_turn":"","scene_movement":[],"sensory_palette":[],"fresh_interaction_patterns":[],"forbidden_repeats":[],"success_criteria":[],"focus_notes":""}}
 """
 
 
@@ -850,12 +851,18 @@ def build_quality_review_prompt(data: dict, draft_text: str, *, strict: bool = F
 2. 七个分项分数都用 0 到 10，分数越高越好
 3. `repetition_risk` 的高分代表重复风险低、写法新鲜；低分代表动作/句式/场景结构复用明显
 4. `motivation_causality` 检查关键行动是否有明确动因、压力、选择和结果
-5. `passed` 表示是否可以作为最终章节保存
-6. `revision_guidance` 必须具体指出需要如何改，不要泛泛而谈
-7. 不要输出解释，不要输出 Markdown
+5. 重点检查“本章创作蓝图”里的验收标准是否兑现；未兑现的必须写入 `blocking_issues` 或 `issues`
+6. `passed` 表示是否可以作为最终章节保存；有 `severity="blocker"` 的问题时必须为 false
+7. `score_reasons` 为低分或关键分项给出一句具体理由
+8. `blocking_issues` 只放会阻止保存的硬伤，每项包含 `category`、`severity`、`issue`、`evidence`、`fix`
+9. `nice_to_have` 放不阻止保存但值得优化的问题
+10. `rewrite_plan` 给出可直接交给改稿模型执行的 2 到 6 步修订方案
+11. `revision_guidance` 必须具体指出需要如何改，不要泛泛而谈
+12. `review_unavailable` 正常审稿时必须为 false
+13. 不要输出解释，不要输出 Markdown
 
 输出 JSON 骨架：
-{{"scores":{{"task_completion":0,"reader_hook":0,"scene_freshness":0,"character_specificity":0,"motivation_causality":0,"repetition_risk":0,"continuity":0}},"passed":false,"strengths":[],"issues":[],"revision_guidance":"","repeat_examples":[]}}
+{{"schema_version":2,"scores":{{"task_completion":0,"reader_hook":0,"scene_freshness":0,"character_specificity":0,"motivation_causality":0,"repetition_risk":0,"continuity":0}},"score_reasons":{{"task_completion":"","reader_hook":"","scene_freshness":"","character_specificity":"","motivation_causality":"","repetition_risk":"","continuity":""}},"passed":false,"review_unavailable":false,"strengths":[],"issues":[],"blocking_issues":[{{"category":"","severity":"blocker","issue":"","evidence":"","fix":""}}],"nice_to_have":[],"revision_guidance":"","rewrite_plan":[],"repeat_examples":[]}}
 """
 
 
@@ -877,9 +884,10 @@ def build_rewrite_prompt(data: dict, draft_text: str, review_report: dict) -> st
 
 要求：
 1. 保留已经正确完成的剧情目标和连续性
-2. 优先修复审稿报告中的低分项，尤其是重复动作、弱钩子、场景空转、人物反应泛化、关键行动缺少原因
-3. 不要写改稿说明，不要输出 JSON，不要输出 Markdown 标题
-4. 输出纯正文，字数建议仍在 3000 字以上、5000 字以下
+2. 优先修复审稿报告中的 `blocking_issues`、低分项和 `rewrite_plan`
+3. 尤其注意重复动作、弱钩子、场景空转、人物反应泛化、关键行动缺少原因
+4. 不要写改稿说明，不要输出 JSON，不要输出 Markdown 标题
+5. 输出纯正文，字数建议仍在 3000 字以上、5000 字以下
 """
 
 

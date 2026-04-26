@@ -114,6 +114,7 @@ class ContextBuilderTests(unittest.TestCase):
                 "sensory_palette": ["焦味", "冷光"],
                 "fresh_interaction_patterns": ["用设备读数与手势配合推进"],
                 "forbidden_repeats": ["不要再写三人在门后短暂停顿"],
+                "success_criteria": ["不用推门观察完成异常确认", "结尾带回可验证的新线索"],
                 "focus_notes": "让本章互动方式变化。",
             }
 
@@ -134,6 +135,8 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertIn("不要再写三人在门后短暂停顿", prompt)
             self.assertIn("读者入口/连续性桥", prompt)
             self.assertIn("行动理由", prompt)
+            self.assertIn("验收标准", prompt)
+            self.assertIn("不用推门观察完成异常确认", prompt)
             self.assertLessEqual(sum(len(value) for value in context["sections"].values()), WRITER_HARD_TOTAL_CHARS)
 
     def test_craft_brief_and_quality_review_prompts_expose_json_schemas(self) -> None:
@@ -166,6 +169,7 @@ class ContextBuilderTests(unittest.TestCase):
                 "sensory_palette",
                 "fresh_interaction_patterns",
                 "forbidden_repeats",
+                "success_criteria",
             ):
                 self.assertIn(key, craft_prompt)
             for key in (
@@ -176,6 +180,11 @@ class ContextBuilderTests(unittest.TestCase):
                 "motivation_causality",
                 "repetition_risk",
                 "continuity",
+                "score_reasons",
+                "blocking_issues",
+                "nice_to_have",
+                "rewrite_plan",
+                "review_unavailable",
             ):
                 self.assertIn(key, review_prompt)
             self.assertIn("高质量模式", review_prompt)
