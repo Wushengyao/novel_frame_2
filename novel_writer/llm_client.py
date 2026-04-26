@@ -76,28 +76,22 @@ GEMINI_31_PRO_CREATIVE_TEMPERATURES = {
     "illustration_prompt": 0.6,
 }
 DEEPSEEK_V4_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
-DEEPSEEK_CREATIVE_TEMPERATURES_BY_MODEL = {
+DEEPSEEK_NON_THINKING_TEMPERATURES_BY_MODEL = {
     "deepseek-v4-flash": {
-        "writer": 1.3,
-        "rewrite": 1.1,
-        "polish": 1.2,
-        "illustration_prompt": 1.0,
+        "writer": 0.8,
+        "rewrite": 0.7,
+        "polish": 0.65,
+        "illustration_prompt": 0.6,
     },
     "deepseek-v4-pro": {
-        "writer": 0.85,
+        "writer": 0.8,
         "rewrite": 0.75,
         "polish": 0.65,
         "illustration_prompt": 0.6,
     },
 }
-DEEPSEEK_CREATIVE_PHASES = {"writer", "rewrite", "polish", "illustration_prompt"}
-DEEPSEEK_REASONING_PHASES = {
-    "init",
-    "outline",
-    "craft_brief",
-    "quality_review",
-    "summary",
-}
+DEEPSEEK_MAX_REASONING_PHASES = {"quality_review"}
+DEEPSEEK_THINKING_MIN_TIMEOUT_SECONDS = 300
 DEEPSEEK_THINKING_INACTIVE_FIELDS = (
     "temperature",
     "top_p",
@@ -651,46 +645,41 @@ def _apply_deepseek_v4_defaults(
     if explicit_thinking is None:
         explicit_thinking = _coerce_thinking(config.get("thinking"))
 
-    json_task = _is_json_response_format(response_format)
-    reasoning_task = normalized_phase in DEEPSEEK_REASONING_PHASES or json_task
     if explicit_thinking is None:
-        thinking = (
-            {"type": "disabled"}
-            if normalized_phase in DEEPSEEK_CREATIVE_PHASES
-            else {"type": "enabled" if reasoning_task else "disabled"}
-        )
+        thinking = {"type": "enabled"}
     else:
         thinking = explicit_thinking
     request_options["thinking"] = thinking
 
     if thinking["type"] == "enabled":
+        json_task = _is_json_response_format(response_format)
         if json_task:
             request_options.setdefault("response_format", {"type": "json_object"})
         if not _is_nonempty(request_options.get("reasoning_effort")) and not _is_nonempty(
             config.get("reasoning_effort")
         ):
-            request_options["reasoning_effort"] = "max" if normalized_phase == "quality_review" else "high"
+            request_options["reasoning_effort"] = (
+                "max" if normalized_phase in DEEPSEEK_MAX_REASONING_PHASES else "high"
+            )
         elif _is_nonempty(config.get("reasoning_effort")) and not _is_nonempty(
             request_options.get("reasoning_effort")
         ):
             request_options["reasoning_effort"] = str(config.get("reasoning_effort")).strip()
         omit_fields.update(DEEPSEEK_THINKING_INACTIVE_FIELDS)
+        for field in DEEPSEEK_THINKING_INACTIVE_FIELDS:
+            request_options.pop(field, None)
+        optimized["timeout"] = max(_resolve_timeout(optimized, "deepseek"), DEEPSEEK_THINKING_MIN_TIMEOUT_SECONDS)
     else:
         request_options.pop("reasoning_effort", None)
-        model_temperatures = DEEPSEEK_CREATIVE_TEMPERATURES_BY_MODEL.get(model, {})
+        model_temperatures = DEEPSEEK_NON_THINKING_TEMPERATURES_BY_MODEL.get(model, {})
         default_temperature = model_temperatures.get(normalized_phase, 1.0)
         custom_temperature = _coerce_float(config.get("temperature"))
-        if model == "deepseek-v4-pro":
-            if (
-                custom_temperature is not None
-                and not _is_legacy_default_temperature(config.get("temperature"))
-                and 0.0 <= custom_temperature <= 1.0
-            ):
-                optimized["temperature"] = custom_temperature
-            else:
-                optimized["temperature"] = default_temperature
-        elif _is_nonempty(config.get("temperature")) and not _is_legacy_default_temperature(config.get("temperature")):
-            optimized["temperature"] = config.get("temperature")
+        if (
+            custom_temperature is not None
+            and not _is_legacy_default_temperature(config.get("temperature"))
+            and 0.0 <= custom_temperature <= 1.0
+        ):
+            optimized["temperature"] = custom_temperature
         else:
             optimized["temperature"] = default_temperature
 

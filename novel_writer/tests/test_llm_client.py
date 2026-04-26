@@ -123,7 +123,7 @@ class LLMClientTests(unittest.TestCase):
         )
         self.assertEqual(request_body["contents"], [{"role": "user", "parts": [{"text": "请返回结构化结果。"}]}])
         self.assertEqual(request_body["generationConfig"]["responseMimeType"], "application/json")
-    def test_deepseek_v4_flash_writer_disables_thinking_and_tunes_temperature(self) -> None:
+    def test_deepseek_v4_flash_writer_enables_thinking_and_omits_sampling_controls(self) -> None:
         config = {
             "model_provider": "deepseek",
             "model": "deepseek-v4-flash",
@@ -150,9 +150,10 @@ class LLMClientTests(unittest.TestCase):
         endpoint, headers, request_body, _timeout = mocked_request.call_args.args
         self.assertEqual(endpoint, "https://api.deepseek.com/v1/chat/completions")
         self.assertEqual(headers["Authorization"], "Bearer secret-key")
-        self.assertEqual(request_body["thinking"], {"type": "disabled"})
-        self.assertEqual(request_body["temperature"], 1.3)
-        self.assertNotIn("reasoning_effort", request_body)
+        self.assertEqual(request_body["thinking"], {"type": "enabled"})
+        self.assertEqual(request_body["reasoning_effort"], "high")
+        self.assertNotIn("temperature", request_body)
+        self.assertNotIn("top_p", request_body)
         self.assertEqual(text, "chapter text")
         self.assertEqual(metadata["provider"], "deepseek")
 
@@ -193,7 +194,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("temperature", request_body)
         self.assertEqual(metadata["usage"]["reasoning_tokens"], 2)
 
-    def test_deepseek_v4_preserves_custom_creative_temperature(self) -> None:
+    def test_deepseek_v4_explicit_non_thinking_clamps_high_creative_temperature(self) -> None:
         config = {
             "model_provider": "deepseek",
             "model": "deepseek-v4-flash",
@@ -201,6 +202,7 @@ class LLMClientTests(unittest.TestCase):
             "temperature": 1.6,
             "max_tokens": 4000,
             "timeout": 120,
+            "request_options": {"thinking": {"type": "disabled"}},
         }
         response_payload = {
             "choices": [{"message": {"content": "chapter text"}}],
@@ -219,9 +221,9 @@ class LLMClientTests(unittest.TestCase):
 
         request_body = mocked_request.call_args.args[2]
         self.assertEqual(request_body["thinking"], {"type": "disabled"})
-        self.assertEqual(request_body["temperature"], 1.6)
+        self.assertEqual(request_body["temperature"], 0.8)
 
-    def test_deepseek_v4_pro_writer_uses_safe_temperature_even_with_high_override(self) -> None:
+    def test_deepseek_v4_pro_writer_uses_thinking_even_with_high_temperature_override(self) -> None:
         config = {
             "model_provider": "deepseek",
             "model": "deepseek-v4-pro",
@@ -229,6 +231,7 @@ class LLMClientTests(unittest.TestCase):
             "temperature": 1.6,
             "max_tokens": 4000,
             "timeout": 120,
+            "request_options": {"top_p": 0.95, "frequency_penalty": 0.2},
         }
         response_payload = {
             "choices": [{"message": {"content": "chapter text"}}],
@@ -246,8 +249,13 @@ class LLMClientTests(unittest.TestCase):
             )
 
         request_body = mocked_request.call_args.args[2]
-        self.assertEqual(request_body["thinking"], {"type": "disabled"})
-        self.assertEqual(request_body["temperature"], 0.85)
+        timeout = mocked_request.call_args.args[3]
+        self.assertEqual(request_body["thinking"], {"type": "enabled"})
+        self.assertEqual(request_body["reasoning_effort"], "high")
+        self.assertNotIn("temperature", request_body)
+        self.assertNotIn("top_p", request_body)
+        self.assertNotIn("frequency_penalty", request_body)
+        self.assertEqual(timeout, 300)
 
     def test_gemini_3_flash_writer_uses_minimal_thinking_and_creative_temperature(self) -> None:
         config = {
