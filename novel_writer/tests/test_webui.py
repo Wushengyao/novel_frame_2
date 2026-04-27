@@ -591,15 +591,22 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             },
         ), patch("webui._read_admin_action_status", return_value={}):
             projects_page = self._get("/projects")
+            settings_page = self._get("/settings")
+
         self.assertEqual(projects_page.status, 200)
         self.assertIn('name="model_preset"', projects_page.body)
         self.assertIn("使用 gemini 默认模型", projects_page.body)
-        self.assertIn("维护操作", projects_page.body)
-        self.assertIn("/admin/restart", projects_page.body)
-        self.assertIn("/admin/update", projects_page.body)
         self.assertIn(f"版本 {DISPLAY_VERSION}", projects_page.body)
-        self.assertIn("服务作用域", projects_page.body)
-        self.assertIn("user", projects_page.body)
+        self.assertNotIn("维护操作", projects_page.body)
+        self.assertNotIn("/admin/restart", projects_page.body)
+        self.assertNotIn("/admin/update", projects_page.body)
+
+        self.assertEqual(settings_page.status, 200)
+        self.assertIn("维护操作", settings_page.body)
+        self.assertIn("/admin/restart", settings_page.body)
+        self.assertIn("/admin/update", settings_page.body)
+        self.assertIn("服务作用域", settings_page.body)
+        self.assertIn("user", settings_page.body)
 
         project_page = self._get("/project/web")
         self.assertEqual(project_page.status, 200)
@@ -1289,6 +1296,314 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(polish_args[1]["model_name"], "qwen2.5:14b")
         self.assertEqual(polish_kwargs["preset_ids"], ["details", "longer"])
         self.assertEqual(polish_kwargs["custom_request"], "多一点轻松互怼")
+
+    # ── Theme helpers ──────────────────────────────────────────────
+
+    def test_theme_css_variables_default_preset(self) -> None:
+        css = webui._theme_css_variables({"preset": "default"})
+        self.assertIn("--bg: #f7f4ee;", css)
+        self.assertIn("--ink: #1d1a16;", css)
+        self.assertIn("--accent: #b44f2f;", css)
+        self.assertIn("--body-bg:", css)
+
+    def test_theme_css_variables_night_preset(self) -> None:
+        css = webui._theme_css_variables({"preset": "night"})
+        self.assertIn("--bg: #1a1a2e;", css)
+        self.assertIn("--ink: #d8d8e0;", css)
+
+    def test_theme_css_variables_eyecare_preset(self) -> None:
+        css = webui._theme_css_variables({"preset": "eyecare"})
+        self.assertIn("--bg: #dce8d4;", css)
+        self.assertIn("--ink: #2d3028;", css)
+
+    def test_theme_css_variables_unknown_preset_falls_back_to_default(self) -> None:
+        css = webui._theme_css_variables({"preset": "nonexistent"})
+        self.assertIn("--bg: #f7f4ee;", css)
+
+    def test_theme_css_variables_custom_overrides_preset(self) -> None:
+        theme = {"preset": "default", "custom": {"bg": "#ffffff", "ink": "#000000"}}
+        css = webui._theme_css_variables(theme)
+        self.assertIn("--bg: #ffffff;", css)
+        self.assertIn("--ink: #000000;", css)
+        self.assertIn("--accent: #b44f2f;", css)
+
+    def test_theme_css_variables_partial_custom_only_overrides_specified(self) -> None:
+        theme = {"preset": "eyecare", "custom": {"bg": "#123456"}}
+        css = webui._theme_css_variables(theme)
+        self.assertIn("--bg: #123456;", css)
+        self.assertIn("--ink: #2d3028;", css)
+
+    def test_read_theme_cookie_returns_default_when_no_cookie(self) -> None:
+        from unittest.mock import Mock
+        handler = Mock()
+        handler.headers = {}
+        theme = webui._read_theme_cookie(handler)
+        self.assertEqual(theme, {"preset": "default"})
+
+    def test_read_theme_cookie_parses_valid_json_cookie(self) -> None:
+        from unittest.mock import Mock
+        expected = {"preset": "night", "custom": {"bg": "#000"}}
+        raw = urllib.parse.quote(json.dumps(expected, separators=(",", ":")))
+        handler = Mock()
+        handler.headers = {"Cookie": f"{webui.THEME_COOKIE_NAME}={raw}"}
+        theme = webui._read_theme_cookie(handler)
+        self.assertEqual(theme, expected)
+
+    def test_read_theme_cookie_parses_unencoded_json_cookie(self) -> None:
+        from unittest.mock import Mock
+        expected = {"preset": "night"}
+        raw = urllib.parse.quote(json.dumps(expected, separators=(",", ":")))
+        handler = Mock()
+        handler.headers = {"Cookie": f"{webui.THEME_COOKIE_NAME}={raw}"}
+        theme = webui._read_theme_cookie(handler)
+        self.assertEqual(theme, expected)
+
+    def test_read_theme_cookie_returns_default_on_bad_json(self) -> None:
+        from unittest.mock import Mock
+        handler = Mock()
+        handler.headers = {"Cookie": f"{webui.THEME_COOKIE_NAME}=not-json"}
+        theme = webui._read_theme_cookie(handler)
+        self.assertEqual(theme, {"preset": "default"})
+
+    def test_theme_cookie_value_produces_valid_set_cookie_format(self) -> None:
+        cookie = webui._theme_cookie_value({"preset": "night"})
+        self.assertIn(f"{webui.THEME_COOKIE_NAME}=", cookie)
+        self.assertIn("Path=/", cookie)
+        self.assertIn("Max-Age=", cookie)
+        self.assertIn("SameSite=Lax", cookie)
+
+    def test_theme_presets_dict_has_required_keys(self) -> None:
+        for preset_id in ("default", "night", "eyecare"):
+            with self.subTest(preset=preset_id):
+                preset = webui.THEME_PRESETS[preset_id]
+                for key in ("label", "bg", "panel", "ink", "muted", "accent", "accent-dark", "line", "shadow", "body_bg"):
+                    self.assertIn(key, preset)
+
+    # ── Settings page ──────────────────────────────────────────────
+
+    def test_settings_page_renders_theme_and_admin_panels(self) -> None:
+        with patch(
+            "webui._get_repo_admin_info",
+            return_value={
+                "repo_root": "/repo",
+                "service_name": "novel-writer-webui.service",
+                "service_scope": "user",
+                "git_available": True,
+                "systemd_run_available": True,
+                "systemctl_available": True,
+                "branch": "main",
+                "commit": "abc1234",
+                "upstream": "origin/main",
+                "dirty": False,
+                "error": "",
+            },
+        ), patch("webui._read_admin_action_status", return_value={}):
+            page = self._get("/settings")
+
+        self.assertEqual(page.status, 200)
+        self.assertIn("主题设置", page.body)
+        self.assertIn("自定义颜色", page.body)
+        self.assertIn("维护操作", page.body)
+        self.assertIn("主题预览", page.body)
+        self.assertIn("暖纸色", page.body)
+        self.assertIn("夜间模式", page.body)
+        self.assertIn("护眼模式", page.body)
+        self.assertIn("/admin/restart", page.body)
+        self.assertIn("/admin/update", page.body)
+        self.assertIn('name="color_bg"', page.body)
+        self.assertIn('name="color_ink"', page.body)
+        self.assertIn('name="color_accent"', page.body)
+
+    def test_settings_page_has_preset_form(self) -> None:
+        with patch(
+            "webui._get_repo_admin_info",
+            return_value={
+                "repo_root": "/repo",
+                "service_name": "novel-writer-webui.service",
+                "service_scope": "user",
+                "git_available": True,
+                "systemd_run_available": True,
+                "systemctl_available": True,
+                "branch": "main",
+                "commit": "abc1234",
+                "upstream": "origin/main",
+                "dirty": False,
+                "error": "",
+            },
+        ), patch("webui._read_admin_action_status", return_value={}):
+            page = self._get("/settings")
+
+        self.assertIn('name="action" value="preset"', page.body)
+        self.assertIn('type="radio" name="preset"', page.body)
+
+    def test_theme_preset_switch_sets_cookie_and_redirects(self) -> None:
+        response = self._post(
+            "/settings",
+            "action=preset&preset=night",
+        )
+        self.assertEqual(response.status, 303)
+        location = response.getheader("Location")
+        self.assertIn("/settings?notice=", location)
+
+        cookie_header = response.getheader("Set-Cookie") or ""
+        self.assertIn(webui.THEME_COOKIE_NAME, cookie_header)
+
+    def test_theme_custom_colors_sets_cookie_with_custom_field(self) -> None:
+        response = self._post(
+            "/settings",
+            "action=custom&preset=default&color_bg=%23ff0000&color_ink=%2300ff00&color_accent=%230000ff",
+        )
+        self.assertEqual(response.status, 303)
+        cookie_header = response.getheader("Set-Cookie") or ""
+        self.assertIn(webui.THEME_COOKIE_NAME, cookie_header)
+
+    def test_theme_custom_colors_ignores_invalid_hex_values(self) -> None:
+        response = self._post(
+            "/settings",
+            "action=custom&preset=default&color_bg=not-a-color&color_ink=%2300ff00",
+        )
+        self.assertEqual(response.status, 303)
+        cookie_header = response.getheader("Set-Cookie") or ""
+        self.assertIn(webui.THEME_COOKIE_NAME, cookie_header)
+
+    def test_theme_cookie_persists_across_pages(self) -> None:
+        theme = {"preset": "night", "custom": {"bg": "#111111"}}
+        raw = urllib.parse.quote(json.dumps(theme, separators=(",", ":")))
+        cookie_value = f"{webui.THEME_COOKIE_NAME}={raw}"
+
+        with patch(
+            "webui._get_repo_admin_info",
+            return_value={
+                "repo_root": "/repo",
+                "service_name": "novel-writer-webui.service",
+                "service_scope": "user",
+                "git_available": True,
+                "systemd_run_available": True,
+                "systemctl_available": True,
+                "branch": "main",
+                "commit": "abc1234",
+                "upstream": "origin/main",
+                "dirty": False,
+                "error": "",
+            },
+        ), patch("webui._read_admin_action_status", return_value={}):
+            settings_page = self._get("/settings", headers={"Cookie": cookie_value})
+            projects_page = self._get("/projects", headers={"Cookie": cookie_value})
+            project_page = self._get("/project/web", headers={"Cookie": cookie_value})
+
+        for page in [settings_page, projects_page, project_page]:
+            with self.subTest(uri=page):
+                self.assertEqual(page.status, 200)
+                self.assertIn("--bg: #111111;", page.body)
+                self.assertIn("--ink: #d8d8e0;", page.body)
+
+    def test_theme_default_preset_applied_when_no_cookie(self) -> None:
+        page = self._get("/projects")
+        self.assertEqual(page.status, 200)
+        self.assertIn("--bg: #f7f4ee;", page.body)
+        self.assertIn("--ink: #1d1a16;", page.body)
+
+    # ── Admin panel relocation ─────────────────────────────────────
+
+    def test_admin_panel_is_on_settings_page(self) -> None:
+        with patch(
+            "webui._get_repo_admin_info",
+            return_value={
+                "repo_root": "/repo",
+                "service_name": "novel-writer-webui.service",
+                "service_scope": "user",
+                "git_available": True,
+                "systemd_run_available": True,
+                "systemctl_available": True,
+                "branch": "main",
+                "commit": "abc1234",
+                "upstream": "origin/main",
+                "dirty": False,
+                "error": "",
+            },
+        ), patch("webui._read_admin_action_status", return_value={}):
+            settings_page = self._get("/settings")
+
+        self.assertIn("维护操作", settings_page.body)
+        self.assertIn("/admin/restart", settings_page.body)
+        self.assertIn("/admin/update", settings_page.body)
+        self.assertIn("当前分支", settings_page.body)
+        self.assertIn("当前提交", settings_page.body)
+
+    def test_projects_page_no_longer_has_admin_panel(self) -> None:
+        with patch(
+            "webui._get_repo_admin_info",
+            return_value={
+                "repo_root": "/repo",
+                "service_name": "novel-writer-webui.service",
+                "service_scope": "user",
+                "git_available": True,
+                "systemd_run_available": True,
+                "systemctl_available": True,
+                "branch": "main",
+                "commit": "abc1234",
+                "upstream": "origin/main",
+                "dirty": False,
+                "error": "",
+            },
+        ), patch("webui._read_admin_action_status", return_value={}):
+            page = self._get("/projects")
+
+        self.assertEqual(page.status, 200)
+        self.assertNotIn("维护操作", page.body)
+        self.assertNotIn("/admin/restart", page.body)
+        self.assertNotIn("/admin/update", page.body)
+
+    # ── Settings navigation link ───────────────────────────────────
+
+    def test_settings_link_present_in_topbar(self) -> None:
+        page = self._get("/projects")
+        self.assertEqual(page.status, 200)
+        self.assertIn('href="/settings"', page.body)
+        self.assertIn("设置", page.body)
+
+    def test_settings_page_shows_night_theme_colors_in_preview(self) -> None:
+        theme = {"preset": "night"}
+        raw = urllib.parse.quote(json.dumps(theme, separators=(",", ":")))
+        cookie_value = f"{webui.THEME_COOKIE_NAME}={raw}"
+
+        with patch(
+            "webui._get_repo_admin_info",
+            return_value={
+                "repo_root": "/repo",
+                "service_name": "novel-writer-webui.service",
+                "service_scope": "user",
+                "git_available": True,
+                "systemd_run_available": True,
+                "systemctl_available": True,
+                "branch": "main",
+                "commit": "abc1234",
+                "upstream": "origin/main",
+                "dirty": False,
+                "error": "",
+            },
+        ), patch("webui._read_admin_action_status", return_value={}):
+            page = self._get("/settings", headers={"Cookie": cookie_value})
+
+        self.assertEqual(page.status, 200)
+        self.assertIn("--bg: #1a1a2e;", page.body)
+        self.assertIn("--ink: #d8d8e0;", page.body)
+
+    def test_settings_page_redirects_to_login_when_auth_enabled(self) -> None:
+        settings = self._make_auth_settings(enabled=True)
+        with patch("webui._auth_settings", return_value=settings):
+            response = self._get("/settings")
+
+        self.assertEqual(response.status, 303)
+        self.assertIn("/login?next=", response.getheader("Location"))
+
+    def test_settings_save_requires_auth_when_enabled(self) -> None:
+        settings = self._make_auth_settings(enabled=True)
+        with patch("webui._auth_settings", return_value=settings):
+            response = self._post("/settings", "action=preset&preset=night")
+
+        self.assertEqual(response.status, 303)
+        self.assertIn("/login?next=", response.getheader("Location"))
 
 
 if __name__ == "__main__":

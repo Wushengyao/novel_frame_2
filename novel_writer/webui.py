@@ -2030,6 +2030,98 @@ def _render_effective_task_summary(task_card: dict | None) -> str:
     """
 
 
+THEME_PRESETS = {
+    "default": {
+        "label": "暖纸色",
+        "bg": "#f7f4ee",
+        "panel": "rgba(255, 251, 244, 0.9)",
+        "ink": "#1d1a16",
+        "muted": "#6f6254",
+        "accent": "#b44f2f",
+        "accent-dark": "#7f331c",
+        "line": "#d9cdbf",
+        "shadow": "0 18px 45px rgba(75, 46, 24, 0.10)",
+        "body_bg": "radial-gradient(circle at top left, rgba(234, 191, 138, 0.28), transparent 28%), linear-gradient(180deg, #f2ece1 0%, #f7f4ee 40%, #efe6d7 100%)",
+    },
+    "night": {
+        "label": "夜间模式",
+        "bg": "#1a1a2e",
+        "panel": "rgba(30, 30, 55, 0.92)",
+        "ink": "#d8d8e0",
+        "muted": "#9898b0",
+        "accent": "#e6966b",
+        "accent-dark": "#c07a50",
+        "line": "#3a3a58",
+        "shadow": "0 18px 45px rgba(0, 0, 0, 0.35)",
+        "body_bg": "linear-gradient(180deg, #1a1a2e 0%, #16162a 100%)",
+    },
+    "eyecare": {
+        "label": "护眼模式",
+        "bg": "#dce8d4",
+        "panel": "rgba(235, 245, 230, 0.92)",
+        "ink": "#2d3028",
+        "muted": "#5a6852",
+        "accent": "#5a8a4a",
+        "accent-dark": "#3d6b30",
+        "line": "#bcc9b4",
+        "shadow": "0 18px 45px rgba(40, 55, 30, 0.10)",
+        "body_bg": "radial-gradient(circle at top left, rgba(160, 200, 140, 0.22), transparent 28%), linear-gradient(180deg, #dce8d4 0%, #d2e0ca 40%, #c8d8c0 100%)",
+    },
+}
+
+THEME_COOKIE_NAME = "novel_theme"
+THEME_COOKIE_MAX_AGE = 365 * 24 * 3600
+
+
+def _read_theme_cookie(handler) -> dict:
+    raw_cookie = handler.headers.get("Cookie", "")
+    if not raw_cookie:
+        return {"preset": "default"}
+    cookie = SimpleCookie()
+    try:
+        cookie.load(raw_cookie)
+    except Exception:
+        return {"preset": "default"}
+    morsel = cookie.get(THEME_COOKIE_NAME)
+    if morsel is None or not morsel.value:
+        return {"preset": "default"}
+    try:
+        theme = json.loads(urllib.parse.unquote(morsel.value))
+        if isinstance(theme, dict) and "preset" in theme:
+            return theme
+    except Exception:
+        pass
+    return {"preset": "default"}
+
+
+def _theme_css_variables(theme: dict) -> str:
+    preset = theme.get("preset", "default")
+    preset_def = THEME_PRESETS.get(preset, THEME_PRESETS["default"])
+    custom = theme.get("custom") if isinstance(theme.get("custom"), dict) else {}
+    vars_map = {
+        "--bg": custom.get("bg", preset_def["bg"]),
+        "--panel": custom.get("panel", preset_def["panel"]),
+        "--ink": custom.get("ink", preset_def["ink"]),
+        "--muted": custom.get("muted", preset_def["muted"]),
+        "--accent": custom.get("accent", preset_def["accent"]),
+        "--accent-dark": custom.get("accent-dark", preset_def["accent-dark"]),
+        "--line": custom.get("line", preset_def["line"]),
+        "--shadow": preset_def["shadow"],
+        "--body-bg": preset_def["body_bg"],
+    }
+    return "\n".join(f"      {k}: {v};" for k, v in vars_map.items())
+
+
+def _theme_cookie_value(theme: dict) -> str:
+    raw = urllib.parse.quote(json.dumps(theme, ensure_ascii=False, separators=(",", ":")))
+    cookie = SimpleCookie()
+    cookie[THEME_COOKIE_NAME] = raw
+    cookie[THEME_COOKIE_NAME]["path"] = "/"
+    cookie[THEME_COOKIE_NAME]["max-age"] = str(THEME_COOKIE_MAX_AGE)
+    cookie[THEME_COOKIE_NAME]["samesite"] = "Lax"
+    return cookie[THEME_COOKIE_NAME].OutputString()
+
+
 def _render_admin_panel(
     *,
     client_host: str,
@@ -2148,15 +2240,19 @@ def _render_page(
     *,
     auth_enabled: bool = False,
     authenticated: bool = False,
+    theme: dict | None = None,
 ) -> str:
+    if theme is None:
+        theme = {"preset": "default"}
     flash = ""
     if notice:
         flash += f'<div class="flash notice">{escape(notice)}</div>'
     if error:
         flash += f'<div class="flash error">{escape(error)}</div>'
-    topbar_action = '<a href="/projects" class="ghost-button">返回首页</a>'
+    topbar_action = '<a href="/settings" class="ghost-button">设置</a> <a href="/projects" class="ghost-button">返回首页</a>'
     if auth_enabled and authenticated:
         topbar_action = """
+        <a href="/settings" class="ghost-button">设置</a>
         <a href="/projects" class="ghost-button">返回首页</a>
         <form method="post" action="/logout" class="inline-form">
           <button type="submit" class="ghost-button">退出登录</button>
@@ -2175,23 +2271,14 @@ def _render_page(
   <title>{escape(title)}</title>
   <style>
     :root {{
-      --bg: #f7f4ee;
-      --panel: rgba(255, 251, 244, 0.9);
-      --ink: #1d1a16;
-      --muted: #6f6254;
-      --accent: #b44f2f;
-      --accent-dark: #7f331c;
-      --line: #d9cdbf;
-      --shadow: 0 18px 45px rgba(75, 46, 24, 0.10);
+{_theme_css_variables(theme)}
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
       font-family: Georgia, "Noto Serif SC", "Songti SC", serif;
       color: var(--ink);
-      background:
-        radial-gradient(circle at top left, rgba(234, 191, 138, 0.28), transparent 28%),
-        linear-gradient(180deg, #f2ece1 0%, #f7f4ee 40%, #efe6d7 100%);
+      background: var(--body-bg);
       min-height: 100vh;
     }}
     a {{ color: var(--accent-dark); text-decoration: none; }}
@@ -2920,6 +3007,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             self._handle_projects(notice=notice, error=error)
             return
 
+        if parsed.path == "/settings":
+            self._handle_settings_page(notice=notice, error=error)
+            return
+
         parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
         if len(parts) == 2 and parts[0] == "job":
             self._handle_job_page(parts[1], notice=notice, error=error)
@@ -2966,6 +3057,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             return
         form = self._read_form()
 
+        if parsed.path == "/settings":
+            self._handle_settings_save(form)
+            return
         if parsed.path == "/projects/create":
             self._handle_create_project_async(form)
             return
@@ -3107,6 +3201,212 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             )
         except Exception as exc:
             self._redirect("/projects?error=" + urllib.parse.quote(str(exc)))
+
+    def _handle_settings_page(self, notice: str = "", error: str = "") -> None:
+        auth_settings = self._current_auth_settings()
+        authenticated = self._is_authenticated(auth_settings)
+        theme = _read_theme_cookie(self)
+        preset = theme.get("preset", "default")
+        custom = theme.get("custom") if isinstance(theme.get("custom"), dict) else {}
+
+        preset_options = []
+        for pid, pdef in THEME_PRESETS.items():
+            checked = " checked" if pid == preset else ""
+            preset_options.append(f"""<label class="theme-card{" theme-card-active" if pid == preset else ""}">
+              <input type="radio" name="preset" value="{escape(pid)}"{checked}>
+              <span class="theme-swatch" style="background:{escape(pdef['bg'])};border:2px solid {escape(pdef['accent'])}"></span>
+              <span>{escape(pdef['label'])}</span>
+            </label>""")
+
+        def _color_input(var_name: str, label: str) -> str:
+            preset_def = THEME_PRESETS.get(preset, THEME_PRESETS["default"])
+            value = custom.get(var_name, preset_def[var_name])
+            return f"""<label>{escape(label)}
+              <div class="color-input-row">
+                <input type="color" name="color_{escape(var_name)}" value="{escape(value)}">
+                <input type="text" name="color_{escape(var_name)}_text" value="{escape(value)}" pattern="#[0-9a-fA-F]{{3,8}}" class="color-text-input">
+              </div>
+            </label>"""
+
+        # Admin panel section (moved from projects page)
+        admin_html = _render_admin_panel(
+            client_host=self.client_address[0],
+            auth_settings=auth_settings,
+            authenticated=authenticated,
+        )
+
+        body = f"""
+        <div class="grid">
+          <div class="stack">
+            <section class="panel">
+              <h2>主题设置</h2>
+              <form method="post" action="/settings">
+                <input type="hidden" name="action" value="preset">
+                <div class="theme-preset-grid">
+                  {''.join(preset_options)}
+                </div>
+                <button type="submit">应用预设主题</button>
+              </form>
+            </section>
+            <section class="panel">
+              <h2>自定义颜色</h2>
+              <form method="post" action="/settings">
+                <input type="hidden" name="action" value="custom">
+                <input type="hidden" name="preset" value="{escape(preset)}">
+                <div class="color-grid">
+                  {_color_input("bg", "背景色")}
+                  {_color_input("panel", "面板色")}
+                  {_color_input("ink", "文字色")}
+                  {_color_input("muted", "辅助文字色")}
+                  {_color_input("accent", "强调色")}
+                  {_color_input("line", "边框色")}
+                </div>
+                <div class="two-col">
+                  <button type="submit">保存自定义颜色</button>
+                  <button type="button" onclick="document.getElementById('reset-form').submit()">重置为预设默认</button>
+                </div>
+              </form>
+              <form id="reset-form" method="post" action="/settings" style="display:none">
+                <input type="hidden" name="action" value="preset">
+                <input type="hidden" name="preset" value="{escape(preset)}">
+              </form>
+            </section>
+            {admin_html}
+          </div>
+          <section class="panel">
+            <h2>主题预览</h2>
+            <p class="muted">这是当前主题效果下的文字预览。</p>
+            <p>这是一段正常的正文文本，用于展示 <strong>当前字体颜色</strong> 和版面效果。长期阅读时合适的配色可以减轻眼疲劳。</p>
+            <p style="color:var(--accent)">这是强调色链接和重点文字示例。</p>
+            <p style="color:var(--muted)">这是辅助说明文字的颜色示例。</p>
+            <div style="background:var(--bg);border:1px solid var(--line);padding:16px;border-radius:12px;margin-top:12px">
+              <p style="margin:0">这是一块用背景色和边框色构成的卡片区域，帮助你判断整体配色是否协调。</p>
+            </div>
+            <div class="two-col" style="margin-top:12px">
+              <button>示例按钮</button>
+              <button disabled>禁用按钮</button>
+            </div>
+            <div style="margin-top:12px">
+              <span class="pill">示例标签</span>
+              <span class="pill">预览效果</span>
+            </div>
+          </section>
+        </div>
+        <style>
+          .theme-preset-grid {{
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            margin-bottom: 14px;
+          }}
+          .theme-card {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            padding: 14px 8px;
+            border: 2px solid var(--line);
+            border-radius: 14px;
+            cursor: pointer;
+            transition: border-color 0.2s;
+            text-align: center;
+            font-size: 14px;
+          }}
+          .theme-card:hover {{ border-color: var(--accent); }}
+          .theme-card-active {{ border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }}
+          .theme-card input {{ display: none; }}
+          .theme-swatch {{
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            display: block;
+          }}
+          .color-grid {{
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+            margin-bottom: 14px;
+          }}
+          .color-input-row {{
+            display: flex;
+            gap: 8px;
+            align-items: center;
+          }}
+          .color-input-row input[type="color"] {{
+            width: 40px;
+            height: 36px;
+            border: 2px solid var(--line);
+            border-radius: 8px;
+            cursor: pointer;
+            padding: 2px;
+            background: transparent;
+          }}
+          .color-text-input {{
+            flex: 1;
+            font-family: monospace;
+            font-size: 13px;
+          }}
+          @media (max-width: 600px) {{
+            .theme-preset-grid {{ grid-template-columns: 1fr; }}
+            .color-grid {{ grid-template-columns: 1fr; }}
+          }}
+        </style>
+        <script>
+          document.querySelectorAll('.theme-card').forEach(card => {{
+            card.addEventListener('click', function() {{
+              this.querySelector('input[type=radio]').checked = true;
+              this.closest('form').submit();
+            }});
+          }});
+        </script>
+        """
+        self._write_html(
+            _render_page(
+                "设置",
+                body,
+                notice=notice,
+                error=error,
+                auth_enabled=auth_settings.enabled,
+                authenticated=authenticated,
+                theme=theme,
+            )
+        )
+
+    def _handle_settings_save(self, form: dict[str, str]) -> None:
+        auth_settings = self._current_auth_settings()
+        if not self._is_authenticated(auth_settings):
+            self._redirect("/login?next=" + urllib.parse.quote("/settings"))
+            return
+
+        action = form.get("action", "preset")
+        theme = _read_theme_cookie(self)
+
+        if action == "preset":
+            preset = form.get("preset", "default")
+            if preset not in THEME_PRESETS:
+                preset = "default"
+            theme = {"preset": preset}
+        elif action == "custom":
+            preset = form.get("preset", theme.get("preset", "default"))
+            custom = {}
+            for var_name in ["bg", "panel", "ink", "muted", "accent", "line"]:
+                value = (form.get(f"color_{var_name}") or form.get(f"color_{var_name}_text") or "").strip()
+                if value and re.match(r'^#[0-9a-fA-F]{3,8}$', value):
+                    custom[var_name] = value
+            theme = {"preset": preset}
+            if custom:
+                theme["custom"] = custom
+
+        cookie_header = _theme_cookie_value(theme)
+        self._redirect_with_cookie("/settings?notice=主题设置已保存。", cookie_header)
+
+    def _redirect_with_cookie(self, location: str, cookie_header: str) -> None:
+        encoded = urllib.parse.quote(location, safe="/?=&")
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", encoded)
+        self.send_header("Set-Cookie", cookie_header)
+        self._send_standard_headers()
+        self.end_headers()
 
     def _write_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -3448,6 +3748,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 error=error,
                 auth_enabled=auth_settings.enabled,
                 authenticated=authenticated,
+                theme=_read_theme_cookie(self),
             )
         )
 
@@ -3477,11 +3778,6 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             "当前还没有后台任务。",
         )
         external_service_panel_html = _render_external_service_panel()
-        admin_panel_html = _render_admin_panel(
-            client_host=self.client_address[0],
-            auth_settings=auth_settings,
-            authenticated=authenticated,
-        )
 
         body = f"""
         <div class="grid">
@@ -3580,7 +3876,6 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               </form>
             </section>
             {external_service_panel_html}
-            {admin_panel_html}
           </div>
           <section class="panel">
             <div class="hero">
@@ -3603,6 +3898,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 error=error,
                 auth_enabled=auth_settings.enabled,
                 authenticated=authenticated,
+                theme=_read_theme_cookie(self),
             )
         )
 
@@ -3850,6 +4146,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 error=error,
                 auth_enabled=auth_settings.enabled,
                 authenticated=authenticated,
+                theme=_read_theme_cookie(self),
             )
         )
 
@@ -4040,6 +4337,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 error=error,
                 auth_enabled=auth_settings.enabled,
                 authenticated=authenticated,
+                theme=_read_theme_cookie(self),
             )
         )
 
@@ -4115,6 +4413,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 error=error,
                 auth_enabled=auth_settings.enabled,
                 authenticated=authenticated,
+                theme=_read_theme_cookie(self),
             )
         )
 
@@ -4182,6 +4481,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 error=error,
                 auth_enabled=auth_settings.enabled,
                 authenticated=authenticated,
+                theme=_read_theme_cookie(self),
             )
         )
 
@@ -4492,6 +4792,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 error=error,
                 auth_enabled=auth_settings.enabled,
                 authenticated=authenticated,
+                theme=_read_theme_cookie(self),
             )
         )
 
@@ -4848,6 +5149,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 error=error,
                 auth_enabled=auth_settings.enabled,
                 authenticated=authenticated,
+                theme=_read_theme_cookie(self),
             )
         )
 
