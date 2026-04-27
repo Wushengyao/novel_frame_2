@@ -382,19 +382,37 @@ def run_next_chapter(
         },
     )
 
-    try:
-        log_info("next_chapter: requesting model output")
-        emit_progress(progress_callback, "chapter_write", "Generating chapter text")
-        response_text, metadata = generate_text_with_metadata(
-            prompt,
-            config,
-            log_context=log_context_payload,
-            system_prompt=build_system_prompt("writer"),
-        )
-    except Exception:
-        update_project_stats(project_path, phase="writer", success=False, usage=None)
-        log_error("next_chapter: writer request failed")
-        raise
+    response_text = ""
+    metadata = {}
+    last_writer_error = None
+    for request_attempt in range(1, 3):
+        writer_log_context = dict(log_context_payload)
+        writer_log_context["writer_request_attempt"] = request_attempt
+        try:
+            log_info(f"next_chapter: requesting model output attempt={request_attempt}")
+            message = "Generating chapter text"
+            if request_attempt > 1:
+                message += " retry"
+            emit_progress(progress_callback, "chapter_write", message)
+            response_text, metadata = generate_text_with_metadata(
+                prompt,
+                config,
+                log_context=writer_log_context,
+                system_prompt=build_system_prompt("writer"),
+            )
+            if not str(response_text or "").strip():
+                raise RuntimeError("writer response is empty")
+            break
+        except Exception as exc:
+            update_project_stats(project_path, phase="writer", success=False, usage=None)
+            last_writer_error = exc
+            log_warning(f"next_chapter: writer request failed attempt={request_attempt}, reason={exc}")
+
+    if not response_text:
+        log_error("next_chapter: writer request failed after retry")
+        if last_writer_error is not None:
+            raise last_writer_error
+        raise RuntimeError("writer request returned empty response")
 
     update_project_stats(
         project_path,

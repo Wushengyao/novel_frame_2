@@ -1,15 +1,54 @@
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib import error
 
-from llm_client import generate_text_with_metadata
+from llm_client import _request_json, generate_text_with_metadata
 
 
 class LLMClientTests(unittest.TestCase):
+    def test_request_json_retries_retryable_http_status(self) -> None:
+        calls = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self) -> bytes:
+                return b'{"ok": true}'
+
+        def fake_urlopen(req, timeout):
+            calls.append((req, timeout))
+            if len(calls) == 1:
+                raise error.HTTPError(
+                    req.full_url,
+                    503,
+                    "service unavailable",
+                    hdrs={},
+                    fp=io.BytesIO(b"busy"),
+                )
+            return FakeResponse()
+
+        with patch("llm_client.request.urlopen", side_effect=fake_urlopen), patch("llm_client.time.sleep") as sleep:
+            payload, attempts = _request_json(
+                "https://example.local/v1/chat/completions",
+                {"Content-Type": "application/json"},
+                {"model": "test", "messages": []},
+                120,
+            )
+
+        self.assertEqual(payload, {"ok": True})
+        self.assertEqual(attempts, 2)
+        sleep.assert_called_once()
+
     def test_generate_text_with_metadata_logs_prompt_and_response(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = Path(tmp) / "project"

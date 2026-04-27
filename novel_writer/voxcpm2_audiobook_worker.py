@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import traceback
 import time
 from datetime import datetime, timezone
@@ -44,6 +45,25 @@ def build_text_for_voice(text: str, voice: dict) -> str:
     return text
 
 
+def apply_voice_seed(voice: dict) -> None:
+    try:
+        seed = int((voice or {}).get("seed") or 0)
+    except (TypeError, ValueError):
+        seed = 0
+    if seed <= 0:
+        return
+    random.seed(seed)
+    np.random.seed(seed % (2**32 - 1))
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except Exception:
+        pass
+
+
 def generate_segment(model: VoxCPM, segment: dict, runtime: dict) -> tuple[int, np.ndarray]:
     voice = segment.get("voice") or {}
     text = str(segment.get("text") or "").strip()
@@ -65,6 +85,7 @@ def generate_segment(model: VoxCPM, segment: dict, runtime: dict) -> tuple[int, 
         kwargs["prompt_wav_path"] = reference_audio
         kwargs["prompt_text"] = prompt_text
 
+    apply_voice_seed(voice)
     wav = model.generate(**kwargs)
     return int(model.tts_model.sample_rate), np.asarray(wav, dtype=np.float32)
 
@@ -81,6 +102,7 @@ def generate_voice_reference(model: VoxCPM, task: dict, runtime: dict) -> tuple[
             "prompt_text": "",
             "cfg_value": task.get("cfg_value"),
             "inference_timesteps": task.get("inference_timesteps"),
+            "seed": task.get("seed"),
         },
     }
     return generate_segment(model, segment, runtime)

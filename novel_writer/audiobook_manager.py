@@ -37,6 +37,7 @@ VOICE_CONFIG_VERSION = 2
 GENERATION_MODE_ADVANCED = "advanced"
 GENERATION_MODE_SIMPLE = "simple"
 GENERATION_MODES = {GENERATION_MODE_ADVANCED, GENERATION_MODE_SIMPLE}
+VOICE_SEED_MODULUS = 2_147_483_647
 
 DEFAULT_SPLIT_CONFIG = {
     "target_chars": 80,
@@ -152,6 +153,12 @@ def normalize_generation_mode(value: object) -> str:
 def _signature(payload: dict) -> str:
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(serialized.encode("utf-8")).hexdigest()[:16]
+
+
+def _voice_seed(*parts: object) -> int:
+    joined = "|".join(str(part or "") for part in parts)
+    digest = hashlib.sha1(joined.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % VOICE_SEED_MODULUS
 
 
 def _reference_source(entry: dict) -> str:
@@ -767,6 +774,7 @@ def _voice_reference_plan(
             "control_instruction": control_instruction,
         }
     )
+    seed = _voice_seed(voice_id, profile_signature, reference_signature)
 
     task: dict | None = None
     if source == "uploaded":
@@ -806,6 +814,7 @@ def _voice_reference_plan(
                 "profile_signature": profile_signature,
                 "cfg_value": cfg_value,
                 "inference_timesteps": inference_timesteps,
+                "seed": seed,
             }
         source = "auto"
 
@@ -821,6 +830,7 @@ def _voice_reference_plan(
         "profile_signature": profile_signature,
         "cfg_value": cfg_value,
         "inference_timesteps": inference_timesteps,
+        "seed": seed,
         "mode": "reference",
     }
     record = {
@@ -834,6 +844,7 @@ def _voice_reference_plan(
         "reference_signature": reference_signature,
         "profile_signature": profile_signature,
         "control_instruction": control_instruction,
+        "seed": seed,
         "generated": bool(task),
     }
     return voice, record, task

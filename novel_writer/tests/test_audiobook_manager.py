@@ -205,6 +205,20 @@ class AudiobookManagerTests(unittest.TestCase):
         linyu_task = next(task for task in tasks if task["voice_id"] == "character:林宇")
         self.assertIn("负责行动", linyu_task["control_instruction"])
         self.assertIn("黑发，沉稳", linyu_task["control_instruction"])
+        self.assertIsInstance(linyu_task["seed"], int)
+
+        voices_by_speaker: dict[str, set[tuple[str, str, int]]] = {}
+        for item in captured["payload"]["segments"]:
+            voice = item["voice"]
+            voices_by_speaker.setdefault(item["speaker"], set()).add(
+                (
+                    voice["voice_id"],
+                    voice["reference_audio"],
+                    int(voice["seed"]),
+                )
+            )
+        self.assertTrue(voices_by_speaker)
+        self.assertTrue(all(len(voice_keys) == 1 for voice_keys in voices_by_speaker.values()))
 
     def test_uploaded_reference_is_not_replaced_by_auto_reference_task(self) -> None:
         save_uploaded_voice_reference(

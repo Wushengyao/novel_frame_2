@@ -21,6 +21,8 @@ LOCAL_LLM_MIN_TIMEOUT_SECONDS = 900
 LOCAL_OPENAI_COMPATIBLE_PROVIDERS = {"ollama", "llama_cpp"}
 LLM_LOG_FILENAME = "llm_interactions.jsonl"
 SENSITIVE_CONFIG_KEYS = {"api_key", "api_base", "model_name", "model"}
+LLM_REQUEST_MAX_ATTEMPTS = 4
+RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 CREATIVE_PHASES = {
     "writer",
     "rewrite",
@@ -226,26 +228,43 @@ def _request_json(
         ssl.SSLZeroReturnError,
     )
 
-    for attempt in range(4):
+    for attempt in range(LLM_REQUEST_MAX_ATTEMPTS):
         try:
             req = request.Request(endpoint, data=data, headers=headers, method="POST")
             with request.urlopen(req, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8")), attempt + 1
+                raw_response = response.read().decode("utf-8")
+                try:
+                    return json.loads(raw_response), attempt + 1
+                except json.JSONDecodeError as exc:
+                    last_error = exc
+                    if attempt < LLM_REQUEST_MAX_ATTEMPTS - 1:
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                    raise RuntimeError(f"LLM endpoint returned invalid JSON: {raw_response[:500]}") from exc
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            if exc.code in RETRYABLE_HTTP_STATUS_CODES and attempt < LLM_REQUEST_MAX_ATTEMPTS - 1:
+                last_error = RuntimeError(f"HTTP {exc.code}: {detail}")
+                retry_after = 0.0
+                try:
+                    retry_after = float(exc.headers.get("Retry-After", "0") or 0)
+                except (AttributeError, TypeError, ValueError):
+                    retry_after = 0.0
+                time.sleep(max(retry_after, 1.5 * (attempt + 1)))
+                continue
             raise RuntimeError(
                 f"LLM request failed with HTTP {exc.code}: {detail}"
             ) from exc
         except retryable_errors as exc:
             last_error = exc
-            if attempt < 3:
+            if attempt < LLM_REQUEST_MAX_ATTEMPTS - 1:
                 time.sleep(1.5 * (attempt + 1))
             continue
         except error.URLError as exc:
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, retryable_errors):
                 last_error = exc
-                if attempt < 3:
+                if attempt < LLM_REQUEST_MAX_ATTEMPTS - 1:
                     time.sleep(1.5 * (attempt + 1))
                 continue
             raise RuntimeError(f"Failed to connect to LLM endpoint: {exc}") from exc

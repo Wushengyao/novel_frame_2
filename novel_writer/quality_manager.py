@@ -31,6 +31,16 @@ from runtime_config import (
 CRAFT_BRIEF_DIR_NAME = "craft_briefs"
 QUALITY_REVIEW_DIR_NAME = "quality_reviews"
 QUALITY_DRAFT_DIR_NAME = "quality_drafts"
+REWRITE_REQUEST_ATTEMPTS = 2
+REWRITE_TEXT_KEYS = (
+    "rewritten_text",
+    "chapter_text",
+    "content",
+    "text",
+    "body",
+    "正文",
+    "重写正文",
+)
 REVIEW_SCORE_KEYS = (
     "task_completion",
     "reader_hook",
@@ -258,6 +268,55 @@ def quality_review_passed(review: dict) -> bool:
 
 def quality_review_available(review: dict) -> bool:
     return isinstance(review, dict) and not bool(review.get("review_unavailable", False))
+
+
+def _strip_single_fenced_block(text: str) -> str:
+    content = str(text or "").strip()
+    if not content.startswith("```"):
+        return content
+    first_newline = content.find("\n")
+    closing = content.rfind("```")
+    if first_newline == -1 or closing <= first_newline:
+        return content
+    return content[first_newline + 1 : closing].strip()
+
+
+def _looks_like_json_response(text: str) -> bool:
+    content = str(text or "").strip().lstrip("\ufeff")
+    if content.startswith("{"):
+        return True
+    if content.startswith("```"):
+        return _strip_single_fenced_block(content).lstrip("\ufeff").lstrip().startswith("{")
+    return False
+
+
+def _rewrite_text_from_payload(payload: dict) -> str:
+    for key in REWRITE_TEXT_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for key in ("result", "data", "chapter"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            text = _rewrite_text_from_payload(nested)
+            if text:
+                return text
+    return ""
+
+
+def normalize_rewrite_response_text(response_text: str) -> str:
+    content = _strip_single_fenced_block(response_text)
+    if not content:
+        raise ValueError("Rewrite response is empty.")
+
+    if _looks_like_json_response(response_text):
+        payload = extract_json_object(response_text, "Could not parse JSON from rewrite response.")
+        rewritten_text = _rewrite_text_from_payload(payload)
+        if not rewritten_text:
+            raise ValueError("Rewrite response JSON did not contain rewritten chapter text.")
+        return _strip_single_fenced_block(rewritten_text)
+
+    return content
 
 
 def craft_brief_path(project_path: str, chapter_number: int) -> Path:
@@ -489,20 +548,39 @@ def rewrite_chapter_draft(
         planning_mode=config.get("planning_mode", ""),
         extra={"target_chapter_number": chapter_number, **quality_extra},
     )
-    try:
-        log_info("rewrite: requesting improved chapter draft")
-        emit_progress(progress_callback, "rewrite", "Rewriting chapter draft after quality review")
-        response_text, metadata = generate_text_with_metadata(
-            prompt,
-            request_config,
-            log_context=request_log_context,
-            system_prompt=build_system_prompt("rewrite"),
-        )
+    last_error = ""
+    for request_attempt in range(1, REWRITE_REQUEST_ATTEMPTS + 1):
+        request_log_context["rewrite_request_attempt"] = request_attempt
+        try:
+            log_info(f"rewrite: requesting improved chapter draft request_attempt={request_attempt}")
+            message = "Rewriting chapter draft after quality review"
+            if request_attempt > 1:
+                message += " retry"
+            emit_progress(progress_callback, "rewrite", message)
+            response_text, metadata = generate_text_with_metadata(
+                prompt,
+                request_config,
+                log_context=request_log_context,
+                system_prompt=build_system_prompt("rewrite"),
+            )
+        except Exception as exc:
+            update_project_stats(project_path, phase="rewrite", success=False, usage=None)
+            last_error = str(exc)
+            log_warning(f"rewrite: request failed request_attempt={request_attempt}, reason: {exc}")
+            continue
+
+        try:
+            rewritten_text = normalize_rewrite_response_text(response_text)
+        except Exception as exc:
+            update_project_stats(project_path, phase="rewrite", success=False, usage=metadata.get("usage"), metadata=metadata)
+            last_error = str(exc)
+            log_warning(f"rewrite: response parse failed request_attempt={request_attempt}, reason: {exc}")
+            continue
+
         update_project_stats(project_path, phase="rewrite", success=True, usage=metadata.get("usage"), metadata=metadata)
-        return response_text
-    except Exception:
-        update_project_stats(project_path, phase="rewrite", success=False, usage=None)
-        raise
+        return rewritten_text
+
+    raise RuntimeError(f"rewrite failed after retry: {last_error}")
 
 
 def quality_mode_uses_craft_brief(mode: object) -> bool:
@@ -537,6 +615,7 @@ __all__ = [
     "generate_craft_brief",
     "normalize_craft_brief",
     "normalize_quality_config",
+    "normalize_rewrite_response_text",
     "quality_mode_allows_rewrite",
     "quality_mode_uses_craft_brief",
     "quality_mode_uses_review",

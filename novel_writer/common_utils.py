@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 
 
@@ -28,32 +29,43 @@ def safe_int(value: object, default: int = 0) -> int:
         return default
 
 
-def extract_json_object(text: str, error_message: str) -> dict:
-    content = (text or "").strip()
+def _json_candidates(content: str) -> list[str]:
     candidates = [content]
-
-    if "```json" in content:
-        start = content.find("```json") + len("```json")
-        end = content.find("```", start)
-        if end != -1:
-            candidates.append(content[start:end].strip())
-    elif "```" in content:
-        start = content.find("```") + len("```")
-        end = content.find("```", start)
-        if end != -1:
-            candidates.append(content[start:end].strip())
+    for match in re.finditer(r"```[a-zA-Z0-9_-]*\s*(.*?)```", content, flags=re.DOTALL):
+        fenced = match.group(1).strip()
+        if fenced:
+            candidates.append(fenced)
 
     brace_start = content.find("{")
     brace_end = content.rfind("}")
     if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
-        candidates.append(content[brace_start : brace_end + 1])
+        candidates.append(content[brace_start : brace_end + 1].strip())
 
-    for candidate in candidates:
+    return candidates
+
+
+def extract_json_object(text: str, error_message: str) -> dict:
+    content = (text or "").strip().lstrip("\ufeff")
+    decoder = json.JSONDecoder()
+
+    for candidate in _json_candidates(content):
+        if not candidate:
+            continue
         try:
             data = json.loads(candidate)
         except json.JSONDecodeError:
-            continue
+            data = None
         if isinstance(data, dict):
             return data
+
+        for index, char in enumerate(candidate):
+            if char != "{":
+                continue
+            try:
+                data, _end = decoder.raw_decode(candidate[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                return data
 
     raise ValueError(error_message)
