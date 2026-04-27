@@ -60,6 +60,8 @@ from project_manager import (
     PLANNING_MODE_NONE,
     PLANNING_MODE_VOLUME,
     get_latest_state_snapshot_chapter,
+    export_project_archive,
+    import_project_archive,
     init_project,
     load_json,
     load_project,
@@ -2931,6 +2933,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if len(parts) == 2 and parts[0] == "project":
             self._handle_project_page(parts[1], notice=notice, error=error)
             return
+        if len(parts) == 3 and parts[0] == "project" and parts[2] == "export":
+            self._handle_project_export(parts[1])
+            return
         if len(parts) == 4 and parts[0] == "project" and parts[2] == "chapter":
             self._handle_chapter(parts[1], parts[3], notice=notice, error=error)
             return
@@ -2963,6 +2968,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/projects/create":
             self._handle_create_project_async(form)
+            return
+        if parsed.path == "/projects/import":
+            self._handle_import_project(form)
             return
         if parsed.path == "/admin/restart":
             self._handle_admin_restart()
@@ -3130,6 +3138,98 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _write_download_file(
+        self,
+        file_path: Path,
+        *,
+        download_name: str | None = None,
+        cleanup: bool = False,
+    ) -> None:
+        try:
+            content_type = "application/zip" if file_path.suffix.lower() == ".zip" else (
+                mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+            )
+            name = download_name or file_path.name
+            fallback_name = re.sub(r'[^A-Za-z0-9._-]+', "_", name).strip("._-") or "download.zip"
+            quoted_name = urllib.parse.quote(name)
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self._send_standard_headers()
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{fallback_name}"; filename*=UTF-8\'\'{quoted_name}',
+            )
+            self.send_header("Content-Length", str(file_path.stat().st_size))
+            self.end_headers()
+            with file_path.open("rb") as fh:
+                while True:
+                    chunk = fh.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        finally:
+            if cleanup:
+                file_path.unlink(missing_ok=True)
+
+    def _handle_project_export(self, project_id: str) -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+        if JOB_REGISTRY.has_active_project_job(project_path, blocking_only=True):
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote("当前项目有后台写作任务正在运行，请稍后再导出项目包。")
+            )
+            return
+
+        fd, temp_archive = tempfile.mkstemp(prefix="novel_project_export_", suffix=".zip")
+        os.close(fd)
+        temp_archive_path = Path(temp_archive)
+        try:
+            result = export_project_archive(str(project_path), str(temp_archive_path))
+            self._write_download_file(
+                Path(result["archive_path"]),
+                download_name=f"{project_path.name}.zip",
+                cleanup=True,
+            )
+        except Exception as exc:
+            temp_archive_path.unlink(missing_ok=True)
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote(str(exc))
+            )
+
+    def _handle_import_project(self, form: dict[str, str]) -> None:
+        uploaded = self._uploaded_file("project_archive")
+        if uploaded is None or not uploaded.content:
+            self._redirect("/projects?error=" + urllib.parse.quote("请选择要导入的项目 ZIP 包。"))
+            return
+
+        fd, temp_archive = tempfile.mkstemp(prefix="novel_project_import_", suffix=".zip")
+        os.close(fd)
+        temp_archive_path = Path(temp_archive)
+        try:
+            temp_archive_path.write_bytes(uploaded.content)
+            result = import_project_archive(str(temp_archive_path), str(OUTPUT_DIR))
+            notice = "项目导入完成。"
+            if result.get("renamed"):
+                notice += f" 因 project_id 冲突，已改名为 {result.get('project_id', '')}。"
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(str(result.get("project_id", "")))
+                + "?notice="
+                + urllib.parse.quote(notice)
+            )
+        except Exception as exc:
+            self._redirect("/projects?error=" + urllib.parse.quote(str(exc)))
+        finally:
+            temp_archive_path.unlink(missing_ok=True)
 
     def _handle_login_page(self, parsed) -> None:
         settings = self._current_auth_settings()
@@ -3467,6 +3567,16 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 </label>
                 <div class="muted">Optional advanced model used only for craft brief, quality review, and rewrite.</div>
                 <button type="submit">创建项目</button>
+              </form>
+            </section>
+            <section class="panel">
+              <h2>导入项目</h2>
+              <form method="post" action="/projects/import" enctype="multipart/form-data">
+                <label>项目 ZIP 包
+                  <input type="file" name="project_archive" accept=".zip,application/zip" required>
+                </label>
+                <div class="muted">导入完整小说项目包；如果 project_id 已存在，会自动生成新项目，不会覆盖旧项目。</div>
+                <button type="submit">导入项目包</button>
               </form>
             </section>
             {external_service_panel_html}
@@ -4441,6 +4551,11 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             if progression_jobs
             else ""
         )
+        export_control_html = (
+            '<button type="button" disabled>导出项目包</button>'
+            if project_busy
+            else f'<a class="ghost-button" href="/project/{escape(project_id)}/export">导出项目包</a>'
+        )
 
         chapter_links = "".join(
             f"<a href=\"/project/{escape(project_id)}/chapter/{escape(chapter['slug'])}\">{escape(chapter['name'])}</a>"
@@ -4565,6 +4680,11 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                   <button class="ghost-button" type="submit">回滚到该章节</button>
                 </fieldset>
               </form>
+            </section>
+            <section class="panel">
+              <h3>项目迁移</h3>
+              <p class="muted">导出完整项目 ZIP，包含正文、状态、快照、插图、有声章节和 llm_logs。llm_logs 可能含模型请求与返回内容。</p>
+              {export_control_html}
             </section>
             <section class="panel">
               <h3>生成插图</h3>

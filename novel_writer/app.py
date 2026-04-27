@@ -61,8 +61,10 @@ from project_manager import (
     acquire_project_write_lock,
     create_state_snapshot,
     ensure_state_snapshot,
+    export_project_archive,
     get_latest_state_snapshot_chapter,
     get_last_chapter_text,
+    import_project_archive,
     init_project,
     load_json,
     load_project,
@@ -850,12 +852,41 @@ def main() -> None:
         help="Override planning mode for this run",
     )
 
+    export_parser = subparsers.add_parser("export", help="Export a complete novel project ZIP archive")
+    export_parser.add_argument("--project", required=True, help="Path to novel_project")
+    export_parser.add_argument("--output", help="Optional output ZIP path")
+
+    import_parser = subparsers.add_parser("import", help="Import a novel project ZIP archive")
+    import_parser.add_argument("--archive", required=True, help="Path to exported project ZIP")
+    import_parser.add_argument(
+        "--output-dir",
+        default=str(SCRIPT_DIR / "output"),
+        help="Directory where imported novel_project_* folders are stored",
+    )
+
     args = parser.parse_args()
 
     if args.command == "init":
         log_info("cli: init")
         project_path = init_project(args.config)
         print(f"Project initialized: {project_path}")
+        return
+
+    if args.command == "export":
+        log_info("cli: export")
+        result = export_project_archive(args.project, args.output)
+        print(f"Exported project archive: {result.get('archive_path', '')}")
+        print(f"Project ID: {result.get('project_id', '')}")
+        print(f"Size: {result.get('size_bytes', 0)} bytes")
+        return
+
+    if args.command == "import":
+        log_info("cli: import")
+        result = import_project_archive(args.archive, args.output_dir)
+        print(f"Imported project: {result.get('project_path', '')}")
+        print(f"Project ID: {result.get('project_id', '')}")
+        if result.get("renamed"):
+            print(f"Renamed from: {result.get('source_project_id', '')}")
         return
 
     if args.command == "next":

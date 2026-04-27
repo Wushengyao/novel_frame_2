@@ -8,8 +8,9 @@ import re
 import shutil
 import tempfile
 import time
+import zipfile
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 from common_utils import emit_progress, extract_json_object, utc_now
@@ -124,11 +125,29 @@ ROLLBACK_SUMMARY_KEYS = (
     "next_chapter_goal",
 )
 PROJECT_WRITE_LOCK_FILENAME = ".project_write.lock"
+PROJECT_DIR_PATTERN = re.compile(r"^novel_project_")
 PROJECT_WRITE_LOCK_PROCESS_MARKERS = (
     "webui.py",
     "app.py",
     "python",
     "uv",
+)
+PROJECT_EXPORT_MANIFEST_FILENAME = ".novel_writer_project_export.json"
+PROJECT_EXPORT_FORMAT_VERSION = 1
+PROJECT_STANDARD_DIRS = (
+    "chapters",
+    "summaries",
+    "arc_summaries",
+    "task_cards",
+    "craft_briefs",
+    "quality_reviews",
+    "quality_drafts",
+    "illustrations",
+    "audiobook",
+    "snapshots",
+    "progression_sessions",
+    "polish_backups",
+    "llm_logs",
 )
 
 
@@ -1103,6 +1122,303 @@ def load_project(project_path: str) -> dict:
         "quality_drafts_path": str(base / "quality_drafts"),
         "illustrations_path": str(base / "illustrations"),
         "audiobook_path": str(base / "audiobook"),
+    }
+
+
+def _safe_filename_part(value: object, default: str = "project") -> str:
+    text = str(value or "").strip()
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._-")
+    return safe or default
+
+
+def _project_lock_is_active(project_path: Path) -> bool:
+    lock_path = project_path / PROJECT_WRITE_LOCK_FILENAME
+    if not lock_path.exists():
+        return False
+    try:
+        lock_data = load_json(str(lock_path))
+    except Exception:
+        return True
+    return _lock_owner_process_still_active(lock_data)
+
+
+def _project_archive_default_path(project_path: Path) -> Path:
+    return project_path.parent / f"{project_path.name}.zip"
+
+
+def _should_export_project_file(path: Path, project_path: Path, archive_path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        if path.resolve() == archive_path.resolve():
+            return False
+    except OSError:
+        pass
+    relative = path.relative_to(project_path)
+    if PROJECT_WRITE_LOCK_FILENAME in relative.parts:
+        return False
+    if "__pycache__" in relative.parts:
+        return False
+    name = path.name
+    if name.startswith("."):
+        return False
+    if name.endswith((".tmp", ".part", ".bak")):
+        return False
+    return True
+
+
+def _collect_project_export_files(project_path: Path, archive_path: Path) -> list[Path]:
+    return sorted(
+        [
+            path
+            for path in project_path.rglob("*")
+            if _should_export_project_file(path, project_path, archive_path)
+        ],
+        key=lambda item: item.relative_to(project_path).as_posix(),
+    )
+
+
+def export_project_archive(project_path: str, archive_path: str | None = None) -> dict:
+    base = Path(project_path).resolve()
+    project_file = base / "project.json"
+    if not project_file.exists():
+        raise FileNotFoundError(f"项目目录中缺少 project.json: {project_path}")
+    if _project_lock_is_active(base):
+        raise ProjectWriteLockError("当前项目已有写作任务正在运行，暂时不能导出项目包。")
+
+    archive_file = Path(archive_path).expanduser() if archive_path else _project_archive_default_path(base)
+    if archive_file.exists() and archive_file.is_dir():
+        archive_file = archive_file / f"{base.name}.zip"
+    if not archive_file.is_absolute():
+        archive_file = archive_file.resolve()
+    archive_file.parent.mkdir(parents=True, exist_ok=True)
+
+    project = load_json(str(project_file))
+    project_id = str(project.get("project_id") or base.name).strip() or base.name
+    root_dir_name = _safe_filename_part(base.name, default=f"novel_project_{_safe_filename_part(project_id)}")
+    files = _collect_project_export_files(base, archive_file)
+    total_bytes = sum(path.stat().st_size for path in files)
+    manifest = {
+        "format_version": PROJECT_EXPORT_FORMAT_VERSION,
+        "app": "novel_writer",
+        "exported_at": utc_now(),
+        "project_id": project_id,
+        "project_name": project.get("name", ""),
+        "project_dir_name": root_dir_name,
+        "chapter_count": project.get("chapter_count", 0),
+        "complete_project": True,
+        "file_count": len(files),
+        "total_bytes": total_bytes,
+    }
+
+    fd, temp_archive = tempfile.mkstemp(
+        prefix=f".{archive_file.stem}_",
+        suffix=".zip",
+        dir=str(archive_file.parent),
+    )
+    os.close(fd)
+    temp_archive_path = Path(temp_archive)
+    try:
+        with zipfile.ZipFile(temp_archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                PROJECT_EXPORT_MANIFEST_FILENAME,
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            )
+            for path in files:
+                relative = path.relative_to(base).as_posix()
+                archive.write(path, f"{root_dir_name}/{relative}")
+        os.replace(temp_archive_path, archive_file)
+    except Exception:
+        temp_archive_path.unlink(missing_ok=True)
+        raise
+
+    return {
+        "archive_path": str(archive_file),
+        "project_id": project_id,
+        "project_dir_name": root_dir_name,
+        "format_version": PROJECT_EXPORT_FORMAT_VERSION,
+        "file_count": len(files),
+        "size_bytes": archive_file.stat().st_size,
+        "total_bytes": total_bytes,
+    }
+
+
+def _validate_zip_member_name(name: str) -> PurePosixPath:
+    if not name or "\x00" in name or "\\" in name:
+        raise ValueError(f"项目包中包含非法路径: {name!r}")
+    if name.startswith("/") or re.match(r"^[A-Za-z]:", name):
+        raise ValueError(f"项目包中包含绝对路径: {name!r}")
+    parts = name.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"项目包中包含不安全路径: {name!r}")
+    return PurePosixPath(name)
+
+
+def _read_export_manifest(archive: zipfile.ZipFile) -> dict:
+    try:
+        with archive.open(PROJECT_EXPORT_MANIFEST_FILENAME) as fh:
+            manifest = json.loads(fh.read().decode("utf-8"))
+    except KeyError as exc:
+        raise ValueError("项目包缺少导出清单。") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("项目包导出清单无法解析。") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError("项目包导出清单格式无效。")
+    if int(manifest.get("format_version", 0) or 0) != PROJECT_EXPORT_FORMAT_VERSION:
+        raise ValueError(f"不支持的项目包格式版本: {manifest.get('format_version')!r}")
+    return manifest
+
+
+def _validate_project_archive_members(archive: zipfile.ZipFile) -> tuple[dict, str, dict[str, zipfile.ZipInfo]]:
+    manifest = _read_export_manifest(archive)
+    members: dict[str, zipfile.ZipInfo] = {}
+    top_levels: set[str] = set()
+    for info in archive.infolist():
+        name = info.filename
+        if info.is_dir():
+            continue
+        if name == PROJECT_EXPORT_MANIFEST_FILENAME:
+            continue
+        path = _validate_zip_member_name(name)
+        normalized = path.as_posix()
+        if normalized in members:
+            raise ValueError(f"项目包中包含重复文件: {normalized}")
+        parts = path.parts
+        if len(parts) < 2:
+            raise ValueError("项目包中的项目文件必须位于单个顶层目录下。")
+        top_levels.add(parts[0])
+        members[normalized] = info
+
+    if len(top_levels) != 1:
+        raise ValueError("项目包必须且只能包含一个项目目录。")
+    project_root = next(iter(top_levels))
+    if f"{project_root}/project.json" not in members:
+        raise ValueError("项目包中的项目目录缺少 project.json。")
+    return manifest, project_root, members
+
+
+def _existing_project_ids(output_dir: Path) -> set[str]:
+    ids: set[str] = set()
+    if not output_dir.exists():
+        return ids
+    for path in output_dir.iterdir():
+        project_file = path / "project.json"
+        if not path.is_dir() or not project_file.exists():
+            continue
+        try:
+            project = load_json(str(project_file))
+        except Exception:
+            continue
+        project_id = str(project.get("project_id") or "").strip()
+        if project_id:
+            ids.add(project_id)
+    return ids
+
+
+def _import_project_dir_name(project_root: str, project_id: str) -> str:
+    if PROJECT_DIR_PATTERN.match(project_root):
+        return project_root
+    return f"novel_project_{_safe_filename_part(project_id)}"
+
+
+def _unique_import_project_id(project_id: str, output_dir: Path, existing_ids: set[str]) -> str:
+    base_id = _safe_filename_part(project_id, default="imported")
+    for _ in range(100):
+        candidate = f"{base_id}_import_{uuid4().hex[:8]}"
+        candidate_dir = output_dir / f"novel_project_{candidate}"
+        if candidate not in existing_ids and not candidate_dir.exists():
+            return candidate
+    raise RuntimeError("无法为导入项目生成唯一 project_id。")
+
+
+def _extract_project_archive(
+    archive: zipfile.ZipFile,
+    members: dict[str, zipfile.ZipInfo],
+    project_root: str,
+    target_dir: Path,
+) -> int:
+    extracted = 0
+    target_root = target_dir.resolve()
+    prefix = f"{project_root}/"
+    for member_name, info in members.items():
+        if not member_name.startswith(prefix):
+            raise ValueError("项目包包含不属于项目目录的文件。")
+        relative_name = member_name[len(prefix) :]
+        relative_path = PurePosixPath(relative_name)
+        if relative_path.name == PROJECT_WRITE_LOCK_FILENAME:
+            continue
+        target_path = target_dir.joinpath(*relative_path.parts)
+        resolved_target = target_path.resolve()
+        if not resolved_target.is_relative_to(target_root):
+            raise ValueError(f"项目包中包含不安全路径: {member_name!r}")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(info) as source, target_path.open("wb") as destination:
+            shutil.copyfileobj(source, destination)
+        extracted += 1
+    return extracted
+
+
+def _ensure_project_subdirs(project_path: Path) -> None:
+    for dirname in PROJECT_STANDARD_DIRS:
+        (project_path / dirname).mkdir(parents=True, exist_ok=True)
+
+
+def import_project_archive(archive_path: str, output_dir: str, conflict_strategy: str = "rename") -> dict:
+    if conflict_strategy != "rename":
+        raise ValueError("当前仅支持 conflict_strategy='rename'。")
+
+    archive_file = Path(archive_path).expanduser().resolve()
+    if not archive_file.exists() or not archive_file.is_file():
+        raise FileNotFoundError(f"项目包不存在: {archive_path}")
+    if not zipfile.is_zipfile(archive_file):
+        raise ValueError("导入文件不是有效的 ZIP 项目包。")
+
+    output_path = Path(output_dir).expanduser().resolve()
+    output_path.mkdir(parents=True, exist_ok=True)
+    existing_ids = _existing_project_ids(output_path)
+
+    with zipfile.ZipFile(archive_file, "r") as archive:
+        manifest, project_root, members = _validate_project_archive_members(archive)
+        with tempfile.TemporaryDirectory(prefix=".project_import_", dir=str(output_path)) as temp_dir:
+            temp_root = Path(temp_dir)
+            temp_project_path = temp_root / project_root
+            temp_project_path.mkdir(parents=True, exist_ok=True)
+            extracted_count = _extract_project_archive(archive, members, project_root, temp_project_path)
+
+            project_file = temp_project_path / "project.json"
+            project = load_json(str(project_file))
+            if not isinstance(project, dict):
+                raise ValueError("项目包中的 project.json 格式无效。")
+            source_project_id = str(project.get("project_id") or manifest.get("project_id") or project_root).strip()
+            if not source_project_id:
+                source_project_id = project_root
+            candidate_dir_name = _import_project_dir_name(project_root, source_project_id)
+            final_project_id = source_project_id
+            final_dir = output_path / candidate_dir_name
+            renamed = final_project_id in existing_ids or final_dir.exists()
+            if renamed:
+                final_project_id = _unique_import_project_id(source_project_id, output_path, existing_ids)
+                final_dir = output_path / f"novel_project_{final_project_id}"
+
+            if final_dir.exists():
+                raise FileExistsError(f"导入目标目录已存在: {final_dir}")
+
+            project["project_id"] = final_project_id
+            project["project_path"] = str(final_dir)
+            save_json(str(project_file), project)
+            _ensure_project_subdirs(temp_project_path)
+            temp_project_path.replace(final_dir)
+
+    return {
+        "project_path": str(final_dir),
+        "project_id": final_project_id,
+        "source_project_id": source_project_id,
+        "renamed": renamed,
+        "archive_path": str(archive_file),
+        "project_dir_name": final_dir.name,
+        "source_project_dir_name": project_root,
+        "format_version": PROJECT_EXPORT_FORMAT_VERSION,
+        "file_count": extracted_count,
     }
 
 

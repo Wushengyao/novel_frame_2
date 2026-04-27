@@ -3,15 +3,19 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
 from project_manager import (
+    PROJECT_EXPORT_MANIFEST_FILENAME,
     ProjectWriteLockError,
     _generate_initial_story_data,
     _build_persisted_llm_config,
     _prune_initial_supporting_characters,
     acquire_project_write_lock,
+    export_project_archive,
+    import_project_archive,
     rollback_project,
     save_json,
     update_project_stats,
@@ -102,6 +106,126 @@ class ProjectManagerTests(unittest.TestCase):
                     self.assertEqual(lock_data["owner"], "new-run")
 
             self.assertFalse(lock_path.exists())
+
+    def test_export_project_archive_contains_complete_project_and_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="export_full")
+            (project_path / "chapters" / "chapter_0001.md").write_text("第一章正文\n", encoding="utf-8")
+            image_dir = project_path / "illustrations" / "chapter_0001"
+            image_dir.mkdir(parents=True, exist_ok=True)
+            (image_dir / "image_0001.png").write_bytes(b"\x89PNG\r\n")
+            logs_dir = project_path / "llm_logs"
+            logs_dir.mkdir(exist_ok=True)
+            (logs_dir / "llm_interactions.jsonl").write_text('{"ok": true}\n', encoding="utf-8")
+            save_json(
+                str(project_path / ".project_write.lock"),
+                {
+                    "pid": 999999999,
+                    "owner": "stale",
+                    "created_at": "2026-04-26T00:00:00+00:00",
+                    "project_path": str(project_path),
+                    "token": "stale-token",
+                },
+            )
+
+            archive_path = Path(tmp) / "export_full.zip"
+            result = export_project_archive(str(project_path), str(archive_path))
+
+            self.assertEqual(result["project_id"], "export_full")
+            self.assertTrue(archive_path.exists())
+            with zipfile.ZipFile(archive_path) as archive:
+                names = set(archive.namelist())
+                manifest = json.loads(archive.read(PROJECT_EXPORT_MANIFEST_FILENAME).decode("utf-8"))
+
+            root = project_path.name
+            self.assertEqual(manifest["format_version"], 1)
+            self.assertTrue(manifest["complete_project"])
+            self.assertIn(f"{root}/project.json", names)
+            self.assertIn(f"{root}/chapters/chapter_0001.md", names)
+            self.assertIn(f"{root}/illustrations/chapter_0001/image_0001.png", names)
+            self.assertIn(f"{root}/llm_logs/llm_interactions.jsonl", names)
+            self.assertNotIn(f"{root}/.project_write.lock", names)
+
+    def test_export_project_archive_rejects_active_write_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="export_busy")
+
+            with acquire_project_write_lock(str(project_path), owner="unit-test"):
+                with self.assertRaises(ProjectWriteLockError):
+                    export_project_archive(str(project_path), str(Path(tmp) / "busy.zip"))
+
+    def test_import_project_archive_round_trips_and_updates_project_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source_path = create_test_project(base / "source", project_id="roundtrip")
+            (source_path / "chapters" / "chapter_0001.md").write_text("第一章正文\n", encoding="utf-8")
+            archive_path = base / "roundtrip.zip"
+            export_project_archive(str(source_path), str(archive_path))
+
+            output_dir = base / "imported"
+            result = import_project_archive(str(archive_path), str(output_dir))
+
+            imported_path = Path(result["project_path"])
+            imported_project = read_json(imported_path / "project.json")
+            self.assertEqual(result["project_id"], "roundtrip")
+            self.assertFalse(result["renamed"])
+            self.assertEqual(imported_project["project_path"], str(imported_path))
+            self.assertEqual(imported_project["project_id"], "roundtrip")
+            self.assertTrue((imported_path / "chapters" / "chapter_0001.md").exists())
+            self.assertTrue((imported_path / "progression_sessions").is_dir())
+
+    def test_import_project_archive_renames_conflicting_project_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "output"
+            project_path = create_test_project(output_dir, project_id="same")
+            archive_path = Path(tmp) / "same.zip"
+            export_project_archive(str(project_path), str(archive_path))
+
+            result = import_project_archive(str(archive_path), str(output_dir))
+
+            self.assertTrue(result["renamed"])
+            self.assertEqual(result["source_project_id"], "same")
+            self.assertNotEqual(result["project_id"], "same")
+            self.assertTrue((output_dir / "novel_project_same").exists())
+            self.assertTrue(Path(result["project_path"]).exists())
+            imported_project = read_json(Path(result["project_path"]) / "project.json")
+            self.assertEqual(imported_project["project_id"], result["project_id"])
+            self.assertEqual(imported_project["project_path"], result["project_path"])
+
+    def test_import_project_archive_rejects_unsafe_or_malformed_archives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            manifest = json.dumps(
+                {
+                    "format_version": 1,
+                    "app": "novel_writer",
+                    "project_id": "bad",
+                    "project_dir_name": "novel_project_bad",
+                },
+                ensure_ascii=False,
+            )
+
+            missing_manifest = base / "missing_manifest.zip"
+            with zipfile.ZipFile(missing_manifest, "w") as archive:
+                archive.writestr("novel_project_bad/project.json", "{}")
+            with self.assertRaises(ValueError):
+                import_project_archive(str(missing_manifest), str(base / "out_missing"))
+
+            zip_slip = base / "zip_slip.zip"
+            with zipfile.ZipFile(zip_slip, "w") as archive:
+                archive.writestr(PROJECT_EXPORT_MANIFEST_FILENAME, manifest)
+                archive.writestr("novel_project_bad/../evil.txt", "evil")
+                archive.writestr("novel_project_bad/project.json", "{}")
+            with self.assertRaises(ValueError):
+                import_project_archive(str(zip_slip), str(base / "out_slip"))
+
+            multi_root = base / "multi_root.zip"
+            with zipfile.ZipFile(multi_root, "w") as archive:
+                archive.writestr(PROJECT_EXPORT_MANIFEST_FILENAME, manifest)
+                archive.writestr("novel_project_a/project.json", "{}")
+                archive.writestr("novel_project_b/project.json", "{}")
+            with self.assertRaises(ValueError):
+                import_project_archive(str(multi_root), str(base / "out_multi"))
 
     def test_update_project_stats_records_token_and_cost_totals(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

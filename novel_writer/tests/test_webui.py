@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import os
 import sys
@@ -9,6 +10,7 @@ import threading
 import time
 import urllib.parse
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import webui
-from project_manager import load_json, save_json
+from project_manager import PROJECT_EXPORT_MANIFEST_FILENAME, export_project_archive, load_json, save_json
 from web_auth import WebAuthSettings
 from webui import NovelWriterHandler, ThreadingHTTPServer
 from progression_manager import CUSTOM_PROGRESSION_OPTION_ID
@@ -133,6 +135,14 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         conn.request("GET", path, headers=headers or {})
         response = conn.getresponse()
         response.body = response.read().decode("utf-8", errors="replace")
+        conn.close()
+        return response
+
+    def _get_bytes(self, path: str, *, headers: dict[str, str] | None = None) -> http.client.HTTPResponse:
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        conn.request("GET", path, headers=headers or {})
+        response = conn.getresponse()
+        response.body = response.read()
         conn.close()
         return response
 
@@ -277,6 +287,87 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("Token / 费用统计", project_page.body)
         self.assertIn("deepseek-v4-flash", project_page.body)
         self.assertIn("DeepSeek Models &amp; Pricing", project_page.body)
+
+    def test_project_import_and_export_controls_render(self) -> None:
+        projects_page = self._get("/projects")
+        project_page = self._get("/project/web")
+
+        self.assertEqual(projects_page.status, 200)
+        self.assertIn("导入项目", projects_page.body)
+        self.assertIn('name="project_archive"', projects_page.body)
+        self.assertIn("/projects/import", projects_page.body)
+        self.assertEqual(project_page.status, 200)
+        self.assertIn("项目迁移", project_page.body)
+        self.assertIn("/project/web/export", project_page.body)
+        self.assertIn("llm_logs", project_page.body)
+
+    def test_project_export_endpoint_downloads_zip_archive(self) -> None:
+        (self.project_path / "chapters" / "chapter_0001.md").write_text("第一章正文\n", encoding="utf-8")
+
+        response = self._get_bytes("/project/web/export")
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "application/zip")
+        content_disposition = response.getheader("Content-Disposition") or ""
+        self.assertIn("attachment", content_disposition)
+        self.assertIn("novel_project_web.zip", content_disposition)
+        with zipfile.ZipFile(io.BytesIO(response.body)) as archive:
+            names = set(archive.namelist())
+            manifest = json.loads(archive.read(PROJECT_EXPORT_MANIFEST_FILENAME).decode("utf-8"))
+        self.assertEqual(manifest["project_id"], "web")
+        self.assertIn("novel_project_web/project.json", names)
+        self.assertIn("novel_project_web/chapters/chapter_0001.md", names)
+
+    def test_project_export_endpoint_rejects_active_blocking_job(self) -> None:
+        webui.JOB_REGISTRY.create_job(
+            kind="continue",
+            title="existing",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+        )
+
+        page = self._get("/project/web")
+        response = self._get("/project/web/export")
+
+        self.assertEqual(page.status, 200)
+        self.assertIn("<button type=\"button\" disabled>导出项目包</button>", page.body)
+        self.assertEqual(response.status, 303)
+        self.assertIn("/project/web?error=", response.getheader("Location"))
+
+    def test_project_import_endpoint_imports_archive_with_conflict_rename(self) -> None:
+        archive_path = Path(self.temp_dir.name) / "web.zip"
+        export_project_archive(str(self.project_path), str(archive_path))
+
+        response = self._post_multipart(
+            "/projects/import",
+            {},
+            {
+                "project_archive": ("web.zip", archive_path.read_bytes(), "application/zip"),
+            },
+        )
+
+        self.assertEqual(response.status, 303)
+        location = response.getheader("Location")
+        self.assertTrue(location.startswith("/project/"))
+        imported_id = urllib.parse.unquote(location.split("/project/", 1)[1].split("?", 1)[0])
+        self.assertNotEqual(imported_id, "web")
+        imported_path = self.output_dir / f"novel_project_{imported_id}"
+        self.assertTrue(imported_path.exists())
+        imported_project = load_json(str(imported_path / "project.json"))
+        self.assertEqual(imported_project["project_id"], imported_id)
+        self.assertEqual(imported_project["project_path"], str(imported_path))
+
+    def test_project_import_endpoint_rejects_invalid_archive(self) -> None:
+        response = self._post_multipart(
+            "/projects/import",
+            {},
+            {
+                "project_archive": ("bad.zip", b"not a zip", "application/zip"),
+            },
+        )
+
+        self.assertEqual(response.status, 303)
+        self.assertIn("/projects?error=", response.getheader("Location"))
 
     def test_progression_options_endpoint_saves_session_and_project_page_reflects_it(self) -> None:
         session_payload = {
