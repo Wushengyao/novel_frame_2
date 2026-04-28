@@ -38,9 +38,10 @@ def relative(project_path: str | Path, path: str | Path) -> str:
     return str(Path(path).resolve().relative_to(Path(project_path).resolve())).replace("\\", "/")
 
 
-def build_text_for_voice(text: str, voice: dict) -> str:
+def build_text_for_voice(text: str, voice: dict, runtime: dict | None = None) -> str:
     control = str(voice.get("control_instruction") or "").strip()
-    if control and not str(voice.get("prompt_text") or "").strip():
+    clone_mode = str(voice.get("clone_mode") or (runtime or {}).get("clone_mode") or "style_control").strip().lower()
+    if control and (clone_mode == "style_control" or not str(voice.get("prompt_text") or "").strip()):
         return f"({control}){text}"
     return text
 
@@ -72,7 +73,8 @@ def generate_segment(model: VoxCPM, segment: dict, runtime: dict) -> tuple[int, 
 
     reference_audio = str(voice.get("reference_audio") or "").strip() or None
     prompt_text = str(voice.get("prompt_text") or "").strip()
-    final_text = build_text_for_voice(text, voice)
+    clone_mode = str(voice.get("clone_mode") or runtime.get("clone_mode") or "style_control").strip().lower()
+    final_text = build_text_for_voice(text, voice, runtime)
     kwargs = {
         "text": final_text,
         "reference_wav_path": reference_audio,
@@ -81,7 +83,7 @@ def generate_segment(model: VoxCPM, segment: dict, runtime: dict) -> tuple[int, 
         "normalize": bool(runtime.get("normalize", True)),
         "denoise": bool(runtime.get("denoise", False)) and bool(reference_audio),
     }
-    if reference_audio and prompt_text:
+    if clone_mode == "hifi" and reference_audio and prompt_text:
         kwargs["prompt_wav_path"] = reference_audio
         kwargs["prompt_text"] = prompt_text
 
@@ -231,6 +233,7 @@ def run_request(request_path: str | Path) -> dict:
             "cfg_value": runtime.get("cfg_value", 2.0),
             "inference_timesteps": runtime.get("inference_timesteps", 10),
             "silence_ms": silence_ms,
+            "clone_mode": runtime.get("clone_mode", "style_control"),
         },
         "split_config": request_data.get("split_config", {}),
         "elapsed_seconds": round(time.time() - started, 3),

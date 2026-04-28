@@ -68,6 +68,7 @@ DEFAULT_EXTERNAL_SERVICES_CONFIG: dict[str, Any] = {
         "python": DEFAULT_VOXCPM2_PYTHON,
         "model_id": DEFAULT_VOXCPM2_MODEL_ID,
         "device": "auto",
+        "clone_mode": "style_control",
         "load_denoiser": False,
         "optimize": True,
         "cfg_value": 2.0,
@@ -275,11 +276,15 @@ class ComfyUIClient:
 
 def normalize_voxcpm2_runtime(raw_config: dict[str, Any] | None) -> dict[str, Any]:
     raw = raw_config if isinstance(raw_config, dict) else {}
+    clone_mode = str(raw.get("clone_mode") or "style_control").strip().lower()
+    if clone_mode not in {"style_control", "hifi"}:
+        clone_mode = "style_control"
     return {
         "voxcpm_root": str(raw.get("voxcpm_root") or raw.get("root") or "").strip(),
         "voxcpm_python": str(raw.get("voxcpm_python") or raw.get("python") or "").strip(),
         "model_id": str(raw.get("model_id") or "").strip(),
         "device": str(raw.get("device") or "auto").strip() or "auto",
+        "clone_mode": clone_mode,
         "load_denoiser": coerce_bool(raw.get("load_denoiser"), False),
         "optimize": coerce_bool(raw.get("optimize"), True),
         "cfg_value": coerce_float(raw.get("cfg_value"), 2.0),
@@ -297,6 +302,7 @@ def _voxcpm2_env_overrides() -> dict[str, Any]:
         "python": "NOVEL_VOXCPM2_PYTHON",
         "model_id": "NOVEL_VOXCPM2_MODEL_ID",
         "device": "NOVEL_VOXCPM2_DEVICE",
+        "clone_mode": "NOVEL_VOXCPM2_CLONE_MODE",
         "load_denoiser": "NOVEL_VOXCPM2_LOAD_DENOISER",
         "optimize": "NOVEL_VOXCPM2_OPTIMIZE",
         "cfg_value": "NOVEL_VOXCPM2_CFG_VALUE",

@@ -75,7 +75,16 @@ class AudiobookManagerTests(unittest.TestCase):
             "segments": [
                 {"id": "unit_0001", "type": "narration", "speaker": "旁白", "confidence": 0.96},
                 {"id": "unit_0002", "type": "quoted_text", "speaker": "旁白", "confidence": 0.98},
-                {"id": "unit_0003", "type": "inner_monologue", "speaker": "苏浅", "confidence": 0.97},
+                {
+                    "id": "unit_0003",
+                    "type": "inner_monologue",
+                    "speaker": "苏浅",
+                    "emotion": "紧张",
+                    "tone": "压低声音",
+                    "delivery": "停顿明显",
+                    "performance_instruction": "紧张，压低声音，停顿明显",
+                    "confidence": 0.97,
+                },
             ]
         }
         llm_config = {
@@ -99,6 +108,7 @@ class AudiobookManagerTests(unittest.TestCase):
         self.assertEqual(quoted[0]["text"], "安全第一。")
         self.assertEqual(inner[0]["speaker"], "苏浅")
         self.assertEqual(inner[0]["text"], "苏浅握紧工具，心里想，不能让他发现。")
+        self.assertEqual(inner[0]["performance_instruction"], "紧张，压低声音，停顿明显")
 
     def test_split_text_for_tts_keeps_chunks_under_hard_limit(self) -> None:
         text = "。".join(["这是一段需要稳定切分的长句子" * 4 for _ in range(5)])
@@ -292,7 +302,103 @@ class AudiobookManagerTests(unittest.TestCase):
         linyu_segments = [item for item in captured["payload"]["segments"] if item["speaker"] == "林宇"]
         self.assertTrue(linyu_segments)
         self.assertTrue(all(item["voice"]["reference_source"] == "uploaded" for item in linyu_segments))
+        self.assertTrue(all(item["voice"]["clone_mode"] == "style_control" for item in linyu_segments))
+        self.assertTrue(all(item["voice"]["prompt_text"] == "" for item in linyu_segments))
+        self.assertTrue(all(item["voice"]["reference_prompt_text"] == "上传参考文本" for item in linyu_segments))
+
+    def test_hifi_clone_mode_preserves_prompt_text_for_reference_continuation(self) -> None:
+        save_uploaded_voice_reference(
+            self.project_path,
+            target="林宇",
+            uploaded_file=UploadedVoiceFile(filename="linyu.wav", content=_tiny_wav_bytes()),
+            prompt_text="上传参考文本",
+        )
+        captured = {}
+
+        def fake_run_worker(request_path: Path, runtime: dict) -> subprocess.CompletedProcess:
+            payload = load_json(str(request_path))
+            captured["payload"] = payload
+            save_json(
+                payload["manifest_path"],
+                {
+                    "chapter_slug": payload["chapter_slug"],
+                    "generated_at": "2026-04-20T00:00:00+00:00",
+                    "status": "succeeded",
+                    "combined_audio": "audiobook/chapter_0001/chapter_0001.wav",
+                    "generation_mode": payload["generation_mode"],
+                    "voice_references": payload["voice_references"],
+                    "segment_count": len(payload["segments"]),
+                    "segments": payload["segments"],
+                },
+            )
+            return subprocess.CompletedProcess(["worker"], 0, stdout="ok", stderr="")
+
+        with patch("audiobook_manager._run_worker", side_effect=fake_run_worker):
+            generate_audiobook_chapter(
+                self.project_path,
+                "chapter_0001",
+                force=True,
+                generation_mode="advanced",
+                runtime_overrides={"backend": "local_worker", "clone_mode": "hifi"},
+            )
+
+        linyu_segments = [item for item in captured["payload"]["segments"] if item["speaker"] == "林宇"]
+        self.assertTrue(linyu_segments)
+        self.assertTrue(all(item["voice"]["clone_mode"] == "hifi" for item in linyu_segments))
         self.assertTrue(all(item["voice"]["prompt_text"] == "上传参考文本" for item in linyu_segments))
+
+    def test_llm_performance_instruction_is_applied_to_segment_voice(self) -> None:
+        self.chapter_path.write_text("林宇说：“快走。”", encoding="utf-8")
+        captured = {}
+        llm_response = {
+            "segments": [
+                {"id": "unit_0001", "type": "narration", "speaker": "旁白"},
+                {
+                    "id": "unit_0002",
+                    "type": "dialogue",
+                    "speaker": "林宇",
+                    "performance_instruction": "急促，压低声音",
+                },
+            ]
+        }
+
+        def fake_run_worker(request_path: Path, runtime: dict) -> subprocess.CompletedProcess:
+            payload = load_json(str(request_path))
+            captured["payload"] = payload
+            save_json(
+                payload["manifest_path"],
+                {
+                    "chapter_slug": payload["chapter_slug"],
+                    "generated_at": "2026-04-20T00:00:00+00:00",
+                    "status": "succeeded",
+                    "combined_audio": "audiobook/chapter_0001/chapter_0001.wav",
+                    "segment_count": len(payload["segments"]),
+                    "segments": payload["segments"],
+                },
+            )
+            return subprocess.CompletedProcess(["worker"], 0, stdout="ok", stderr="")
+
+        with patch(
+            "audiobook_manager.generate_text_with_metadata",
+            return_value=(json.dumps(llm_response, ensure_ascii=False), {"usage": {}}),
+        ), patch("audiobook_manager._run_worker", side_effect=fake_run_worker):
+            generate_audiobook_chapter(
+                self.project_path,
+                "chapter_0001",
+                force=True,
+                llm_config={
+                    "model_provider": "ollama",
+                    "model": "llama3.2",
+                    "api_base": "http://127.0.0.1:11434/v1",
+                },
+                runtime_overrides={"backend": "local_worker"},
+            )
+
+        linyu_segment = next(item for item in captured["payload"]["segments"] if item["speaker"] == "林宇")
+        self.assertEqual(linyu_segment["performance_instruction"], "急促，压低声音")
+        self.assertEqual(linyu_segment["voice"]["prompt_text"], "")
+        self.assertEqual(linyu_segment["voice"]["clone_mode"], "style_control")
+        self.assertIn("本句表演：急促，压低声音", linyu_segment["voice"]["control_instruction"])
 
     def test_audio_frame_generates_reference_before_segments(self) -> None:
         calls = []
@@ -319,7 +425,8 @@ class AudiobookManagerTests(unittest.TestCase):
         self.assertEqual(calls[0]["reference_audio"], "")
         self.assertIn("参考音频", calls[0]["text"])
         self.assertTrue(calls[1]["reference_audio"])
-        self.assertEqual(calls[1]["prompt_text"], calls[0]["text"])
+        self.assertEqual(calls[1]["prompt_text"], "")
+        self.assertTrue(calls[1]["control_instruction"])
         voices = load_json(str(self.project_path / "audiobook" / "voices.json"))
         self.assertEqual(voices["simple_voice"]["reference_source"], "auto")
         self.assertTrue((self.project_path / voices["simple_voice"]["reference_audio"]).exists())
@@ -334,6 +441,7 @@ class AudiobookManagerTests(unittest.TestCase):
                         "python": "/srv/VoxCPM2/.venv/bin/python",
                         "model_id": "/models/VoxCPM2",
                         "device": "cpu",
+                        "clone_mode": "hifi",
                         "silence_ms": 120,
                     }
                 },
@@ -378,6 +486,7 @@ class AudiobookManagerTests(unittest.TestCase):
         self.assertEqual(runtime["voxcpm_python"], "/srv/VoxCPM2/.venv/bin/python")
         self.assertEqual(runtime["model_id"], "/models/VoxCPM2")
         self.assertEqual(runtime["device"], "cpu")
+        self.assertEqual(runtime["clone_mode"], "hifi")
         self.assertEqual(runtime["silence_ms"], 120)
 
     def test_rollback_removes_future_audiobook_records(self) -> None:

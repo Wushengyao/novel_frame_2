@@ -151,6 +151,11 @@ def _add_audiobook_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--voxcpm-python", help="Python executable for the VoxCPM2 environment")
     parser.add_argument("--voxcpm-model-id", help="VoxCPM2 model id or local model path")
     parser.add_argument("--voxcpm-device", help="VoxCPM2 device, for example auto/cuda/cpu")
+    parser.add_argument(
+        "--voxcpm-clone-mode",
+        choices=("style_control", "hifi"),
+        help="VoxCPM2 cloning mode: style_control allows per-segment delivery prompts; hifi maximizes timbre similarity",
+    )
     parser.add_argument("--voxcpm-timeout-seconds", type=int, help="Worker timeout in seconds; 0 disables timeout")
     parser.add_argument("--voxcpm-cfg-value", type=float, help="Default VoxCPM2 cfg_value")
     parser.add_argument("--voxcpm-inference-timesteps", type=int, help="Default VoxCPM2 inference_timesteps")
@@ -170,6 +175,7 @@ def _extract_audiobook_overrides(args: argparse.Namespace) -> dict:
         "python": getattr(args, "voxcpm_python", None),
         "model_id": getattr(args, "voxcpm_model_id", None),
         "device": getattr(args, "voxcpm_device", None),
+        "clone_mode": getattr(args, "voxcpm_clone_mode", None),
         "timeout_seconds": getattr(args, "voxcpm_timeout_seconds", None),
         "cfg_value": getattr(args, "voxcpm_cfg_value", None),
         "inference_timesteps": getattr(args, "voxcpm_inference_timesteps", None),

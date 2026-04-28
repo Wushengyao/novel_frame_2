@@ -33,6 +33,7 @@
     "python": "/home/wsy/VoxCPM2/.venv/bin/python",
     "model_id": "openbmb/VoxCPM2",
     "device": "auto",
+    "clone_mode": "style_control",
     "load_denoiser": false,
     "optimize": true,
     "cfg_value": 2.0,

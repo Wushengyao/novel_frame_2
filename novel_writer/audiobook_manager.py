@@ -39,6 +39,9 @@ GENERATION_MODE_ADVANCED = "advanced"
 GENERATION_MODE_SIMPLE = "simple"
 GENERATION_MODES = {GENERATION_MODE_ADVANCED, GENERATION_MODE_SIMPLE}
 VOICE_SEED_MODULUS = 2_147_483_647
+CLONE_MODE_STYLE_CONTROL = "style_control"
+CLONE_MODE_HIFI = "hifi"
+CLONE_MODES = {CLONE_MODE_STYLE_CONTROL, CLONE_MODE_HIFI}
 SEGMENT_TYPE_NARRATION = "narration"
 SEGMENT_TYPE_DIALOGUE = "dialogue"
 SEGMENT_TYPE_INNER_MONOLOGUE = "inner_monologue"
@@ -160,6 +163,11 @@ def _normalize_text(value: object) -> str:
 def normalize_generation_mode(value: object) -> str:
     normalized = str(value or "").strip().lower()
     return normalized if normalized in GENERATION_MODES else GENERATION_MODE_ADVANCED
+
+
+def normalize_clone_mode(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in CLONE_MODES else CLONE_MODE_STYLE_CONTROL
 
 
 def _signature(payload: dict) -> str:
@@ -634,6 +642,16 @@ def split_text_for_tts(text: str, split_config: dict | None = None) -> list[str]
     return chunks
 
 
+def _normalize_performance_instruction(value: object, *, limit: int = 96) -> str:
+    text = _normalize_text(value)
+    if not text:
+        return ""
+    text = re.sub(r"^[（(]+|[）)]+$", "", text).strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip("，,、；;。 ")
+    return text
+
+
 def _append_segment(
     segments: list[dict],
     *,
@@ -641,10 +659,18 @@ def _append_segment(
     speaker: str,
     text: str,
     split_config: dict,
+    performance_instruction: str = "",
+    emotion: str = "",
+    tone: str = "",
+    delivery: str = "",
 ) -> None:
     clean = _normalize_text(text)
     if not clean:
         return
+    performance = _normalize_performance_instruction(performance_instruction)
+    emotion = _normalize_text(emotion)[:40]
+    tone = _normalize_text(tone)[:40]
+    delivery = _normalize_text(delivery)[:40]
     for chunk in split_text_for_tts(clean, split_config):
         if not chunk:
             continue
@@ -653,19 +679,27 @@ def _append_segment(
             previous
             and previous.get("type") == segment_type
             and previous.get("speaker") == speaker
+            and str(previous.get("performance_instruction") or "") == performance
             and len(str(previous.get("text", "")) + chunk) <= int(split_config.get("max_chars", 120))
         ):
             previous["text"] = str(previous.get("text", "")) + chunk
             continue
-        segments.append(
-            {
-                "segment_id": f"segment_{len(segments) + 1:04d}",
-                "index": len(segments) + 1,
-                "type": segment_type,
-                "speaker": speaker or NARRATOR_SPEAKER,
-                "text": chunk,
-            }
-        )
+        segment = {
+            "segment_id": f"segment_{len(segments) + 1:04d}",
+            "index": len(segments) + 1,
+            "type": segment_type,
+            "speaker": speaker or NARRATOR_SPEAKER,
+            "text": chunk,
+        }
+        if performance:
+            segment["performance_instruction"] = performance
+        if emotion:
+            segment["emotion"] = emotion
+        if tone:
+            segment["tone"] = tone
+        if delivery:
+            segment["delivery"] = delivery
+        segments.append(segment)
 
 
 def _split_non_dialogue_sentences(text: str) -> list[str]:
@@ -853,12 +887,28 @@ def _append_units_with_assignments(
         else:
             speaker = NARRATOR_SPEAKER
 
+        emotion = str(assignment.get("emotion") or "").strip()
+        tone = str(assignment.get("tone") or "").strip()
+        delivery = str(assignment.get("delivery") or "").strip()
+        performance = str(
+            assignment.get("performance_instruction")
+            or assignment.get("style_instruction")
+            or assignment.get("delivery_instruction")
+            or ""
+        ).strip()
+        if not performance:
+            performance = "，".join(item for item in (emotion, tone, delivery) if item)
+
         _append_segment(
             segments,
             segment_type=segment_type,
             speaker=speaker,
             text=str(unit.get("text") or ""),
             split_config=split_config,
+            performance_instruction=performance,
+            emotion=emotion,
+            tone=tone,
+            delivery=delivery,
         )
     return segments
 
@@ -901,6 +951,10 @@ def _build_audiobook_segment_prompt(units: list[dict], characters: dict | list[d
                     "id": "unit_0001",
                     "type": "narration | dialogue | inner_monologue | quoted_text",
                     "speaker": "旁白 or exact character name",
+                    "emotion": "短情绪标签，如 紧张、迟疑、冷静、疲惫；不确定可留空",
+                    "tone": "短语气标签，如 低声、克制、急促、温柔；不确定可留空",
+                    "delivery": "短朗读方式，如 语速略快、停顿明显、压低声音；不确定可留空",
+                    "performance_instruction": "适合放入 TTS 控制括号的中文短语，合并 emotion/tone/delivery，不要超过 40 字",
                     "confidence": 0.0,
                     "reason": "short Chinese reason",
                 }
@@ -912,6 +966,7 @@ def _build_audiobook_segment_prompt(units: list[dict], characters: dict | list[d
         "重点区分：旁白、人物语言、人物心理活动、以及只是被引号包住的引用文本。\n"
         "只有角色在现场实际开口说话时才标为 dialogue；心想、暗想、意识流、内心判断标为 inner_monologue；"
         "标语、书名、文件内容、被回忆或转述的原句、术语强调等不是现场发言的引号内容标为 quoted_text。\n"
+        "同时为每个 unit 给出简短表演提示：情绪、语气、朗读方式。提示必须来自文本上下文，避免夸张，不要加入角色名。\n"
         "输出必须是 JSON object，且 segments 覆盖每一个输入 id。\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
@@ -1081,6 +1136,32 @@ def _voice_int(entry: dict, key: str) -> int:
         return int((entry or {}).get(key) or DEFAULT_AUDIOBOOK_RUNTIME[key])
     except (TypeError, ValueError, KeyError):
         return int(DEFAULT_AUDIOBOOK_RUNTIME.get(key, 10))
+
+
+def _compose_segment_control_instruction(base_control: str, performance_instruction: str) -> str:
+    base = _normalize_text(base_control)[:240].rstrip("，,、；;。 ")
+    performance = _normalize_performance_instruction(performance_instruction, limit=80)
+    if base and performance:
+        return f"{base}；本句表演：{performance}"
+    return base or performance
+
+
+def _voice_for_segment(base_voice: dict, segment: dict, clone_mode: str) -> dict:
+    voice = dict(base_voice)
+    clone_mode = normalize_clone_mode(clone_mode)
+    reference_prompt = str(voice.get("prompt_text") or "").strip()
+    performance = str(segment.get("performance_instruction") or "").strip()
+    voice["clone_mode"] = clone_mode
+    voice["base_control_instruction"] = str(voice.get("control_instruction") or "").strip()
+    voice["reference_prompt_text"] = reference_prompt
+    voice["performance_instruction"] = _normalize_performance_instruction(performance)
+    voice["control_instruction"] = _compose_segment_control_instruction(
+        voice["base_control_instruction"],
+        voice["performance_instruction"],
+    )
+    if clone_mode == CLONE_MODE_STYLE_CONTROL:
+        voice["prompt_text"] = ""
+    return voice
 
 
 def _voice_reference_plan(
@@ -1260,8 +1341,10 @@ def _build_voice_plan(
     voice_config: dict,
     segments: list[dict],
     generation_mode: str,
+    runtime: dict | None = None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     mode = normalize_generation_mode(generation_mode)
+    clone_mode = normalize_clone_mode((runtime or {}).get("clone_mode"))
     voice_cache: dict[str, dict] = {}
     reference_records: dict[str, dict] = {}
     reference_tasks: dict[str, dict] = {}
@@ -1288,7 +1371,7 @@ def _build_voice_plan(
                 if task:
                     reference_tasks[voice["voice_id"]] = task
             voice = voice_cache[cache_key]
-        item["voice"] = dict(voice)
+        item["voice"] = _voice_for_segment(voice, item, clone_mode)
         worker_segments.append(item)
 
     return worker_segments, list(reference_records.values()), list(reference_tasks.values())
@@ -1538,6 +1621,9 @@ def _run_audio_frame_service(request_payload: dict, runtime_overrides: dict | No
             "audio_frame": {
                 "api_base": runtime["api_base"],
             },
+            "voxcpm_runtime": {
+                "clone_mode": request_payload["runtime"].get("clone_mode", CLONE_MODE_STYLE_CONTROL),
+            },
         },
     )
 
@@ -1617,6 +1703,7 @@ def generate_audiobook_chapter(
         voice_config,
         segments,
         resolved_generation_mode,
+        runtime,
     )
 
     request_payload = {
