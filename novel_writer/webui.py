@@ -1605,6 +1605,70 @@ def _chapter_number_from_slug(chapter_slug: str) -> int | None:
     return int(match.group(1))
 
 
+def _audiobook_chapter_slugs(project_path: Path) -> list[str]:
+    return [chapter["slug"] for chapter in _read_chapters(project_path)]
+
+
+def _parse_audiobook_range_number(value: str | None, *, default: int) -> int:
+    normalized = (value or "").strip()
+    if not normalized:
+        return default
+    try:
+        parsed = int(normalized)
+    except ValueError as exc:
+        raise RuntimeError("章节范围必须填写数字。") from exc
+    if parsed < 1:
+        raise RuntimeError("章节范围必须从第 1 章或之后开始。")
+    return parsed
+
+
+def _resolve_audiobook_chapter_refs(project_path: Path, form: dict[str, str]) -> list[str]:
+    scope = (form.get("audiobook_scope") or "single").strip() or "single"
+    if scope == "single":
+        chapter_slug = (form.get("chapter_slug") or "latest").strip() or "latest"
+        return [chapter_slug]
+
+    slugs = _audiobook_chapter_slugs(project_path)
+    if not slugs:
+        raise RuntimeError("项目中还没有章节，无法生成有声章节。")
+
+    if scope == "all":
+        return slugs
+
+    if scope == "missing":
+        missing = [slug for slug in slugs if get_audiobook_record(project_path, slug) is None]
+        if not missing:
+            raise RuntimeError("所有章节都已有可用的有声版本。")
+        return missing
+
+    if scope == "range":
+        numbered_slugs = [
+            (number, slug)
+            for slug in slugs
+            if (number := _chapter_number_from_slug(slug)) is not None
+        ]
+        if not numbered_slugs:
+            raise RuntimeError("项目中没有可按章节号选择的章节。")
+        first_number = numbered_slugs[0][0]
+        last_number = numbered_slugs[-1][0]
+        start = _parse_audiobook_range_number(form.get("chapter_start"), default=first_number)
+        end = _parse_audiobook_range_number(form.get("chapter_end"), default=last_number)
+        if start > end:
+            raise RuntimeError("章节范围起始章不能大于结束章。")
+        refs = [slug for number, slug in numbered_slugs if start <= number <= end]
+        if not refs:
+            raise RuntimeError("所选章节范围内没有章节。")
+        return refs
+
+    raise RuntimeError("不支持的有声章节生成范围。")
+
+
+def _audiobook_refs_label(chapter_refs: list[str]) -> str:
+    if len(chapter_refs) == 1:
+        return "最新章节" if chapter_refs[0] == "latest" else chapter_refs[0]
+    return f"{len(chapter_refs)} 个章节"
+
+
 def _quality_status_label(report: dict) -> str:
     if bool(report.get("review_unavailable")):
         return "审稿不可用"
@@ -5296,6 +5360,17 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             f"<option value=\"{escape(chapter['slug'])}\">{escape(chapter['name'])}</option>"
             for chapter in chapters
         ]
+        chapter_numbers = [
+            number
+            for chapter in chapters
+            if (number := _chapter_number_from_slug(chapter["slug"])) is not None
+        ]
+        audiobook_range_start = min(chapter_numbers) if chapter_numbers else 1
+        audiobook_range_end = (
+            max(chapter_numbers)
+            if chapter_numbers
+            else max(1, int(project.get("chapter_count", 0) or 1))
+        )
 
         illustration_cards = []
         for record in illustration_records[:6]:
@@ -5463,11 +5538,27 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <h3>有声小说</h3>
               <form method="post" action="/project/{escape(project_id)}/audiobook" enctype="multipart/form-data">
                 <fieldset{destructive_busy_attr}>
+                  <label>生成范围
+                    <select name="audiobook_scope">
+                      <option value="single">选定章节</option>
+                      <option value="missing">未生成章节</option>
+                      <option value="all">全部章节</option>
+                      <option value="range">章节范围</option>
+                    </select>
+                  </label>
                   <label>目标章节
                     <select name="chapter_slug">
                       {''.join(chapter_options)}
                     </select>
                   </label>
+                  <div class="two-col">
+                    <label>起始章
+                      <input type="number" name="chapter_start" value="{audiobook_range_start}" min="1" max="{audiobook_range_end}">
+                    </label>
+                    <label>结束章
+                      <input type="number" name="chapter_end" value="{audiobook_range_end}" min="1" max="{audiobook_range_end}">
+                    </label>
+                  </div>
                   <label>生成模式
                     <select name="generation_mode">
                       {audiobook_mode_options_html}
@@ -5913,7 +6004,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
             return
 
-        chapter_slug = (form.get("chapter_slug") or "latest").strip() or "latest"
+        chapter_refs: list[str] = []
         narrator_upload = self._uploaded_file("narrator_reference_audio")
         character_upload = self._uploaded_file("character_reference_audio")
         character_name = (form.get("character_voice_name") or "").strip()
@@ -5927,12 +6018,13 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 llm_runtime_config = None
             if _active_audiobook_job(project_path) is not None:
                 raise RuntimeError("当前项目已有有声章节生成任务正在运行，请稍后再生成有声章节。")
+            chapter_refs = _resolve_audiobook_chapter_refs(project_path, form)
             if character_upload and not character_name:
                 raise RuntimeError("上传角色参考音频前，请先选择角色。")
             cancel_checkpoint = ProjectSubtreeCheckpoint(project_path, ["audiobook"])
             job = JOB_REGISTRY.create_job(
                 kind="audiobook",
-                title=f"生成有声章节：{chapter_slug}",
+                title=f"生成有声章节：{_audiobook_refs_label(chapter_refs)}",
                 project_id=project_id,
                 project_path=str(project_path.resolve()),
                 blocks_project=False,
@@ -5969,25 +6061,38 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 )
             results = generate_audiobook_chapters(
                 str(project_path),
-                chapter_refs=[chapter_slug],
+                chapter_refs=chapter_refs,
                 force=bool(form.get("force")),
                 narrator_preset=(form.get("narrator_preset") or "").strip(),
                 generation_mode=normalize_generation_mode(form.get("generation_mode")),
                 llm_config=llm_runtime_config,
                 progress_callback=progress_callback,
             )
-            result = results[0]
-            chapter_target = result.get("chapter_slug", chapter_slug)
-            message = "已复用现有有声章节。" if result.get("reused") else "有声章节生成完成。"
+            if not results:
+                raise RuntimeError("没有生成任何有声章节。")
+            if len(results) == 1:
+                result = results[0]
+                chapter_target = result.get("chapter_slug", chapter_refs[0])
+                message = "已复用现有有声章节。" if result.get("reused") else "有声章节生成完成。"
+                result_url = (
+                    "/project/"
+                    + urllib.parse.quote(project_id)
+                    + "/chapter/"
+                    + urllib.parse.quote(chapter_target)
+                )
+                result_label = "打开章节"
+            else:
+                reused_count = sum(1 for result in results if result.get("reused"))
+                generated_count = len(results) - reused_count
+                message = f"有声章节批量处理完成：共 {len(results)} 章，生成 {generated_count} 章，复用 {reused_count} 章。"
+                result_url = "/project/" + urllib.parse.quote(project_id)
+                result_label = "返回项目"
             if narrator_upload or character_upload:
                 message = "参考音频已保存，" + message
             return {
                 "message": message,
-                "result_url": "/project/"
-                + urllib.parse.quote(project_id)
-                + "/chapter/"
-                + urllib.parse.quote(chapter_target),
-                "result_label": "打开章节",
+                "result_url": result_url,
+                "result_label": result_label,
                 "project_id": project_id,
                 "project_path": str(project_path.resolve()),
             }

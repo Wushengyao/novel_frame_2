@@ -1362,6 +1362,89 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertTrue(voices["character_voices"]["林宇"]["reference_audio"].startswith("audiobook/voice_refs/"))
         self.assertEqual(voices["character_voices"]["林宇"]["prompt_text"], "这是参考文本")
 
+    def test_audiobook_endpoint_generates_missing_chapters_in_batch(self) -> None:
+        for index in range(1, 4):
+            (self.project_path / "chapters" / f"chapter_{index:04d}.md").write_text(
+                f"第 {index} 章正文。",
+                encoding="utf-8",
+            )
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 3
+        save_json(str(self.project_path / "project.json"), project)
+
+        existing_dir = self.project_path / "audiobook" / "chapter_0001"
+        existing_dir.mkdir(parents=True, exist_ok=True)
+        (existing_dir / "chapter_0001.wav").write_bytes(b"RIFF....WAVE")
+        save_json(
+            str(existing_dir / "manifest.json"),
+            {"chapter_slug": "chapter_0001", "combined_audio": "audiobook/chapter_0001/chapter_0001.wav"},
+        )
+
+        with patch(
+            "webui.generate_audiobook_chapters",
+            return_value=[
+                {"chapter_slug": "chapter_0002", "combined_audio": "audiobook/chapter_0002/chapter_0002.wav"},
+                {"chapter_slug": "chapter_0003", "combined_audio": "audiobook/chapter_0003/chapter_0003.wav"},
+            ],
+        ) as mocked_generate:
+            response = self._post_multipart(
+                "/project/web/audiobook",
+                {
+                    "audiobook_scope": "missing",
+                    "chapter_slug": "latest",
+                    "generation_mode": "advanced",
+                    "narrator_preset": "calm_male",
+                },
+                {},
+            )
+            self.assertEqual(response.status, 303)
+            location = response.getheader("Location")
+            self.assertTrue(location.startswith("/job/"))
+            job_id = location.rsplit("/", 1)[-1]
+            job = self._wait_for_job_status(job_id)
+
+        _, kwargs = mocked_generate.call_args
+        self.assertEqual(kwargs["chapter_refs"], ["chapter_0002", "chapter_0003"])
+        self.assertEqual(job["kind"], "audiobook")
+        self.assertIn("2 个章节", job["title"])
+
+    def test_audiobook_endpoint_generates_chapter_range(self) -> None:
+        for index in range(1, 5):
+            (self.project_path / "chapters" / f"chapter_{index:04d}.md").write_text(
+                f"第 {index} 章正文。",
+                encoding="utf-8",
+            )
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 4
+        save_json(str(self.project_path / "project.json"), project)
+
+        with patch(
+            "webui.generate_audiobook_chapters",
+            return_value=[
+                {"chapter_slug": "chapter_0002", "combined_audio": "audiobook/chapter_0002/chapter_0002.wav"},
+                {"chapter_slug": "chapter_0003", "combined_audio": "audiobook/chapter_0003/chapter_0003.wav"},
+            ],
+        ) as mocked_generate:
+            response = self._post_multipart(
+                "/project/web/audiobook",
+                {
+                    "audiobook_scope": "range",
+                    "chapter_start": "2",
+                    "chapter_end": "3",
+                    "chapter_slug": "latest",
+                    "generation_mode": "advanced",
+                },
+                {},
+            )
+            self.assertEqual(response.status, 303)
+            location = response.getheader("Location")
+            self.assertTrue(location.startswith("/job/"))
+            job_id = location.rsplit("/", 1)[-1]
+            self._wait_for_job_status(job_id)
+
+        _, kwargs = mocked_generate.call_args
+        self.assertEqual(kwargs["chapter_refs"], ["chapter_0002", "chapter_0003"])
+
     def test_rollback_rejects_active_audiobook_job(self) -> None:
         job = webui.JOB_REGISTRY.create_job(
             kind="audiobook",
