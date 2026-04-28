@@ -8,6 +8,7 @@ import subprocess
 import sys
 from copy import deepcopy
 from pathlib import Path
+from uuid import uuid4
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -17,6 +18,7 @@ from chapter_context import get_next_context_for_mode, peek_next_context_for_mod
 from common_utils import emit_progress, utc_now
 from console_logger import log_error, log_info, log_success, log_warning
 from context_builder import build_writer_context, resolve_effective_chapter_task
+from expert_review_manager import run_expert_review_for_chapter
 from audiobook_manager import (
     GENERATION_MODE_ADVANCED,
     GENERATION_MODE_SIMPLE,
@@ -79,8 +81,10 @@ from runtime_config import (
     REVIEW_MODES,
     WRITING_QUALITY_HIGH,
     WRITING_QUALITY_MODES,
+    expert_mode_enabled,
     extract_llm_config,
     load_runtime_config,
+    merge_expert_mode_configs,
     merge_quality_model_configs,
     sanitize_runtime_overrides,
 )
@@ -205,6 +209,20 @@ def _quality_model_overrides_from_args(args: argparse.Namespace) -> dict:
     )
 
 
+def _expert_mode_overrides_from_args(args: argparse.Namespace) -> dict:
+    enabled_override = None
+    if getattr(args, "expert_mode", False):
+        enabled_override = "1"
+    if getattr(args, "no_expert_mode", False):
+        enabled_override = "0"
+    return sanitize_runtime_overrides(
+        {
+            "expert_mode_enabled": enabled_override,
+            "expert_models_json": getattr(args, "expert_models_json", None),
+        }
+    )
+
+
 def _launch_background_illustration_job(
     project_path: str,
     *,
@@ -300,6 +318,10 @@ def run_next_chapter(
                 lock_project=False,
             )
 
+    config = dict(config)
+    if expert_mode_enabled(config):
+        config["log_llm_payload"] = True
+
     log_info(f"next_chapter: prepare project={project_path}")
     effective_mode = normalize_planning_mode(planning_mode or config.get("planning_mode"))
     emit_progress(progress_callback, "chapter_prepare", f"Preparing next chapter with planning mode: {effective_mode}")
@@ -323,9 +345,11 @@ def run_next_chapter(
         next_context["chapter"] = merged_chapter
 
     target_chapter_number = next_context["chapter"].get("chapter_number", current_chapter_count + 1)
+    workflow_id = str((log_context or {}).get("workflow_id") or uuid4().hex)
     resolved_project_id = str(project_data["project"].get("project_id") or "").strip()
     log_context_payload = {
         "phase": "writer",
+        "workflow_id": workflow_id,
         "project_id": resolved_project_id,
         "project_path": str(Path(project_path).resolve()),
         "planning_mode": effective_mode,
@@ -484,11 +508,31 @@ def run_next_chapter(
 
     log_info("next_chapter: updating plot_state")
     emit_progress(progress_callback, "chapter_summary", "Updating plot state")
-    update_plot_state(project_path, chapter_text, config, progress_callback=progress_callback)
+    update_plot_state(
+        project_path,
+        chapter_text,
+        config,
+        progress_callback=progress_callback,
+        log_context=log_context_payload,
+    )
     if effective_mode != PLANNING_MODE_NONE:
         log_info("next_chapter: syncing outline progress")
         emit_progress(progress_callback, "chapter_outline_sync", "Syncing outline progress")
         sync_outline_progress(project_path)
+
+    if expert_mode_enabled(config):
+        try:
+            saved_chapter_number = int(Path(chapter_path).stem.rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            saved_chapter_number = int(target_chapter_number or current_chapter_count + 1)
+        log_info("next_chapter: running expert diagnostic review")
+        run_expert_review_for_chapter(
+            project_path,
+            saved_chapter_number,
+            workflow_id,
+            config,
+            progress_callback=progress_callback,
+        )
 
     emit_progress(progress_callback, "chapter_snapshot", "Saving post-write snapshot")
     snapshot_path = create_state_snapshot(project_path, note="post-write checkpoint")
@@ -659,6 +703,10 @@ def _print_status(project_path: str) -> None:
         print(f"Quality Model: {quality_provider}/{quality_model_name}")
     else:
         print("Quality Model: inherit main")
+    expert_mode = llm_config.get("expert_mode") if isinstance(llm_config.get("expert_mode"), dict) else {}
+    expert_models = expert_mode.get("models") if isinstance(expert_mode.get("models"), list) else []
+    print(f"Expert Mode: {'enabled' if expert_mode_enabled(llm_config) else 'disabled'}")
+    print(f"Expert Models: {len(expert_models) if expert_models else 'inherit'}")
     print(f"Planning Mode: {normalize_planning_mode(project.get('planning_mode'))}")
     print(f"Writing Quality Mode: {llm_config.get('writing_quality_mode', 'balanced')}")
     print(f"Review Mode: {llm_config.get('review_mode', 'auto')}")
@@ -770,6 +818,9 @@ def main() -> None:
     next_parser.add_argument("--quality-temperature", type=float, help="Override temperature for craft brief/review/rewrite")
     next_parser.add_argument("--quality-max-tokens", type=int, help="Override max tokens for craft brief/review/rewrite")
     next_parser.add_argument("--quality-timeout", type=int, help="Override timeout for craft brief/review/rewrite")
+    next_parser.add_argument("--expert-mode", action="store_true", help="Enable expert diagnostic review for this run")
+    next_parser.add_argument("--no-expert-mode", action="store_true", help="Disable expert diagnostic review for this run")
+    next_parser.add_argument("--expert-models-json", help="JSON array of expert model configs for this run")
     next_parser.add_argument("--illustrate", action="store_true", help="Generate chapter illustrations")
     next_parser.add_argument("--illustration-request", default="", help="Optional extra art direction")
     next_parser.add_argument(
@@ -900,6 +951,8 @@ def main() -> None:
         log_info("cli: next")
         if args.count < 1:
             parser.error("--count must be at least 1")
+        if args.expert_mode and args.no_expert_mode:
+            parser.error("--expert-mode and --no-expert-mode cannot be used together")
 
         has_progression = bool(
             args.progression_session or args.progression_option or args.progression_feedback
@@ -923,6 +976,12 @@ def main() -> None:
         if quality_overrides.get("quality_model"):
             existing_quality_model = config.get("quality_model") if isinstance(config.get("quality_model"), dict) else {}
             config["quality_model"] = merge_quality_model_configs(existing_quality_model, quality_overrides["quality_model"])
+        expert_overrides = _expert_mode_overrides_from_args(args)
+        if expert_overrides.get("expert_mode"):
+            existing_expert_mode = config.get("expert_mode") if isinstance(config.get("expert_mode"), dict) else {}
+            config["expert_mode"] = merge_expert_mode_configs(existing_expert_mode, expert_overrides["expert_mode"])
+            if expert_mode_enabled(config):
+                config["log_llm_payload"] = True
         runtime_overrides = {
             key: value
             for key, value in {
@@ -934,6 +993,8 @@ def main() -> None:
         }
         if quality_overrides.get("quality_model"):
             runtime_overrides["quality_model"] = quality_overrides["quality_model"]
+        if expert_overrides.get("expert_mode"):
+            runtime_overrides["expert_mode"] = expert_overrides["expert_mode"]
         if has_progression:
             chapter_paths = [
                 run_next_chapter_from_progression(

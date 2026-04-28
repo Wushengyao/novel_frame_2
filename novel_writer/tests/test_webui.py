@@ -916,6 +916,25 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         with patch("webui.init_project", side_effect=fake_init_project):
             webui._create_project(
                 {
+                    "provider": "ollama",
+                    "model_preset": "qwen2.5:14b",
+                    "story_request": "专家模式故事",
+                    "expert_mode_enabled": "1",
+                    "expert_provider_1": "gemini",
+                    "expert_model_name_1": "gemini-3.1-pro-preview",
+                    "expert_timeout_1": "300",
+                },
+                {"OLLAMA_API_KEY": "", "GEMINI_API_KEY": "gemini-key"},
+            )
+
+        self.assertTrue(captured["config"]["expert_mode"]["enabled"])
+        self.assertTrue(captured["config"]["log_llm_payload"])
+        self.assertEqual(captured["config"]["expert_mode"]["models"][0]["model_provider"], "gemini")
+        self.assertEqual(captured["config"]["expert_mode"]["models"][0]["api_key"], "gemini-key")
+
+        with patch("webui.init_project", side_effect=fake_init_project):
+            webui._create_project(
+                {
                     "provider": "llamacpp",
                     "story_request": "local llama.cpp story",
                 },
@@ -978,6 +997,30 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(config["quality_model"]["model_name"], "gemini-2.5-flash")
         self.assertEqual(config["quality_model"]["api_key"], "gemini-key")
         self.assertEqual(config["quality_model"]["temperature"], "0.2")
+
+    def test_runtime_config_resolves_expert_mode_and_forces_logging(self) -> None:
+        project = load_json(str(self.project_path / "project.json"))
+        project["llm_config"]["expert_mode"] = {
+            "enabled": True,
+            "models": [
+                {
+                    "model_provider": "gemini",
+                    "model_name": "gemini-3.1-pro-preview",
+                    "api_key": "",
+                }
+            ],
+        }
+        save_json(str(self.project_path / "project.json"), project)
+
+        config = webui._build_runtime_config(
+            self.project_path,
+            {},
+            {"OLLAMA_API_KEY": "", "GEMINI_API_KEY": "gemini-key"},
+        )
+
+        self.assertTrue(config["log_llm_payload"])
+        self.assertTrue(config["expert_mode"]["enabled"])
+        self.assertEqual(config["expert_mode"]["models"][0]["api_key"], "gemini-key")
 
     def test_runtime_overrides_include_quality_model_fields(self) -> None:
         overrides = webui._runtime_overrides_from_form(

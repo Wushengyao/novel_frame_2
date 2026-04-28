@@ -115,7 +115,13 @@ def _merge_state(current_state: dict, summary: dict) -> dict:
     return updated
 
 
-def update_plot_state(project_path: str, new_text: str, config: dict, progress_callback=None) -> None:
+def update_plot_state(
+    project_path: str,
+    new_text: str,
+    config: dict,
+    progress_callback=None,
+    log_context: dict | None = None,
+) -> None:
     log_info(f"剧情状态更新: 开始处理项目 {project_path}")
     emit_progress(progress_callback, "summary_prepare", "正在总结新章节并刷新剧情状态")
     base = Path(project_path)
@@ -145,6 +151,9 @@ def update_plot_state(project_path: str, new_text: str, config: dict, progress_c
         "chapter_count": int(load_json(str(base / "project.json")).get("chapter_count", 0) or 0),
         "section_chars": prompt_context.get("section_chars", {}),
     }
+    if log_context:
+        summary_log_context.update(log_context)
+        summary_log_context["phase"] = "summary"
     for attempt in range(2):
         try:
             log_info(f"剧情状态更新: 第 {attempt + 1} 次请求模型总结本章。")

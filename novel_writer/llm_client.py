@@ -155,6 +155,8 @@ def _append_log_entry(
     response_text: str = "",
     request_attempts: int,
     log_context: dict[str, Any] | None,
+    status: str = "succeeded",
+    error_summary: str = "",
 ) -> None:
     log_path = _resolve_log_path(config)
     if log_path is None:
@@ -166,12 +168,15 @@ def _append_log_entry(
         "phase": phase,
         "provider": config.get("model_provider", ""),
         "model": config.get("model") or config.get("model_name"),
+        "status": status,
         "attempts": request_attempts,
         "request": request_payload,
         "response": response_payload,
         "response_text": response_text,
         "config": _mask_config_for_log(config),
     }
+    if error_summary:
+        entry["error"] = str(error_summary)[:1200]
     if log_context:
         entry["log_context"] = log_context
 
@@ -794,8 +799,25 @@ def generate_text_with_metadata(
         _merge_request_options(body, config.get("request_options"))
         endpoint = _normalize_chat_url(api_base)
         headers = _build_openai_compatible_headers(api_key)
-        payload, request_attempts = _request_json(endpoint, headers, body, timeout)
-        response_text = _extract_openai_text(payload)
+        payload = None
+        request_attempts = 0
+        try:
+            payload, request_attempts = _request_json(endpoint, headers, body, timeout)
+            response_text = _extract_openai_text(payload)
+        except Exception as exc:
+            if should_log:
+                _append_log_entry(
+                    config,
+                    phase=phase,
+                    request_payload=body,
+                    response_payload=payload,
+                    response_text="",
+                    request_attempts=request_attempts or LLM_REQUEST_MAX_ATTEMPTS,
+                    log_context=log_context,
+                    status="failed",
+                    error_summary=str(exc),
+                )
+            raise
         metadata = {
             "provider": provider,
             "model": model,
@@ -870,8 +892,25 @@ def generate_text_with_metadata(
             body["systemInstruction"] = {
                 "parts": [{"text": normalized_system_prompt}],
             }
-        payload, request_attempts = _request_json(endpoint, headers, body, timeout)
-        response_text = _extract_gemini_text(payload)
+        payload = None
+        request_attempts = 0
+        try:
+            payload, request_attempts = _request_json(endpoint, headers, body, timeout)
+            response_text = _extract_gemini_text(payload)
+        except Exception as exc:
+            if should_log:
+                _append_log_entry(
+                    config,
+                    phase=phase,
+                    request_payload=body,
+                    response_payload=payload,
+                    response_text="",
+                    request_attempts=request_attempts or LLM_REQUEST_MAX_ATTEMPTS,
+                    log_context=log_context,
+                    status="failed",
+                    error_summary=str(exc),
+                )
+            raise
         metadata = {
             "provider": provider,
             "model": model,

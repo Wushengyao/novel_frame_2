@@ -53,6 +53,7 @@ from progression_manager import (
     load_progression_session,
     validate_selection_mode,
 )
+from expert_review_manager import list_expert_review_artifacts
 from quality_manager import list_quality_artifacts
 from project_manager import (
     DEFAULT_PLANNING_MODE,
@@ -83,6 +84,7 @@ from runtime_config import (
     default_api_base_for_provider as shared_default_api_base_for_provider,
     default_model_for_provider as shared_default_model_for_provider,
     default_timeout_for_provider as shared_default_timeout_for_provider,
+    expert_mode_enabled,
     load_runtime_config as shared_load_runtime_config,
     load_model_presets as shared_load_model_presets,
     normalize_review_mode,
@@ -972,6 +974,88 @@ def _quality_model_label(llm_config: dict) -> str:
     return "inherit main"
 
 
+def _expert_mode_from_form(form: dict[str, str], api_keys: dict[str, str] | None = None) -> dict:
+    enabled = bool(form.get("expert_mode_enabled"))
+    models = []
+    for index in range(1, 4):
+        provider = _normalize_provider_for_ui(form.get(f"expert_provider_{index}"), default="")
+        model_name = (form.get(f"expert_model_name_{index}") or "").strip()
+        api_base = (form.get(f"expert_api_base_{index}") or "").strip()
+        model_config: dict[str, object] = {}
+        if provider:
+            model_config["model_provider"] = provider
+        if model_name:
+            model_config["model_name"] = model_name
+            model_config["model"] = model_name
+        if api_base:
+            model_config["api_base"] = api_base
+        for form_key, config_key in (
+            (f"expert_max_tokens_{index}", "max_tokens"),
+            (f"expert_timeout_{index}", "timeout"),
+        ):
+            value = (form.get(form_key) or "").strip()
+            if value:
+                model_config[config_key] = value
+        if provider and api_keys is not None:
+            model_config["api_key"] = _api_key_for_provider(provider, api_keys)
+        if model_config:
+            models.append(model_config)
+    if not enabled and not models:
+        return {}
+    expert_mode: dict[str, object] = {"enabled": enabled}
+    if models:
+        expert_mode["models"] = models
+    return expert_mode
+
+
+def _expert_mode_label(llm_config: dict) -> str:
+    expert_mode = llm_config.get("expert_mode") if isinstance(llm_config.get("expert_mode"), dict) else {}
+    if not expert_mode_enabled(llm_config):
+        return "disabled"
+    models = expert_mode.get("models") if isinstance(expert_mode.get("models"), list) else []
+    if not models:
+        return "enabled / inherit"
+    return f"enabled / {len(models)} model(s)"
+
+
+def _render_expert_mode_fields() -> str:
+    rows = []
+    for index in range(1, 4):
+        rows.append(
+            f"""
+            <div class="two-col">
+              <label>Expert Provider {index}
+                <select name="expert_provider_{index}">
+                  {_render_quality_provider_options()}
+                </select>
+              </label>
+              <label>Expert Model {index}
+                <input type="text" name="expert_model_name_{index}" placeholder="inherit/default">
+              </label>
+            </div>
+            <div class="two-col">
+              <label>Expert API Base {index}
+                <input type="text" name="expert_api_base_{index}" placeholder="inherit or provider default">
+              </label>
+              <label>Expert Timeout {index}
+                <input type="number" name="expert_timeout_{index}" placeholder="inherit or provider default">
+              </label>
+            </div>
+            <label>Expert Max Tokens {index}
+              <input type="number" name="expert_max_tokens_{index}" placeholder="inherit main">
+            </label>
+            """
+        )
+    return f"""
+    <label class="muted">
+      <input type="checkbox" name="expert_mode_enabled" value="1">
+      启用专家模式：每章完成后追加顶级模型诊断，并强制保存完整 llm_logs
+    </label>
+    {''.join(rows)}
+    <div class="muted">最多配置 3 个专家模型；留空时会优先继承 Quality Model，再继承主模型。</div>
+    """
+
+
 def _stats_int(value: object) -> int:
     try:
         return max(0, int(value or 0))
@@ -1572,6 +1656,11 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_cal
     quality_model = _quality_model_from_form(form, api_keys)
     if quality_model:
         config["quality_model"] = quality_model
+    expert_mode = _expert_mode_from_form(form, api_keys)
+    if expert_mode:
+        config["expert_mode"] = expert_mode
+        if bool(expert_mode.get("enabled")):
+            config["log_llm_payload"] = True
 
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as tmp:
         json.dump(config, tmp, ensure_ascii=False, indent=2)
@@ -1712,6 +1801,43 @@ def _render_chapter_quality_panel(project_id: str, chapter_slug: str, artifacts:
     """
 
 
+def _expert_status_label(report: dict) -> str:
+    if not report:
+        return "暂无"
+    if bool(report.get("review_unavailable")):
+        return "诊断不可用"
+    return "已生成"
+
+
+def _render_chapter_expert_panel(project_id: str, chapter_slug: str, artifacts: dict, *, expert_enabled: bool) -> str:
+    model_reports = artifacts.get("model_reports") or []
+    aggregate = artifacts.get("aggregate") if isinstance(artifacts.get("aggregate"), dict) else {}
+    report_button = (
+        f'<a class="ghost-button" href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}/expert-report">查看专家诊断</a>'
+        if aggregate or model_reports
+        else ""
+    )
+    root_causes = aggregate.get("root_causes") if isinstance(aggregate.get("root_causes"), list) else []
+    empty_note = ""
+    if not aggregate and not model_reports:
+        empty_note = (
+            '<p class="muted">本章暂无专家诊断。只有开启专家模式后新生成的章节会自动追加诊断报告。</p>'
+            if expert_enabled
+            else '<p class="muted">专家模式未启用；历史章节不会自动补诊断。</p>'
+        )
+    return f"""
+    <section class="panel">
+      <h2>专家诊断</h2>
+      <p><strong>专家模式：</strong>{'enabled' if expert_enabled else 'disabled'}</p>
+      <p><strong>模型报告：</strong>{len(model_reports)} 份</p>
+      <p><strong>聚合状态：</strong>{escape(_expert_status_label(aggregate))}</p>
+      <p><strong>根因条目：</strong>{len(root_causes)} 项</p>
+      <div class="button-row">{report_button}</div>
+      {empty_note}
+    </section>
+    """
+
+
 def _render_issue_items(items: object) -> str:
     if not isinstance(items, list) or not items:
         return '<p class="muted">暂无</p>'
@@ -1738,6 +1864,40 @@ def _render_issue_items(items: object) -> str:
             )
         else:
             rendered.append(f"<li>{escape(str(item))}</li>")
+    return f"<ul>{''.join(rendered)}</ul>"
+
+
+def _render_root_cause_items(items: object) -> str:
+    if not isinstance(items, list) or not items:
+        return '<p class="muted">暂无</p>'
+    rendered = []
+    for item in items:
+        source = item if isinstance(item, dict) else {"issue": item}
+        issue = str(source.get("issue") or "").strip()
+        category = str(source.get("category") or "").strip()
+        severity = str(source.get("severity") or "").strip()
+        confidence = str(source.get("confidence") or "").strip()
+        evidence = str(source.get("evidence") or "").strip()
+        recommended_change = str(source.get("recommended_change") or "").strip()
+        trace_refs = source.get("trace_refs") if isinstance(source.get("trace_refs"), list) else []
+        tags = "".join(
+            f' <span class="pill">{escape(value)}</span>'
+            for value in (category, severity, f"confidence={confidence}" if confidence else "")
+            if value
+        )
+        evidence_html = f'<div class="muted">证据：{escape(evidence)}</div>' if evidence else ""
+        trace_text = ", ".join(str(ref) for ref in trace_refs if str(ref).strip())
+        trace_html = f'<div class="muted">Trace: {escape(trace_text)}</div>' if trace_text else ""
+        change_html = f'<div class="muted">建议：{escape(recommended_change)}</div>' if recommended_change else ""
+        rendered.append(
+            "<li>"
+            f"<strong>{escape(issue or '未命名根因')}</strong>"
+            f"{tags}"
+            f"{evidence_html}"
+            f"{trace_html}"
+            f"{change_html}"
+            "</li>"
+        )
     return f"<ul>{''.join(rendered)}</ul>"
 
 
@@ -3402,6 +3562,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if len(parts) == 5 and parts[0] == "project" and parts[2] == "chapter" and parts[4] == "quality-report":
             self._handle_chapter_quality_report(parts[1], parts[3], notice=notice, error=error)
             return
+        if len(parts) == 5 and parts[0] == "project" and parts[2] == "chapter" and parts[4] == "expert-report":
+            self._handle_chapter_expert_report(parts[1], parts[3], notice=notice, error=error)
+            return
         if len(parts) == 5 and parts[0] == "project" and parts[2] == "chapter" and parts[4] == "pre-rewrite":
             self._handle_chapter_pre_rewrite(parts[1], parts[3], notice=notice, error=error)
             return
@@ -4322,6 +4485,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                   <input type="number" name="quality_max_tokens" placeholder="inherit main">
                 </label>
                 <div class="muted">Optional advanced model used only for craft brief, quality review, and rewrite.</div>
+                {_render_expert_mode_fields()}
                 <button type="submit">创建项目</button>
               </form>
             </section>
@@ -4447,6 +4611,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <p><strong>Quality:</strong>{escape(_quality_mode_label((project.get("llm_config") or {}).get("writing_quality_mode", DEFAULT_WRITING_QUALITY_MODE)))}</p>
               <p><strong>Review:</strong>{escape(_review_mode_label((project.get("llm_config") or {}).get("review_mode", DEFAULT_REVIEW_MODE)))}</p>
               <p><strong>Quality Model:</strong>{escape(_quality_model_label(project.get("llm_config") or {}))}</p>
+              <p><strong>Expert Mode:</strong>{escape(_expert_mode_label(project.get("llm_config") or {}))}</p>
             </section>
             <section class="panel">
               <h3>后台任务</h3>
@@ -4633,7 +4798,19 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             if chapter_number is not None
             else {"reports": [], "pre_rewrite_drafts": [], "rewrite_count": 0}
         )
+        project_llm_config = project.get("llm_config") or {}
+        expert_artifacts = (
+            list_expert_review_artifacts(str(project_path), chapter_number)
+            if chapter_number is not None
+            else {"model_reports": [], "aggregate": {}, "aggregate_error": ""}
+        )
         quality_panel_html = _render_chapter_quality_panel(project_id, chapter_slug, quality_artifacts)
+        expert_panel_html = _render_chapter_expert_panel(
+            project_id,
+            chapter_slug,
+            expert_artifacts,
+            expert_enabled=expert_mode_enabled(project_llm_config),
+        )
         current_index = next((idx for idx, chapter in enumerate(chapters) if chapter["slug"] == chapter_slug), -1)
         previous_chapter = chapters[current_index - 1] if current_index > 0 else None
         next_chapter = chapters[current_index + 1] if 0 <= current_index < len(chapters) - 1 else None
@@ -4654,7 +4831,6 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             if audiobook_busy
             else ""
         )
-        project_llm_config = project.get("llm_config") or {}
         polish_runtime_fields_html = _render_runtime_override_fields(
             str(project_llm_config.get("model_provider") or ""),
             str(project_llm_config.get("model_name") or project_llm_config.get("model") or ""),
@@ -4716,6 +4892,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             </form>
           </section>
           {quality_panel_html}
+          {expert_panel_html}
           {busy_notice}
           {audiobook_notice}
           <section class="panel">
@@ -4877,6 +5054,105 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         self._write_html(
             _render_page(
                 f"{project_name} - {chapter_slug} 质量报告",
+                body,
+                notice=notice,
+                error=error,
+                auth_enabled=auth_settings.enabled,
+                authenticated=authenticated,
+                theme=_read_theme_cookie(self),
+            )
+        )
+
+    def _handle_chapter_expert_report(self, project_id: str, chapter_slug: str, notice: str = "", error: str = "") -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+        chapter_number = _chapter_number_from_slug(chapter_slug)
+        if chapter_number is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "章节不存在")
+            return
+        auth_settings = self._current_auth_settings()
+        authenticated = self._is_authenticated(auth_settings)
+
+        project = load_json(str(project_path / "project.json"))
+        project_name = _repair_display_text(project.get("name", project_id))
+        artifacts = list_expert_review_artifacts(str(project_path), chapter_number)
+        sections = []
+        aggregate = artifacts.get("aggregate") if isinstance(artifacts.get("aggregate"), dict) else {}
+        if artifacts.get("aggregate_error"):
+            sections.append(
+                f"""
+                <section class="panel">
+                  <h2>Aggregate</h2>
+                  <div class="warning-box">聚合报告读取失败：{escape(str(artifacts.get("aggregate_error")))}</div>
+                </section>
+                """
+            )
+        elif aggregate:
+            sections.append(
+                f"""
+                <section class="panel">
+                  <h2>Aggregate</h2>
+                  <p><strong>状态：</strong>{escape(_expert_status_label(aggregate))}</p>
+                  <p><strong>总体分：</strong>{escape(str(aggregate.get("overall_score", "暂无")))}</p>
+                  <p><strong>置信度：</strong>{escape(str(aggregate.get("confidence", "暂无")))}</p>
+                  <h3>质量概述</h3>
+                  <div class="chapter-view">{escape(str(aggregate.get("quality_summary") or "暂无"))}</div>
+                  <h3>根因诊断</h3>
+                  {_render_root_cause_items(aggregate.get("root_causes"))}
+                  <h3>建议动作</h3>
+                  {_render_string_items(aggregate.get("recommended_actions"))}
+                  <h3>原始 JSON</h3>
+                  <div class="chapter-view">{escape(json.dumps(aggregate, ensure_ascii=False, indent=2))}</div>
+                </section>
+                """
+            )
+
+        for item in artifacts.get("model_reports") or []:
+            report = item.get("report") if isinstance(item.get("report"), dict) else {}
+            file_name = item.get("file_name") or "model"
+            if item.get("error"):
+                sections.append(
+                    f"""
+                    <section class="panel">
+                      <h2>{escape(str(file_name))}</h2>
+                      <div class="warning-box">报告读取失败：{escape(str(item.get("error")))}</div>
+                    </section>
+                    """
+                )
+                continue
+            sections.append(
+                f"""
+                <section class="panel">
+                  <h2>{escape(str(file_name))}</h2>
+                  <p><strong>状态：</strong>{escape(_expert_status_label(report))}</p>
+                  <p><strong>模型：</strong>{escape(str(report.get("provider", "")) + "/" + str(report.get("model", "")))}</p>
+                  <h3>根因诊断</h3>
+                  {_render_root_cause_items(report.get("root_causes"))}
+                  <h3>关键发现</h3>
+                  {_render_string_items(report.get("critical_findings"))}
+                  <h3>原始 JSON</h3>
+                  <div class="chapter-view">{escape(json.dumps(report, ensure_ascii=False, indent=2))}</div>
+                </section>
+                """
+            )
+        if not sections:
+            sections.append('<section class="panel"><h2>专家诊断</h2><p class="muted">暂无本章专家诊断。</p></section>')
+
+        body = f"""
+        <div class="stack">
+          <section class="panel">
+            <a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}">返回章节</a>
+            <h2>{escape(chapter_slug)} 专家诊断</h2>
+            <p class="muted">这里展示专家模型组对章节质量、提示词、模型能力和工作流问题的追因报告。</p>
+          </section>
+          {''.join(sections)}
+        </div>
+        """
+        self._write_html(
+            _render_page(
+                f"{project_name} - {chapter_slug} 专家诊断",
                 body,
                 notice=notice,
                 error=error,
@@ -5438,6 +5714,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 <p><strong>Quality:</strong>{escape(_quality_mode_label(project_llm_config.get("writing_quality_mode", DEFAULT_WRITING_QUALITY_MODE)))}</p>
                 <p><strong>Review:</strong>{escape(_review_mode_label(project_llm_config.get("review_mode", DEFAULT_REVIEW_MODE)))}</p>
                 <p><strong>Quality Model:</strong>{escape(_quality_model_label(project_llm_config))}</p>
+                <p><strong>Expert Mode:</strong>{escape(_expert_mode_label(project_llm_config))}</p>
               </div>
             </section>
             <section class="panel">

@@ -24,6 +24,7 @@ def create_test_project(
     writing_quality_mode: str = "light",
     review_mode: str = "auto",
     quality_model: dict | None = None,
+    expert_mode: dict | None = None,
 ) -> Path:
     project_path = base_dir / f"novel_project_{project_id}"
     project_path.mkdir(parents=True, exist_ok=True)
@@ -35,6 +36,7 @@ def create_test_project(
         "craft_briefs",
         "quality_reviews",
         "quality_drafts",
+        "expert_reviews",
         "illustrations",
         "audiobook",
         "snapshots",
@@ -56,6 +58,10 @@ def create_test_project(
     }
     if quality_model:
         llm_config["quality_model"] = quality_model
+    if expert_mode:
+        llm_config["expert_mode"] = expert_mode
+        if expert_mode.get("enabled"):
+            llm_config["log_llm_payload"] = True
 
     save_json(
         str(project_path / "project.json"),
@@ -188,6 +194,7 @@ def runtime_config(
     writing_quality_mode: str = "light",
     review_mode: str = "auto",
     quality_model: dict | None = None,
+    expert_mode: dict | None = None,
 ) -> dict:
     config = {
         "model_provider": "ollama",
@@ -204,4 +211,8 @@ def runtime_config(
     }
     if quality_model:
         config["quality_model"] = quality_model
+    if expert_mode:
+        config["expert_mode"] = expert_mode
+        if expert_mode.get("enabled"):
+            config["log_llm_payload"] = True
     return config

@@ -40,6 +40,16 @@ class ProjectManagerTests(unittest.TestCase):
                     "api_key": "quality-key",
                     "temperature": 0.4,
                 },
+                "expert_mode": {
+                    "enabled": True,
+                    "models": [
+                        {
+                            "model_provider": "gemini",
+                            "model_name": "gemini-3.1-pro-preview",
+                            "api_key": "expert-key",
+                        }
+                    ],
+                },
             }
         )
 
@@ -47,6 +57,8 @@ class ProjectManagerTests(unittest.TestCase):
         self.assertEqual(persisted["quality_model"]["api_key"], "")
         self.assertEqual(persisted["quality_model"]["model_name"], "gemini-2.5-pro")
         self.assertEqual(persisted["quality_model"]["temperature"], 0.4)
+        self.assertTrue(persisted["expert_mode"]["enabled"])
+        self.assertEqual(persisted["expert_mode"]["models"][0]["api_key"], "")
 
     def test_project_write_lock_rejects_same_project_reentry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,6 +140,24 @@ class ProjectManagerTests(unittest.TestCase):
             with acquire_project_audio_lock(str(project_path), owner="audio"):
                 with self.assertRaises(ProjectWriteLockError):
                     rollback_project(str(project_path), 0)
+
+    def test_rollback_deletes_future_expert_reviews(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="rollback_expert")
+            (project_path / "chapters" / "chapter_0001.md").write_text("第一章\n", encoding="utf-8")
+            (project_path / "chapters" / "chapter_0002.md").write_text("第二章\n", encoding="utf-8")
+            project = read_json(project_path / "project.json")
+            project["chapter_count"] = 2
+            save_json(str(project_path / "project.json"), project)
+            save_json(str(project_path / "summaries" / "summary_0001.json"), {"chapter_summary": "第一章"})
+            future_dir = project_path / "expert_reviews" / "chapter_0002"
+            future_dir.mkdir(parents=True)
+            save_json(str(future_dir / "aggregate.json"), {"ok": True})
+
+            result = rollback_project(str(project_path), 1)
+
+            self.assertFalse(future_dir.exists())
+            self.assertIn("expert_reviews/chapter_0002", result["removed"]["expert_reviews"])
 
     def test_export_project_archive_contains_complete_project_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

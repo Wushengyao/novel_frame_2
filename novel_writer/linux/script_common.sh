@@ -256,6 +256,25 @@ for env_name, key in (
 if quality_model:
     data["quality_model"] = quality_model
 
+expert_mode = {}
+expert_enabled = os.environ.get("NOVEL_EXPERT_MODE", "").strip().lower()
+if expert_enabled:
+    expert_mode["enabled"] = expert_enabled in {"1", "true", "yes", "y", "on"}
+expert_models_json = os.environ.get("NOVEL_EXPERT_MODELS_JSON", "").strip()
+if expert_models_json:
+    try:
+        parsed_models = json.loads(expert_models_json)
+        if isinstance(parsed_models, dict):
+            parsed_models = [parsed_models]
+        if isinstance(parsed_models, list):
+            expert_mode["models"] = parsed_models[:3]
+    except Exception:
+        pass
+if expert_mode:
+    data["expert_mode"] = expert_mode
+    if expert_mode.get("enabled"):
+        data["log_llm_payload"] = True
+
 outline_request = os.environ.get("NOVEL_OUTLINE_REQUEST", "").strip()
 if outline_request:
     data["outline_request"] = outline_request
@@ -367,6 +386,25 @@ for env_name, key in (
         quality_model[key] = value
 if quality_model:
     data["quality_model"] = quality_model
+
+expert_mode = dict(saved.get("expert_mode") if isinstance(saved.get("expert_mode"), dict) else {})
+expert_enabled = os.environ.get("NOVEL_EXPERT_MODE", "").strip().lower()
+if expert_enabled:
+    expert_mode["enabled"] = expert_enabled in {"1", "true", "yes", "y", "on"}
+expert_models_json = os.environ.get("NOVEL_EXPERT_MODELS_JSON", "").strip()
+if expert_models_json:
+    try:
+        parsed_models = json.loads(expert_models_json)
+        if isinstance(parsed_models, dict):
+            parsed_models = [parsed_models]
+        if isinstance(parsed_models, list):
+            expert_mode["models"] = parsed_models[:3]
+    except Exception:
+        pass
+if expert_mode:
+    data["expert_mode"] = expert_mode
+    if expert_mode.get("enabled"):
+        data["log_llm_payload"] = True
 
 with open(config_path, "w", encoding="utf-8") as fh:
     json.dump(data, fh, ensure_ascii=False, indent=2)

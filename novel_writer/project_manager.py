@@ -97,6 +97,7 @@ STATS_PHASES = (
     "quality_review",
     "rewrite",
     "summary",
+    "expert_review",
     "polish",
     "audiobook",
 )
@@ -151,6 +152,7 @@ PROJECT_STANDARD_DIRS = (
     "craft_briefs",
     "quality_reviews",
     "quality_drafts",
+    "expert_reviews",
     "illustrations",
     "audiobook",
     "snapshots",
@@ -627,7 +629,38 @@ def _build_quality_model_config(config: dict, *, include_api_key: bool) -> dict:
     return quality_model
 
 
+def _coerce_config_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _build_expert_mode_config(config: dict, *, include_api_key: bool) -> dict:
+    raw = config.get("expert_mode") if isinstance(config.get("expert_mode"), dict) else {}
+    expert_mode: dict[str, object] = {}
+    if "enabled" in raw:
+        expert_mode["enabled"] = _coerce_config_bool(raw.get("enabled"))
+
+    models = []
+    raw_models = raw.get("models") if isinstance(raw.get("models"), list) else []
+    for item in raw_models[:3]:
+        model_config = _build_quality_model_config({"quality_model": item}, include_api_key=include_api_key)
+        if model_config:
+            models.append(model_config)
+    if models:
+        expert_mode["models"] = models
+    return expert_mode
+
+
+def _expert_mode_enabled(config: dict) -> bool:
+    raw = config.get("expert_mode") if isinstance(config.get("expert_mode"), dict) else {}
+    return _coerce_config_bool(raw.get("enabled"), default=False)
+
+
 def _build_llm_config(config: dict) -> dict:
+    expert_enabled = _expert_mode_enabled(config)
     llm_config = {
         "model_provider": config.get("model_provider", "openai_compatible"),
         "model": config.get("model") or config.get("model_name", ""),
@@ -640,18 +673,30 @@ def _build_llm_config(config: dict) -> dict:
         "planning_mode": normalize_planning_mode(config.get("planning_mode")),
         "writing_quality_mode": config.get("writing_quality_mode", "balanced"),
         "review_mode": config.get("review_mode", "auto"),
+        "log_llm_payload": _coerce_config_bool(config.get("log_llm_payload")) or expert_enabled,
     }
+    if config.get("project_path"):
+        llm_config["project_path"] = str(config.get("project_path"))
     quality_model = _build_quality_model_config(config, include_api_key=True)
     if quality_model:
         llm_config["quality_model"] = quality_model
+    expert_mode = _build_expert_mode_config(config, include_api_key=True)
+    if expert_mode:
+        llm_config["expert_mode"] = expert_mode
     return llm_config
 
 
 def _build_persisted_llm_config(config: dict) -> dict:
     persisted = _build_llm_config(config)
     persisted["api_key"] = ""
+    persisted.pop("project_path", None)
     if isinstance(persisted.get("quality_model"), dict):
         persisted["quality_model"]["api_key"] = ""
+    expert_mode = persisted.get("expert_mode")
+    if isinstance(expert_mode, dict):
+        for model in expert_mode.get("models") or []:
+            if isinstance(model, dict):
+                model["api_key"] = ""
     return persisted
 
 
@@ -1024,18 +1069,13 @@ def init_project(config_path: str, progress_callback=None) -> str:
     config = load_json(str(config_file))
     project_id = config.get("project_id") or _build_project_id()
     project_path = _resolve_project_path(config_file, config, project_id)
+    config["project_path"] = str(project_path.resolve())
+    if _expert_mode_enabled(config):
+        config["log_llm_payload"] = True
     log_info(f"init_project: creating project directory {project_path}")
     emit_progress(progress_callback, "init_dirs", "Creating project directories")
     project_path.mkdir(parents=True, exist_ok=True)
-    (project_path / "chapters").mkdir(exist_ok=True)
-    (project_path / "summaries").mkdir(exist_ok=True)
-    (project_path / "arc_summaries").mkdir(exist_ok=True)
-    (project_path / "task_cards").mkdir(exist_ok=True)
-    (project_path / "craft_briefs").mkdir(exist_ok=True)
-    (project_path / "quality_reviews").mkdir(exist_ok=True)
-    (project_path / "quality_drafts").mkdir(exist_ok=True)
-    (project_path / "illustrations").mkdir(exist_ok=True)
-    (project_path / "audiobook").mkdir(exist_ok=True)
+    _ensure_project_subdirs(project_path)
     log_success("init_project: base directories ready")
 
     emit_progress(progress_callback, "init_story", "Generating initial story data")
@@ -1642,6 +1682,7 @@ def _delete_future_artifacts(project_path: str, keep_chapter_count: int) -> dict
         "craft_briefs": [],
         "quality_reviews": [],
         "quality_drafts": [],
+        "expert_reviews": [],
         "illustrations": [],
         "audiobook": [],
         "snapshots": [],
@@ -1684,6 +1725,14 @@ def _delete_future_artifacts(project_path: str, keep_chapter_count: int) -> dict
         if chapter_number is not None and chapter_number > keep_chapter_count:
             _remove_path(draft_path)
             removed["quality_drafts"].append(str(draft_path.relative_to(base)).replace("\\", "/"))
+
+    expert_reviews_dir = base / "expert_reviews"
+    if expert_reviews_dir.exists():
+        for review_dir in sorted(expert_reviews_dir.glob("chapter_*")):
+            chapter_number = _parse_numbered_name(review_dir.name, "chapter_", "")
+            if chapter_number is not None and chapter_number > keep_chapter_count:
+                _remove_path(review_dir)
+                removed["expert_reviews"].append(str(review_dir.relative_to(base)).replace("\\", "/"))
 
     for arc_summary_path in sorted((base / "arc_summaries").glob("arc_*.json")):
         arc_index = _parse_numbered_name(arc_summary_path.name, "arc_", ".json")

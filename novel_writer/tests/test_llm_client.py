@@ -129,6 +129,37 @@ class LLMClientTests(unittest.TestCase):
             self.assertEqual(request_body["messages"], [{"role": "user", "content": "请写一段正文。"}])
             self.assertFalse((project_path / "llm_logs").exists())
 
+    def test_generate_text_with_metadata_logs_failed_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project"
+            project_path.mkdir()
+            config = {
+                "project_path": str(project_path.resolve()),
+                "model_provider": "openai_compatible",
+                "model": "llama3.2",
+                "api_key": "secret-key",
+                "api_base": "https://example.local/v1",
+                "temperature": 0.8,
+                "max_tokens": 4000,
+                "timeout": 120,
+                "log_llm_payload": "1",
+            }
+
+            with patch("llm_client._request_json", side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    generate_text_with_metadata(
+                        "请写一段正文。",
+                        config,
+                        log_context={"phase": "writer", "workflow_id": "wf-fail"},
+                    )
+
+            log_file = project_path / "llm_logs" / "llm_interactions.jsonl"
+            entry = json.loads(log_file.read_text(encoding="utf-8").strip())
+            self.assertEqual(entry["status"], "failed")
+            self.assertIn("boom", entry["error"])
+            self.assertEqual(entry["request"]["messages"][0]["content"], "请写一段正文。")
+            self.assertEqual(entry["log_context"]["workflow_id"], "wf-fail")
+
     def test_gemini_uses_system_instruction_and_explicit_json_response_format(self) -> None:
         config = {
             "model_provider": "gemini",

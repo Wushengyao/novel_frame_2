@@ -9,7 +9,13 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
-from app import _quality_model_overrides_from_args, run_next_chapter, run_next_chapter_from_progression, run_next_chapters
+from app import (
+    _expert_mode_overrides_from_args,
+    _quality_model_overrides_from_args,
+    run_next_chapter,
+    run_next_chapter_from_progression,
+    run_next_chapters,
+)
 from prompt_builder import build_system_prompt
 from project_manager import ProjectWriteLockError, acquire_project_write_lock
 from progression_manager import CUSTOM_PROGRESSION_OPTION_ID, generate_progression_options
@@ -35,6 +41,22 @@ class GuidedFlowTests(unittest.TestCase):
         self.assertNotIn("temperature", overrides["quality_model"])
         self.assertEqual(overrides["quality_model"]["max_tokens"], "6000")
         self.assertEqual(overrides["quality_model"]["timeout"], "180")
+
+    def test_cli_expert_mode_overrides_are_nested(self) -> None:
+        overrides = _expert_mode_overrides_from_args(
+            Namespace(
+                expert_mode=True,
+                no_expert_mode=False,
+                expert_models_json=json.dumps(
+                    [{"model_provider": "gemini", "model_name": "gemini-3.1-pro-preview"}],
+                    ensure_ascii=False,
+                ),
+            )
+        )
+
+        self.assertTrue(overrides["expert_mode"]["enabled"])
+        self.assertEqual(overrides["expert_mode"]["models"][0]["model_provider"], "gemini")
+        self.assertEqual(overrides["expert_mode"]["models"][0]["model_name"], "gemini-3.1-pro-preview")
 
     def _summary_payload(self, next_goal: str = "继续推进下一步") -> dict:
         return {
@@ -253,6 +275,62 @@ class GuidedFlowTests(unittest.TestCase):
             self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "轻量模式正文")
             self.assertEqual(list((project_path / "craft_briefs").glob("*.json")), [])
             self.assertEqual(list((project_path / "quality_reviews").glob("*.json")), [])
+
+    def test_expert_mode_reviews_after_summary_without_changing_chapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(
+                Path(tmp),
+                project_id="expert_flow",
+                expert_mode={"enabled": True, "models": [{"model_provider": "ollama", "model_name": "expert"}]},
+            )
+            expert_payload = {
+                "schema_version": 1,
+                "review_unavailable": False,
+                "quality_summary": "正文可用，但任务压力偏弱。",
+                "overall_score": 0.7,
+                "confidence": 0.8,
+                "root_causes": [
+                    {
+                        "category": "prompt",
+                        "severity": "major",
+                        "confidence": 0.8,
+                        "issue": "任务卡没有强调失败代价。",
+                        "evidence": "行动选择缺少压力。",
+                        "trace_refs": [],
+                        "recommended_change": "在 writer prompt 中加入失败代价。",
+                    }
+                ],
+            }
+
+            with patch(
+                "app.generate_text_with_metadata",
+                return_value=("专家模式正文", {"usage": {}}),
+            ) as mocked_writer_generate, patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ) as mocked_state_generate, patch(
+                "expert_review_manager.generate_text_with_metadata",
+                return_value=(json.dumps(expert_payload, ensure_ascii=False), {"usage": {}}),
+            ) as mocked_expert_generate:
+                chapter_path = run_next_chapter(
+                    str(project_path),
+                    runtime_config(
+                        "chapter",
+                        writing_quality_mode="light",
+                        expert_mode={"enabled": True, "models": [{"model_provider": "ollama", "model_name": "expert"}]},
+                    ),
+                )
+
+            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "专家模式正文")
+            writer_context = mocked_writer_generate.call_args.kwargs["log_context"]
+            summary_context = mocked_state_generate.call_args.kwargs["log_context"]
+            expert_context = mocked_expert_generate.call_args.kwargs["log_context"]
+            self.assertTrue(writer_context["workflow_id"])
+            self.assertEqual(summary_context["workflow_id"], writer_context["workflow_id"])
+            self.assertEqual(expert_context["workflow_id"], writer_context["workflow_id"])
+            aggregate = read_json(project_path / "expert_reviews" / "chapter_0001" / "aggregate.json")
+            self.assertEqual(aggregate["report_type"], "aggregate")
+            self.assertEqual(aggregate["root_causes"][0]["category"], "prompt")
 
     def test_balanced_quality_mode_generates_craft_brief_and_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

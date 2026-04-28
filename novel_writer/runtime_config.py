@@ -112,6 +112,7 @@ QUALITY_MODEL_OVERRIDE_KEYS = {
     "quality_max_tokens": "max_tokens",
     "quality_timeout": "timeout",
 }
+EXPERT_MODE_MODEL_LIMIT = 3
 
 
 def _coerce_bool(raw_value: object, default: bool = False) -> bool:
@@ -289,48 +290,126 @@ def merge_quality_model_configs(base: object, override: object) -> dict:
     return merged
 
 
-def resolve_quality_model_config(config: dict) -> tuple[dict, bool]:
-    raw_quality_model = _clean_quality_model_config(config.get("quality_model"))
-    if not quality_model_configured(raw_quality_model):
-        resolved = dict(config)
-        resolved.pop("quality_model", None)
-        return resolved, False
+def _parse_expert_models_json(value: object) -> list[object]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        return []
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        return [parsed]
+    return []
 
+
+def _clean_expert_mode_config(raw: object, *, include_api_key: bool = True) -> dict:
+    if isinstance(raw, bool):
+        return {"enabled": raw}
+    source = raw if isinstance(raw, dict) else {}
+    expert_mode: dict[str, object] = {}
+
+    if "enabled" in source:
+        expert_mode["enabled"] = _coerce_bool(source.get("enabled"))
+
+    raw_models = source.get("models")
+    if isinstance(raw_models, str):
+        raw_models = _parse_expert_models_json(raw_models)
+    elif raw_models is None and any(
+        key in source
+        for key in (
+            "model_provider",
+            "provider",
+            "model_name",
+            "model",
+            "api_base",
+            "api_key",
+            "max_tokens",
+            "timeout",
+        )
+    ):
+        raw_models = [source]
+
+    models: list[dict] = []
+    if isinstance(raw_models, list):
+        for item in raw_models:
+            cleaned = _clean_quality_model_config(item, include_api_key=include_api_key)
+            if not cleaned:
+                continue
+            models.append(cleaned)
+            if len(models) >= EXPERT_MODE_MODEL_LIMIT:
+                break
+    if models:
+        expert_mode["models"] = models
+    return expert_mode
+
+
+def expert_mode_configured(raw: object) -> bool:
+    return bool(_clean_expert_mode_config(raw, include_api_key=False))
+
+
+def expert_mode_enabled(config: dict) -> bool:
+    expert_mode = _clean_expert_mode_config(config.get("expert_mode"), include_api_key=False)
+    return _coerce_bool(expert_mode.get("enabled"), default=False)
+
+
+def merge_expert_mode_configs(base: object, override: object) -> dict:
+    merged = _clean_expert_mode_config(base)
+    override_clean = _clean_expert_mode_config(override)
+    if not override_clean:
+        return merged
+    if "enabled" in override_clean:
+        merged["enabled"] = override_clean["enabled"]
+    if "models" in override_clean:
+        merged["models"] = override_clean["models"]
+    return merged
+
+
+def _resolve_auxiliary_model_config(
+    config: dict,
+    raw_model_config: object,
+    *,
+    default_temperature: float,
+) -> dict:
+    raw_model = _clean_quality_model_config(raw_model_config)
     base_provider = normalize_provider(config.get("model_provider"), default="openai_compatible")
-    raw_provider = str(raw_quality_model.get("model_provider", "") or "").strip()
+    raw_provider = str(raw_model.get("model_provider", "") or "").strip()
     provider = normalize_provider(raw_provider, default=base_provider)
     provider_changed = provider != base_provider
 
     base_model = str(config.get("model_name") or config.get("model") or "").strip()
-    raw_model = str(raw_quality_model.get("model_name") or raw_quality_model.get("model") or "").strip()
-    model = raw_model or (default_model_for_provider(provider) if raw_provider else base_model)
+    raw_model_name = str(raw_model.get("model_name") or raw_model.get("model") or "").strip()
+    model = raw_model_name or (default_model_for_provider(provider) if raw_provider else base_model)
 
-    raw_api_base = str(raw_quality_model.get("api_base", "") or "").strip()
+    raw_api_base = str(raw_model.get("api_base", "") or "").strip()
     api_base = raw_api_base or (
         default_api_base_for_provider(provider)
         if provider_changed
         else str(config.get("api_base", "") or "").strip()
     )
 
-    raw_api_key = str(raw_quality_model.get("api_key", "") or "").strip()
+    raw_api_key = str(raw_model.get("api_key", "") or "").strip()
     api_key = raw_api_key or (
         str(config.get("api_key", "") or "").strip()
         if provider == base_provider
         else ""
     )
 
-    timeout_value = raw_quality_model.get("timeout")
+    timeout_value = raw_model.get("timeout")
     if not _is_nonempty(timeout_value):
         timeout_value = default_timeout_for_provider(provider) if provider_changed else config.get("timeout")
-    temperature_value = raw_quality_model.get("temperature")
+    temperature_value = raw_model.get("temperature")
     if not _is_nonempty(temperature_value):
-        temperature_value = config.get("temperature", 0.8)
-    max_tokens_value = raw_quality_model.get("max_tokens")
+        temperature_value = default_temperature
+    max_tokens_value = raw_model.get("max_tokens")
     if not _is_nonempty(max_tokens_value):
         max_tokens_value = config.get("max_tokens", 4000)
 
     resolved = dict(config)
     resolved.pop("quality_model", None)
+    resolved.pop("expert_mode", None)
     resolved.update(
         {
             "model_provider": provider,
@@ -344,8 +423,37 @@ def resolve_quality_model_config(config: dict) -> tuple[dict, bool]:
                 provider,
                 timeout_value or default_timeout_for_provider(provider),
             ),
+            "log_llm_payload": True,
         }
     )
+    return resolved
+
+
+def resolve_expert_model_configs(config: dict) -> list[dict]:
+    expert_mode = _clean_expert_mode_config(config.get("expert_mode"))
+    if not _coerce_bool(expert_mode.get("enabled"), default=False):
+        return []
+
+    raw_models = expert_mode.get("models") if isinstance(expert_mode.get("models"), list) else []
+    if not raw_models:
+        quality_model = _clean_quality_model_config(config.get("quality_model"))
+        raw_models = [quality_model] if quality_model_configured(quality_model) else [{}]
+
+    return [
+        _resolve_auxiliary_model_config(config, raw_model, default_temperature=0.2)
+        for raw_model in raw_models
+    ]
+
+
+def resolve_quality_model_config(config: dict) -> tuple[dict, bool]:
+    raw_quality_model = _clean_quality_model_config(config.get("quality_model"))
+    if not quality_model_configured(raw_quality_model):
+        resolved = dict(config)
+        resolved.pop("quality_model", None)
+        return resolved, False
+
+    resolved = _resolve_auxiliary_model_config(config, raw_quality_model, default_temperature=float(config.get("temperature", 0.8)))
+    resolved["log_llm_payload"] = config.get("log_llm_payload", False)
     return resolved, True
 
 
@@ -386,6 +494,36 @@ def sanitize_runtime_overrides(overrides: dict | None) -> dict[str, object]:
             quality_model["model"] = str(value).strip()
     if quality_model:
         sanitized["quality_model"] = quality_model
+
+    expert_mode = _clean_expert_mode_config(raw.get("expert_mode"))
+    for enabled_key in ("expert_mode_enabled", "expert_enabled"):
+        if enabled_key in raw and raw.get(enabled_key) not in (None, ""):
+            expert_mode["enabled"] = _coerce_bool(raw.get(enabled_key))
+    raw_expert_models = raw.get("expert_models")
+    if raw_expert_models not in (None, ""):
+        if isinstance(raw_expert_models, str):
+            raw_expert_models = _parse_expert_models_json(raw_expert_models)
+        if isinstance(raw_expert_models, list):
+            models = []
+            for item in raw_expert_models:
+                cleaned = _clean_quality_model_config(item)
+                if cleaned:
+                    models.append(cleaned)
+                if len(models) >= EXPERT_MODE_MODEL_LIMIT:
+                    break
+            expert_mode["models"] = models
+    raw_expert_models_json = raw.get("expert_models_json")
+    if raw_expert_models_json not in (None, ""):
+        models = []
+        for item in _parse_expert_models_json(raw_expert_models_json):
+            cleaned = _clean_quality_model_config(item)
+            if cleaned:
+                models.append(cleaned)
+            if len(models) >= EXPERT_MODE_MODEL_LIMIT:
+                break
+        expert_mode["models"] = models
+    if expert_mode:
+        sanitized["expert_mode"] = expert_mode
     return sanitized
 
 
@@ -409,6 +547,11 @@ def _normalized_llm_config(raw: dict) -> dict:
     quality_model = _clean_quality_model_config(raw.get("quality_model"))
     if quality_model:
         config["quality_model"] = quality_model
+    expert_mode = _clean_expert_mode_config(raw.get("expert_mode"))
+    if expert_mode:
+        config["expert_mode"] = expert_mode
+        if _coerce_bool(expert_mode.get("enabled"), default=False):
+            config["log_llm_payload"] = True
     return config
 
 
@@ -494,4 +637,26 @@ def build_runtime_config(project_path: str | Path, overrides: dict[str, object],
         quality_provider = normalize_provider(quality_runtime.get("model_provider"), default=provider)
         if provider_requires_api_key(quality_provider) and not str(quality_runtime.get("api_key", "") or "").strip():
             raise RuntimeError(f"quality provider={quality_provider} missing API key, please fill api_keys.sh")
+    expert_mode = merge_expert_mode_configs(saved.get("expert_mode"), runtime_overrides.get("expert_mode"))
+    if expert_mode:
+        models = []
+        for model_config in expert_mode.get("models") or []:
+            model_copy = dict(model_config)
+            model_provider = normalize_provider(model_copy.get("model_provider"), default=provider)
+            if not str(model_copy.get("api_key", "") or "").strip():
+                model_copy["api_key"] = (
+                    runtime["api_key"]
+                    if model_provider == provider
+                    else api_key_for_provider(model_provider, api_keys)
+                )
+            models.append(model_copy)
+        if models:
+            expert_mode["models"] = models
+        runtime["expert_mode"] = expert_mode
+        if _coerce_bool(expert_mode.get("enabled"), default=False):
+            runtime["log_llm_payload"] = True
+            for expert_runtime in resolve_expert_model_configs(runtime):
+                expert_provider = normalize_provider(expert_runtime.get("model_provider"), default=provider)
+                if provider_requires_api_key(expert_provider) and not str(expert_runtime.get("api_key", "") or "").strip():
+                    raise RuntimeError(f"expert provider={expert_provider} missing API key, please fill api_keys.sh")
     return runtime
