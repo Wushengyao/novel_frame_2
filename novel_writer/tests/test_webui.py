@@ -1203,6 +1203,31 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("生成模式", page.body)
         self.assertIn("/project/web/audiobook-file/chapter_0001/chapter_0001.wav", page.body)
 
+    def test_audiobook_file_supports_range_requests_for_mobile_safari(self) -> None:
+        audio_dir = self.project_path / "audiobook" / "chapter_0001"
+        audio_dir.mkdir(parents=True)
+        audio_bytes = b"RIFF01234567WAVE"
+        (audio_dir / "chapter_0001.wav").write_bytes(audio_bytes)
+
+        response = self._get_bytes(
+            "/project/web/audiobook-file/chapter_0001/chapter_0001.wav",
+            headers={"Range": "bytes=0-3"},
+        )
+
+        self.assertEqual(response.status, 206)
+        self.assertEqual(response.body, b"RIFF")
+        self.assertEqual(response.getheader("Content-Type"), "audio/wav")
+        self.assertEqual(response.getheader("Accept-Ranges"), "bytes")
+        self.assertEqual(response.getheader("Content-Range"), f"bytes 0-3/{len(audio_bytes)}")
+        self.assertEqual(response.getheader("Content-Length"), "4")
+
+        full_response = self._get_bytes("/project/web/audiobook-file/chapter_0001/chapter_0001.wav")
+
+        self.assertEqual(full_response.status, 200)
+        self.assertEqual(full_response.body, audio_bytes)
+        self.assertEqual(full_response.getheader("Content-Type"), "audio/wav")
+        self.assertEqual(full_response.getheader("Accept-Ranges"), "bytes")
+
     def test_audiobook_endpoint_accepts_reference_upload_and_creates_job(self) -> None:
         (self.project_path / "chapters" / "chapter_0001.md").write_text(
             "林宇说：“我们先检查门。”",

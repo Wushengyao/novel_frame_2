@@ -3429,15 +3429,84 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 safe_message = None
         return super().send_error(code, safe_message, explain)
 
+    def _content_type_for_file(self, file_path: Path) -> str:
+        if file_path.suffix.lower() == ".wav":
+            return "audio/wav"
+        return mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+
+    def _parse_byte_range(self, range_header: str, file_size: int) -> tuple[int, int] | None:
+        if not range_header.startswith("bytes="):
+            return None
+        range_spec = range_header[len("bytes="):].split(",", 1)[0].strip()
+        if "-" not in range_spec:
+            return None
+        start_text, end_text = range_spec.split("-", 1)
+        if not start_text:
+            if not end_text.isdigit():
+                return None
+            suffix_length = int(end_text)
+            if suffix_length <= 0 or file_size <= 0:
+                return None
+            return max(file_size - suffix_length, 0), file_size - 1
+        if not start_text.isdigit():
+            return None
+        start = int(start_text)
+        if end_text:
+            if not end_text.isdigit():
+                return None
+            end = int(end_text)
+        else:
+            end = file_size - 1
+        if start >= file_size or start > end:
+            return None
+        return start, min(end, file_size - 1)
+
+    def _copy_file_range(self, file_path: Path, start: int, length: int) -> None:
+        with file_path.open("rb") as fh:
+            fh.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = fh.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
     def _write_file(self, file_path: Path) -> None:
-        data = file_path.read_bytes()
-        content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        content_type = self._content_type_for_file(file_path)
+        file_size = file_path.stat().st_size
+        range_header = str(self.headers.get("Range") or "").strip()
+        if range_header:
+            byte_range = self._parse_byte_range(range_header, file_size)
+            if byte_range is None:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Type", content_type)
+                self._send_standard_headers()
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes */{file_size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+
+            start, end = byte_range
+            content_length = end - start + 1
+            self.send_response(HTTPStatus.PARTIAL_CONTENT)
+            self.send_header("Content-Type", content_type)
+            self._send_standard_headers()
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+            self.send_header("Content-Length", str(content_length))
+            self.end_headers()
+            self._copy_file_range(file_path, start, content_length)
+            return
+
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self._send_standard_headers()
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(file_size))
         self.end_headers()
-        self.wfile.write(data)
+        self._copy_file_range(file_path, 0, file_size)
 
     def _write_download_file(
         self,
