@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from common_utils import emit_progress, utc_now
+from common_utils import emit_progress, extract_json_object, utc_now
 from external_services import (
     AudioFrameClient,
     DEFAULT_EXTERNAL_SERVICES_CONFIG,
@@ -26,7 +26,8 @@ from external_services import (
     load_voxcpm2_runtime,
     normalize_voxcpm2_runtime,
 )
-from project_manager import acquire_project_audio_lock, load_json, load_project, save_json
+from llm_client import generate_text_with_metadata
+from project_manager import acquire_project_audio_lock, load_json, load_project, save_json, update_project_stats
 
 
 AUDIOBOOK_DIR_NAME = "audiobook"
@@ -38,6 +39,17 @@ GENERATION_MODE_ADVANCED = "advanced"
 GENERATION_MODE_SIMPLE = "simple"
 GENERATION_MODES = {GENERATION_MODE_ADVANCED, GENERATION_MODE_SIMPLE}
 VOICE_SEED_MODULUS = 2_147_483_647
+SEGMENT_TYPE_NARRATION = "narration"
+SEGMENT_TYPE_DIALOGUE = "dialogue"
+SEGMENT_TYPE_INNER_MONOLOGUE = "inner_monologue"
+SEGMENT_TYPE_QUOTED_TEXT = "quoted_text"
+AUDIOBOOK_SEGMENT_TYPES = {
+    SEGMENT_TYPE_NARRATION,
+    SEGMENT_TYPE_DIALOGUE,
+    SEGMENT_TYPE_INNER_MONOLOGUE,
+    SEGMENT_TYPE_QUOTED_TEXT,
+}
+LLM_SEGMENT_PROMPT_TARGET_CHARS = 12000
 
 DEFAULT_SPLIT_CONFIG = {
     "target_chars": 80,
@@ -664,41 +676,87 @@ def _split_non_dialogue_sentences(text: str) -> list[str]:
     return pieces
 
 
-def parse_chapter_segments(
-    chapter_text: str,
-    characters: dict | list[dict],
+def _character_brief(characters: dict | list[dict]) -> list[dict]:
+    items = characters if isinstance(characters, list) else _all_characters(characters)
+    briefs = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "") or "").strip()
+        if not name:
+            continue
+        briefs.append(
+            {
+                "name": name,
+                "role": str(item.get("role", "") or "").strip(),
+                "description": _normalize_text(item.get("description", ""))[:120],
+            }
+        )
+    return briefs
+
+
+def _make_text_unit(
+    units: list[dict],
     *,
-    split_config: dict | None = None,
-) -> list[dict]:
-    config = dict(DEFAULT_SPLIT_CONFIG)
-    config.update(split_config or {})
+    kind: str,
+    text: str,
+    paragraph: str,
+    paragraph_index: int,
+    rule_type: str,
+    rule_speaker: str,
+    before: str = "",
+    after: str = "",
+) -> None:
+    clean = _normalize_text(text)
+    if not clean:
+        return
+    units.append(
+        {
+            "id": f"unit_{len(units) + 1:04d}",
+            "kind": kind,
+            "text": clean,
+            "paragraph_index": paragraph_index,
+            "paragraph": _normalize_text(paragraph)[:600],
+            "before": _normalize_text(before)[-160:],
+            "after": _normalize_text(after)[:160],
+            "rule_type": rule_type,
+            "rule_speaker": rule_speaker or NARRATOR_SPEAKER,
+        }
+    )
+
+
+def _build_segment_units(chapter_text: str, characters: dict | list[dict]) -> list[dict]:
     character_names = _character_names(characters)
     text = _clean_markdown_text(chapter_text)
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
-    segments: list[dict] = []
+    units: list[dict] = []
     previous_speaker = ""
 
-    for paragraph in paragraphs:
+    for paragraph_index, paragraph in enumerate(paragraphs, start=1):
         spans = _find_quote_spans(paragraph)
         if not spans:
             for sentence in _split_non_dialogue_sentences(paragraph):
                 inner_speaker = _inner_monologue_speaker(sentence, character_names)
                 if inner_speaker:
-                    _append_segment(
-                        segments,
-                        segment_type="inner_monologue",
-                        speaker=inner_speaker,
+                    _make_text_unit(
+                        units,
+                        kind="text",
                         text=sentence,
-                        split_config=config,
+                        paragraph=paragraph,
+                        paragraph_index=paragraph_index,
+                        rule_type=SEGMENT_TYPE_INNER_MONOLOGUE,
+                        rule_speaker=inner_speaker,
                     )
                     previous_speaker = inner_speaker
                 else:
-                    _append_segment(
-                        segments,
-                        segment_type="narration",
-                        speaker=NARRATOR_SPEAKER,
+                    _make_text_unit(
+                        units,
+                        kind="text",
                         text=sentence,
-                        split_config=config,
+                        paragraph=paragraph,
+                        paragraph_index=paragraph_index,
+                        rule_type=SEGMENT_TYPE_NARRATION,
+                        rule_speaker=NARRATOR_SPEAKER,
                     )
             continue
 
@@ -706,34 +764,309 @@ def parse_chapter_segments(
         for start, end, quoted_text in spans:
             before = paragraph[cursor:start]
             if before.strip():
-                _append_segment(
-                    segments,
-                    segment_type="narration",
-                    speaker=NARRATOR_SPEAKER,
+                _make_text_unit(
+                    units,
+                    kind="text",
                     text=before,
-                    split_config=config,
+                    paragraph=paragraph,
+                    paragraph_index=paragraph_index,
+                    rule_type=SEGMENT_TYPE_NARRATION,
+                    rule_speaker=NARRATOR_SPEAKER,
                 )
             speaker = _resolve_quote_speaker(paragraph[:start], paragraph[end:], character_names, previous_speaker)
-            _append_segment(
-                segments,
-                segment_type="dialogue",
-                speaker=speaker,
+            _make_text_unit(
+                units,
+                kind="quote",
                 text=quoted_text,
-                split_config=config,
+                paragraph=paragraph,
+                paragraph_index=paragraph_index,
+                rule_type=SEGMENT_TYPE_DIALOGUE,
+                rule_speaker=speaker,
+                before=paragraph[:start],
+                after=paragraph[end:],
             )
             previous_speaker = speaker if speaker != NARRATOR_SPEAKER else previous_speaker
             cursor = end
         tail = paragraph[cursor:]
         if tail.strip():
-            _append_segment(
-                segments,
-                segment_type="narration",
-                speaker=NARRATOR_SPEAKER,
+            _make_text_unit(
+                units,
+                kind="text",
                 text=tail,
-                split_config=config,
+                paragraph=paragraph,
+                paragraph_index=paragraph_index,
+                rule_type=SEGMENT_TYPE_NARRATION,
+                rule_speaker=NARRATOR_SPEAKER,
             )
 
+    return units
+
+
+def _append_units_with_assignments(
+    units: list[dict],
+    assignments_by_id: dict[str, dict],
+    character_names: list[str],
+    split_config: dict,
+) -> list[dict]:
+    aliases = {
+        "narrator": SEGMENT_TYPE_NARRATION,
+        "narration": SEGMENT_TYPE_NARRATION,
+        "旁白": SEGMENT_TYPE_NARRATION,
+        "dialog": SEGMENT_TYPE_DIALOGUE,
+        "dialogue": SEGMENT_TYPE_DIALOGUE,
+        "speech": SEGMENT_TYPE_DIALOGUE,
+        "台词": SEGMENT_TYPE_DIALOGUE,
+        "人物语言": SEGMENT_TYPE_DIALOGUE,
+        "inner": SEGMENT_TYPE_INNER_MONOLOGUE,
+        "inner_monologue": SEGMENT_TYPE_INNER_MONOLOGUE,
+        "thought": SEGMENT_TYPE_INNER_MONOLOGUE,
+        "心理活动": SEGMENT_TYPE_INNER_MONOLOGUE,
+        "quoted_text": SEGMENT_TYPE_QUOTED_TEXT,
+        "quote": SEGMENT_TYPE_QUOTED_TEXT,
+        "citation": SEGMENT_TYPE_QUOTED_TEXT,
+        "引用": SEGMENT_TYPE_QUOTED_TEXT,
+    }
+
+    def match_character(value: str) -> str:
+        clean = str(value or "").strip().strip("：:，,。.!?！？“”\"'「」『』（）()[]【】")
+        if clean in character_names:
+            return clean
+        matches = [name for name in character_names if name and name in clean]
+        return matches[0] if len(matches) == 1 else ""
+
+    segments: list[dict] = []
+    for unit in units:
+        assignment = assignments_by_id.get(str(unit.get("id") or ""), {})
+        raw_type = str(assignment.get("type") or assignment.get("segment_type") or unit.get("rule_type") or "").strip()
+        segment_type = aliases.get(raw_type.lower()) or aliases.get(raw_type) or str(unit.get("rule_type") or "")
+        if segment_type not in AUDIOBOOK_SEGMENT_TYPES:
+            segment_type = str(unit.get("rule_type") or SEGMENT_TYPE_NARRATION)
+
+        raw_speaker = str(assignment.get("speaker") or "").strip()
+        rule_speaker = str(unit.get("rule_speaker") or NARRATOR_SPEAKER).strip()
+        if segment_type in {SEGMENT_TYPE_NARRATION, SEGMENT_TYPE_QUOTED_TEXT}:
+            speaker = NARRATOR_SPEAKER
+        elif match_character(raw_speaker):
+            speaker = match_character(raw_speaker)
+        elif match_character(rule_speaker):
+            speaker = match_character(rule_speaker)
+        else:
+            speaker = NARRATOR_SPEAKER
+
+        _append_segment(
+            segments,
+            segment_type=segment_type,
+            speaker=speaker,
+            text=str(unit.get("text") or ""),
+            split_config=split_config,
+        )
     return segments
+
+
+def _build_audiobook_segment_prompt(units: list[dict], characters: dict | list[dict]) -> str:
+    payload = {
+        "task": "classify_audiobook_text_units",
+        "allowed_types": [
+            SEGMENT_TYPE_NARRATION,
+            SEGMENT_TYPE_DIALOGUE,
+            SEGMENT_TYPE_INNER_MONOLOGUE,
+            SEGMENT_TYPE_QUOTED_TEXT,
+        ],
+        "speaker_rules": {
+            SEGMENT_TYPE_NARRATION: "speaker 必须为 旁白",
+            SEGMENT_TYPE_QUOTED_TEXT: "speaker 必须为 旁白；用于格言、标语、标题、转述原文、文件内容等只是被引号包住的引用，不是角色正在说话",
+            SEGMENT_TYPE_DIALOGUE: "speaker 必须为 characters 中实际正在说话的人物名",
+            SEGMENT_TYPE_INNER_MONOLOGUE: "speaker 必须为正在思考/心理活动的人物名",
+        },
+        "characters": _character_brief(characters),
+        "units": [
+            {
+                "id": unit["id"],
+                "kind": unit["kind"],
+                "text": unit["text"],
+                "paragraph_index": unit["paragraph_index"],
+                "before": unit.get("before", ""),
+                "after": unit.get("after", ""),
+                "paragraph": unit.get("paragraph", ""),
+                "rule_guess": {
+                    "type": unit.get("rule_type", ""),
+                    "speaker": unit.get("rule_speaker", ""),
+                },
+            }
+            for unit in units
+        ],
+        "return_schema": {
+            "segments": [
+                {
+                    "id": "unit_0001",
+                    "type": "narration | dialogue | inner_monologue | quoted_text",
+                    "speaker": "旁白 or exact character name",
+                    "confidence": 0.0,
+                    "reason": "short Chinese reason",
+                }
+            ]
+        },
+    }
+    return (
+        "你是有声小说分镜和说话人识别器。请只根据上下文判断每个 unit 的朗读归属，不要改写文本。\n"
+        "重点区分：旁白、人物语言、人物心理活动、以及只是被引号包住的引用文本。\n"
+        "只有角色在现场实际开口说话时才标为 dialogue；心想、暗想、意识流、内心判断标为 inner_monologue；"
+        "标语、书名、文件内容、被回忆或转述的原句、术语强调等不是现场发言的引号内容标为 quoted_text。\n"
+        "输出必须是 JSON object，且 segments 覆盖每一个输入 id。\n\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+    )
+
+
+def _llm_unit_batches(units: list[dict], *, target_chars: int = LLM_SEGMENT_PROMPT_TARGET_CHARS) -> list[list[dict]]:
+    batches: list[list[dict]] = []
+    current: list[dict] = []
+    current_chars = 0
+    for unit in units:
+        unit_chars = len(json.dumps(unit, ensure_ascii=False))
+        if current and current_chars + unit_chars > target_chars:
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(unit)
+        current_chars += unit_chars
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _merge_llm_metadata(metadata_items: list[dict]) -> dict:
+    if not metadata_items:
+        return {}
+    merged = dict(metadata_items[-1])
+    usage: dict[str, int] = {}
+    for metadata in metadata_items:
+        item_usage = metadata.get("usage") if isinstance(metadata, dict) else {}
+        if not isinstance(item_usage, dict):
+            continue
+        for key, value in item_usage.items():
+            try:
+                usage[key] = int(usage.get(key, 0)) + int(value or 0)
+            except (TypeError, ValueError):
+                continue
+    if usage:
+        merged["usage"] = usage
+    return merged
+
+
+def _llm_config_available(config: dict | None) -> bool:
+    if not isinstance(config, dict) or not config.get("model_provider"):
+        return False
+    provider = str(config.get("model_provider") or "").strip().lower()
+    if provider in {"ollama", "llama_cpp"}:
+        return bool(config.get("api_base") and (config.get("model") or config.get("model_name")))
+    if str(config.get("api_key") or "").strip():
+        return True
+    api_base = str(config.get("api_base") or "").strip().lower()
+    return provider == "openai_compatible" and (
+        "127.0.0.1" in api_base or "localhost" in api_base or "0.0.0.0" in api_base
+    )
+
+
+def _parse_segments_with_llm(
+    chapter_text: str,
+    characters: dict | list[dict],
+    *,
+    llm_config: dict,
+    split_config: dict,
+) -> tuple[list[dict], dict]:
+    units = _build_segment_units(chapter_text, characters)
+    if not units:
+        return [], {}
+    assignments_by_id: dict[str, dict] = {}
+    metadata_items: list[dict] = []
+    for batch_index, batch in enumerate(_llm_unit_batches(units), start=1):
+        response_text, metadata = generate_text_with_metadata(
+            _build_audiobook_segment_prompt(batch, characters),
+            llm_config,
+            log_context={"phase": "audiobook", "task": "segment_classification", "batch_index": batch_index},
+            system_prompt=(
+                "你只输出 JSON，不输出解释。你擅长中文小说文本中旁白、台词、心理活动、引号引用的精确归类。"
+            ),
+            response_format="json",
+        )
+        metadata_items.append(metadata)
+        payload = extract_json_object(response_text, "Could not parse JSON from audiobook segment classification response.")
+        raw_segments = payload.get("segments")
+        if not isinstance(raw_segments, list):
+            raise ValueError("Audiobook segment classification response is missing segments.")
+        assignments_by_id.update(
+            {
+                str(item.get("id") or "").strip(): item
+                for item in raw_segments
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            }
+        )
+    if not assignments_by_id:
+        raise ValueError("Audiobook segment classification response did not include any usable segment ids.")
+    return _append_units_with_assignments(
+        units,
+        assignments_by_id,
+        _character_names(characters),
+        split_config,
+    ), _merge_llm_metadata(metadata_items)
+
+
+def _update_audiobook_llm_stats(project_path: str | Path | None, *, success: bool, metadata: dict | None = None) -> None:
+    if not project_path:
+        return
+    try:
+        update_project_stats(
+            str(project_path),
+            phase="audiobook",
+            success=success,
+            usage=(metadata or {}).get("usage") if isinstance(metadata, dict) else None,
+            metadata=metadata,
+        )
+    except Exception:
+        return
+
+
+def _parse_chapter_segments_by_rules(
+    chapter_text: str,
+    characters: dict | list[dict],
+    *,
+    split_config: dict | None = None,
+) -> list[dict]:
+    config = dict(DEFAULT_SPLIT_CONFIG)
+    config.update(split_config or {})
+    units = _build_segment_units(chapter_text, characters)
+    return _append_units_with_assignments(units, {}, _character_names(characters), config)
+
+
+def parse_chapter_segments(
+    chapter_text: str,
+    characters: dict | list[dict],
+    *,
+    split_config: dict | None = None,
+    llm_config: dict | None = None,
+    progress_callback=None,
+    project_path: str | Path | None = None,
+) -> list[dict]:
+    config = dict(DEFAULT_SPLIT_CONFIG)
+    config.update(split_config or {})
+
+    if _llm_config_available(llm_config):
+        try:
+            emit_progress(progress_callback, "audiobook_segment_llm", "正在用 LLM 分辨旁白、台词、心理活动和引号引用")
+            segments, metadata = _parse_segments_with_llm(
+                chapter_text,
+                characters,
+                llm_config=llm_config or {},
+                split_config=config,
+            )
+            _update_audiobook_llm_stats(project_path, success=True, metadata=metadata)
+            if segments:
+                return segments
+        except Exception:
+            _update_audiobook_llm_stats(project_path, success=False, metadata=None)
+            emit_progress(progress_callback, "audiobook_segment_rules", "LLM 识别失败，已回退到本地规则分辨")
+
+    return _parse_chapter_segments_by_rules(chapter_text, characters, split_config=config)
 
 
 def _voice_float(entry: dict, key: str) -> float:
@@ -1216,6 +1549,7 @@ def generate_audiobook_chapter(
     force: bool = False,
     narrator_preset: str = "",
     generation_mode: str = GENERATION_MODE_ADVANCED,
+    llm_config: dict | None = None,
     runtime_overrides: dict | None = None,
     split_config: dict | None = None,
     progress_callback=None,
@@ -1229,6 +1563,7 @@ def generate_audiobook_chapter(
                 force=force,
                 narrator_preset=narrator_preset,
                 generation_mode=generation_mode,
+                llm_config=llm_config,
                 runtime_overrides=runtime_overrides,
                 split_config=split_config,
                 progress_callback=progress_callback,
@@ -1257,7 +1592,14 @@ def generate_audiobook_chapter(
     split_config_resolved = dict(DEFAULT_SPLIT_CONFIG)
     split_config_resolved.update(split_config or {})
     chapter_text = chapter_file.read_text(encoding="utf-8")
-    segments = parse_chapter_segments(chapter_text, project_data.get("characters") or {}, split_config=split_config_resolved)
+    segments = parse_chapter_segments(
+        chapter_text,
+        project_data.get("characters") or {},
+        split_config=split_config_resolved,
+        llm_config=llm_config,
+        progress_callback=progress_callback,
+        project_path=project_path,
+    )
     if not segments:
         raise RuntimeError("章节中没有可合成的文本片段。")
 
@@ -1323,6 +1665,7 @@ def generate_audiobook_chapters(
     force: bool = False,
     narrator_preset: str = "",
     generation_mode: str = GENERATION_MODE_ADVANCED,
+    llm_config: dict | None = None,
     runtime_overrides: dict | None = None,
     progress_callback=None,
     lock_project: bool = True,
@@ -1335,6 +1678,7 @@ def generate_audiobook_chapters(
                 force=force,
                 narrator_preset=narrator_preset,
                 generation_mode=generation_mode,
+                llm_config=llm_config,
                 runtime_overrides=runtime_overrides,
                 progress_callback=progress_callback,
                 lock_project=False,
@@ -1357,6 +1701,7 @@ def generate_audiobook_chapters(
                 force=force,
                 narrator_preset=narrator_preset,
                 generation_mode=generation_mode,
+                llm_config=llm_config,
                 runtime_overrides=runtime_overrides,
                 progress_callback=progress_callback,
                 lock_project=False,

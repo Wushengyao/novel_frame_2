@@ -5917,8 +5917,14 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         narrator_upload = self._uploaded_file("narrator_reference_audio")
         character_upload = self._uploaded_file("character_reference_audio")
         character_name = (form.get("character_voice_name") or "").strip()
+        api_keys = _load_api_keys()
         cancel_checkpoint = None
         try:
+            llm_runtime_config = None
+            try:
+                llm_runtime_config = _build_runtime_config(project_path, {}, api_keys)
+            except Exception:
+                llm_runtime_config = None
             if _active_audiobook_job(project_path) is not None:
                 raise RuntimeError("当前项目已有有声章节生成任务正在运行，请稍后再生成有声章节。")
             if character_upload and not character_name:
@@ -5967,6 +5973,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 force=bool(form.get("force")),
                 narrator_preset=(form.get("narrator_preset") or "").strip(),
                 generation_mode=normalize_generation_mode(form.get("generation_mode")),
+                llm_config=llm_runtime_config,
                 progress_callback=progress_callback,
             )
             result = results[0]

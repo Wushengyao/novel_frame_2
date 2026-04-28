@@ -812,6 +812,7 @@ def main() -> None:
     )
     audiobook_parser.add_argument("--all", action="store_true", help="Generate audiobook WAV files for all chapters")
     audiobook_parser.add_argument("--force", action="store_true", help="Regenerate existing audiobook files")
+    audiobook_parser.add_argument("--config", help="Optional config.json for LLM speaker classification")
     audiobook_parser.add_argument("--narrator-preset", default="", help="Narrator preset id to use")
     audiobook_parser.add_argument(
         "--audiobook-mode",
@@ -1037,12 +1038,14 @@ def main() -> None:
             chapter_refs = chapter_refs_for_all(args.project)
         elif not chapter_refs:
             chapter_refs = [args.chapter]
+        config = extract_llm_config(args.config) if args.config else load_runtime_config(args.project)
         results = generate_audiobook_chapters(
             args.project,
             chapter_refs=chapter_refs,
             force=args.force,
             narrator_preset=args.narrator_preset,
             generation_mode=args.audiobook_mode,
+            llm_config=config,
             runtime_overrides=_extract_audiobook_overrides(args) or None,
         )
         print(f"Processed audiobook chapters: {len(results)}")

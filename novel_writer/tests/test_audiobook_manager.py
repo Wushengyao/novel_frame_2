@@ -68,6 +68,38 @@ class AudiobookManagerTests(unittest.TestCase):
         self.assertEqual(dialogue[1]["text"], "我去看控制板。")
         self.assertEqual(inner[0]["speaker"], "林宇")
 
+    def test_parse_chapter_segments_uses_llm_to_distinguish_quote_and_inner_voice(self) -> None:
+        characters = load_json(str(self.project_path / "characters.json"))
+        chapter_text = "林宇想起墙上的标语：“安全第一。”\n\n苏浅握紧工具，心里想，不能让他发现。"
+        response_payload = {
+            "segments": [
+                {"id": "unit_0001", "type": "narration", "speaker": "旁白", "confidence": 0.96},
+                {"id": "unit_0002", "type": "quoted_text", "speaker": "旁白", "confidence": 0.98},
+                {"id": "unit_0003", "type": "inner_monologue", "speaker": "苏浅", "confidence": 0.97},
+            ]
+        }
+        llm_config = {
+            "model_provider": "ollama",
+            "model": "llama3.2",
+            "api_base": "http://127.0.0.1:11434/v1",
+        }
+
+        with patch(
+            "audiobook_manager.generate_text_with_metadata",
+            return_value=(json.dumps(response_payload, ensure_ascii=False), {"usage": {"total_tokens": 12}}),
+        ) as mocked_llm:
+            segments = parse_chapter_segments(chapter_text, characters, llm_config=llm_config)
+
+        prompt = mocked_llm.call_args.args[0]
+        self.assertIn("quoted_text", prompt)
+        self.assertIn("人物心理活动", prompt)
+        quoted = [item for item in segments if item["type"] == "quoted_text"]
+        inner = [item for item in segments if item["type"] == "inner_monologue"]
+        self.assertEqual(quoted[0]["speaker"], "旁白")
+        self.assertEqual(quoted[0]["text"], "安全第一。")
+        self.assertEqual(inner[0]["speaker"], "苏浅")
+        self.assertEqual(inner[0]["text"], "苏浅握紧工具，心里想，不能让他发现。")
+
     def test_split_text_for_tts_keeps_chunks_under_hard_limit(self) -> None:
         text = "。".join(["这是一段需要稳定切分的长句子" * 4 for _ in range(5)])
 
