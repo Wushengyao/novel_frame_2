@@ -119,8 +119,8 @@ PUBLIC_PATHS = {"/login", "/healthz"}
 API_PATH_PREFIX = "/api/"
 EXTERNAL_SERVICE_HEALTH_TIMEOUT_SECONDS = 3.0
 
-JOB_ACTIVE_STATUSES = {"queued", "running"}
-JOB_FINISHED_STATUSES = {"succeeded", "failed"}
+JOB_ACTIVE_STATUSES = {"queued", "running", "canceling"}
+JOB_FINISHED_STATUSES = {"succeeded", "failed", "canceled"}
 PROGRESSION_JOB_KINDS = {"progression_options", "progression_options_auto"}
 AUDIOBOOK_JOB_KINDS = {"audiobook"}
 
@@ -128,6 +128,10 @@ _LOGIN_ATTEMPT_GUARDS: dict[tuple[int, int, int], LoginAttemptGuard] = {}
 _LOGIN_ATTEMPT_GUARDS_LOCK = threading.Lock()
 _EXTERNAL_SERVICE_HEALTH_LOCK = threading.Lock()
 _EXTERNAL_SERVICE_HEALTH_CACHE: dict = {}
+
+
+class JobCanceled(RuntimeError):
+    """Raised inside a background thread when the user requests cancellation."""
 
 
 class BackgroundJobRegistry:
@@ -181,6 +185,8 @@ class BackgroundJobRegistry:
                 "result_url": "",
                 "result_label": "",
                 "error": "",
+                "cancel_requested": False,
+                "cleanup_summary": {},
                 "events": [],
             }
             self._append_event_locked(job, "queued", job["message"])
@@ -244,6 +250,8 @@ class BackgroundJobRegistry:
                 self._append_event_locked(job, job.get("stage", ""), job.get("message", ""))
 
     def mark_running(self, job_id: str, message: str = "后台任务已启动") -> None:
+        if self.is_cancel_requested(job_id):
+            return
         self.update(job_id, status="running", stage="running", message=message)
 
     def progress(self, job_id: str, payload: dict) -> None:
@@ -274,6 +282,7 @@ class BackgroundJobRegistry:
             result_label=result_label,
             project_id=project_id,
             project_path=str(Path(project_path).resolve()) if project_path else None,
+            cancel_requested=False,
         )
 
     def finish_failure(self, job_id: str, error: str) -> None:
@@ -283,7 +292,40 @@ class BackgroundJobRegistry:
             stage="failed",
             message="任务执行失败",
             error=error,
+            cancel_requested=False,
         )
+
+    def finish_canceled(self, job_id: str, *, message: str = "任务已取消", cleanup_summary: dict | None = None) -> None:
+        self.update(
+            job_id,
+            status="canceled",
+            stage="canceled",
+            message=message,
+            error="",
+            cleanup_summary=cleanup_summary or {},
+            cancel_requested=False,
+        )
+
+    def request_cancel(self, job_id: str) -> dict | None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            if job.get("status") not in JOB_ACTIVE_STATUSES:
+                return self._copy_job(job)
+            job["cancel_requested"] = True
+            if job.get("status") != "canceling":
+                job["status"] = "canceling"
+                job["stage"] = "canceling"
+                job["message"] = "已请求取消，正在等待当前步骤停止并清理文件"
+                job["updated_at"] = utc_now()
+                self._append_event_locked(job, "canceling", job["message"])
+            return self._copy_job(job)
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return bool(job and job.get("cancel_requested"))
 
     def get(self, job_id: str) -> dict | None:
         with self._lock:
@@ -358,6 +400,156 @@ def _active_audiobook_job(project_path: Path) -> dict | None:
 
 def _audiobook_conflict_message(action: str) -> str:
     return f"有声章节正在生成中，可以继续续写，但暂时不能{action}。请等音频任务完成后再试。"
+
+
+PROJECT_TREE_RUNTIME_PRESERVE_PATHS = ("audiobook", ".project_audio.lock")
+PROJECT_TREE_RUNTIME_IGNORE_NAMES = {".project_write.lock", *PROJECT_TREE_RUNTIME_PRESERVE_PATHS}
+
+
+def _copytree_ignore_project_lock(_dir: str, names: list[str]) -> set[str]:
+    return {name for name in PROJECT_TREE_RUNTIME_IGNORE_NAMES if name in names}
+
+
+class ProjectTreeCheckpoint:
+    def __init__(self, project_path: Path) -> None:
+        self.project_path = project_path.resolve()
+        self.backup_root = Path(tempfile.mkdtemp(prefix="novel_writer_job_rollback_"))
+        self.backup_path = self.backup_root / "project"
+        self.existed = self.project_path.exists()
+        if self.existed:
+            shutil.copytree(self.project_path, self.backup_path, ignore=_copytree_ignore_project_lock)
+
+    def restore(self) -> dict:
+        preserved = [
+            relative_path
+            for relative_path in PROJECT_TREE_RUNTIME_PRESERVE_PATHS
+            if (self.project_path / relative_path).exists()
+        ]
+        if self.project_path.exists() and self.existed:
+            for child in self.project_path.iterdir():
+                if child.name in PROJECT_TREE_RUNTIME_PRESERVE_PATHS:
+                    continue
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink(missing_ok=True)
+        elif self.project_path.exists():
+            shutil.rmtree(self.project_path)
+        if self.existed:
+            self.project_path.mkdir(parents=True, exist_ok=True)
+            for source in self.backup_path.iterdir():
+                target = self.project_path / source.name
+                if source.is_dir() and not source.is_symlink():
+                    shutil.copytree(source, target, ignore=_copytree_ignore_project_lock)
+                else:
+                    shutil.copy2(source, target)
+            action = "restored"
+        else:
+            action = "removed_created_project"
+        return {
+            "action": action,
+            "project_path": str(self.project_path),
+            "preserved": preserved,
+        }
+
+    def discard(self) -> None:
+        shutil.rmtree(self.backup_root, ignore_errors=True)
+
+
+class ProjectSubtreeCheckpoint:
+    def __init__(self, project_path: Path, relative_paths: list[str]) -> None:
+        self.project_path = project_path.resolve()
+        self.relative_paths = [str(item).strip("/\\") for item in relative_paths if str(item).strip("/\\")]
+        self.backup_root = Path(tempfile.mkdtemp(prefix="novel_writer_job_subtree_"))
+        self.existing: set[str] = set()
+        for relative_path in self.relative_paths:
+            source = self.project_path / relative_path
+            if not source.exists():
+                continue
+            self.existing.add(relative_path)
+            target = self.backup_root / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
+                shutil.copytree(source, target, ignore=_copytree_ignore_project_lock)
+            else:
+                shutil.copy2(source, target)
+
+    def restore(self) -> dict:
+        restored = []
+        removed = []
+        for relative_path in self.relative_paths:
+            target = self.project_path / relative_path
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+            backup = self.backup_root / relative_path
+            if relative_path in self.existing:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if backup.is_dir():
+                    shutil.copytree(backup, target, ignore=_copytree_ignore_project_lock)
+                elif backup.exists():
+                    shutil.copy2(backup, target)
+                restored.append(relative_path)
+            else:
+                removed.append(relative_path)
+        return {"restored": restored, "removed": removed}
+
+    def discard(self) -> None:
+        shutil.rmtree(self.backup_root, ignore_errors=True)
+
+
+class NewFilesCleaner:
+    def __init__(self, project_path: Path, relative_dirs: list[str]) -> None:
+        self.project_path = project_path.resolve()
+        self.relative_dirs = [str(item).strip("/\\") for item in relative_dirs if str(item).strip("/\\")]
+        self.before = self._scan()
+
+    def _scan(self) -> set[str]:
+        paths: set[str] = set()
+        for relative_dir in self.relative_dirs:
+            root = self.project_path / relative_dir
+            if not root.exists():
+                continue
+            for item in root.rglob("*"):
+                try:
+                    paths.add(str(item.relative_to(self.project_path)).replace("\\", "/"))
+                except ValueError:
+                    continue
+        return paths
+
+    def restore(self) -> dict:
+        after = self._scan()
+        created = sorted(after - self.before, key=lambda item: item.count("/"), reverse=True)
+        removed = []
+        for relative_path in created:
+            target = self.project_path / relative_path
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target)
+                elif target.exists():
+                    target.unlink()
+                removed.append(relative_path)
+            except OSError:
+                continue
+        return {"removed_created": removed}
+
+    def discard(self) -> None:
+        return None
+
+
+def _cleanup_checkpoint(checkpoint) -> dict:
+    if checkpoint is None:
+        return {}
+    try:
+        return checkpoint.restore()
+    finally:
+        checkpoint.discard()
+
+
+def _discard_checkpoint(checkpoint) -> None:
+    if checkpoint is not None:
+        checkpoint.discard()
 
 
 def _looks_like_mojibake(text: str) -> bool:
@@ -1200,7 +1392,11 @@ def _enqueue_progression_job(
             "project_path": str(project_path.resolve()),
         }
 
-    _start_background_job(job["id"], runner)
+    _start_background_job(
+        job["id"],
+        runner,
+        cancel_checkpoint=NewFilesCleaner(project_path, ["progression_sessions"]),
+    )
     return job
 
 
@@ -1357,6 +1553,7 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_cal
 
     resolved_model_name = _resolve_model_name_from_form(form)
     config = {
+        "project_id": (form.get("project_id") or "").strip(),
         "project_name": (form.get("project_name") or "Novel Project").strip(),
         "project_description": (form.get("project_description") or "").strip(),
         "project_path": str(OUTPUT_DIR / "novel_project_{project_id}"),
@@ -1614,8 +1811,10 @@ def _job_status_label(status: str) -> str:
     mapping = {
         "queued": "排队中",
         "running": "运行中",
+        "canceling": "取消中",
         "succeeded": "已完成",
         "failed": "失败",
+        "canceled": "已取消",
     }
     return mapping.get(status, status or "unknown")
 
@@ -1624,8 +1823,10 @@ def _job_status_class(status: str) -> str:
     mapping = {
         "queued": "status-queued",
         "running": "status-running",
+        "canceling": "status-canceling",
         "succeeded": "status-succeeded",
         "failed": "status-failed",
+        "canceled": "status-canceled",
     }
     return mapping.get(status, "status-neutral")
 
@@ -1901,18 +2102,41 @@ def _render_job_error_box(job: dict) -> str:
     )
 
 
+def _job_can_cancel(job: dict) -> bool:
+    return job.get("status") in JOB_ACTIVE_STATUSES
+
+
+def _render_job_actions(job: dict) -> str:
+    parts = []
+    if _job_can_cancel(job):
+        disabled = " disabled" if job.get("status") == "canceling" else ""
+        button_text = "正在取消" if job.get("status") == "canceling" else "取消任务"
+        parts.append(
+            f"""
+            <form class="inline-form" method="post" action="/job/{escape(job.get('id', ''))}/cancel">
+              <button class="danger-button" type="submit"{disabled}>{button_text}</button>
+            </form>
+            """
+        )
+    if job.get("result_url"):
+        parts.append(
+            f'<a class="ghost-button" href="{escape(job["result_url"])}">'
+            f'{escape(job.get("result_label") or "查看结果")}</a>'
+        )
+    elif job.get("project_id"):
+        parts.append(f'<a class="ghost-button" href="/project/{escape(job["project_id"])}">返回项目页</a>')
+    else:
+        parts.append('<a class="ghost-button" href="/projects">返回项目列表</a>')
+    return "".join(parts)
+
+
 def _render_job_cards(jobs: list[dict], empty_text: str) -> str:
     if not jobs:
         return f'<p class="muted">{escape(empty_text)}</p>'
 
     cards = []
     for job in jobs:
-        action = ""
-        if job.get("result_url"):
-            action = (
-                f'<a class="job-link" href="{escape(job["result_url"])}">'
-                f'{escape(job.get("result_label") or "查看结果")}</a>'
-            )
+        action = f'<div class="button-row">{_render_job_actions(job)}</div>'
         progress = ""
         current = int(job.get("current") or 0)
         total = int(job.get("total") or 0)
@@ -2242,15 +2466,46 @@ def _render_admin_panel(
     """
 
 
-def _start_background_job(job_id: str, runner) -> None:
+def _start_background_job(job_id: str, runner, *, cancel_checkpoint=None) -> None:
+    def _raise_if_canceled() -> None:
+        if JOB_REGISTRY.is_cancel_requested(job_id):
+            raise JobCanceled("任务已由用户取消。")
+
+    def _progress(payload: dict) -> None:
+        _raise_if_canceled()
+        JOB_REGISTRY.progress(job_id, payload)
+        _raise_if_canceled()
+
     def _target() -> None:
-        JOB_REGISTRY.mark_running(job_id)
+        checkpoint_discarded = False
         try:
-            result = runner(lambda payload: JOB_REGISTRY.progress(job_id, payload))
+            _raise_if_canceled()
+            JOB_REGISTRY.mark_running(job_id)
+            result = runner(_progress)
+            _raise_if_canceled()
+        except JobCanceled:
+            try:
+                cleanup_summary = _cleanup_checkpoint(cancel_checkpoint)
+                checkpoint_discarded = True
+            except Exception as exc:
+                checkpoint_discarded = True
+                error_text = f"任务已取消，但清理失败: {exc}\n\n{traceback.format_exc()}"
+                JOB_REGISTRY.finish_failure(job_id, error_text)
+                return
+            else:
+                JOB_REGISTRY.finish_canceled(
+                    job_id,
+                    message="任务已取消，项目状态和临时文件已清理",
+                    cleanup_summary=cleanup_summary,
+                )
+            return
         except Exception as exc:
             error_text = f"{exc}\n\n{traceback.format_exc()}"
             JOB_REGISTRY.finish_failure(job_id, error_text)
             return
+        finally:
+            if not checkpoint_discarded:
+                _discard_checkpoint(cancel_checkpoint)
 
         JOB_REGISTRY.finish_success(
             job_id,
@@ -2585,6 +2840,15 @@ def _render_page(
     .ghost-button:hover {{
       background: rgba(255,255,255,0.9);
     }}
+    .danger-button {{
+      background: rgba(180, 79, 47, 0.08);
+      color: #7f2d2d;
+      border: 1px solid rgba(180, 79, 47, 0.22);
+      padding: 10px 14px;
+    }}
+    .danger-button:hover {{
+      background: rgba(180, 79, 47, 0.14);
+    }}
     .topbar-actions {{
       display: flex;
       align-items: center;
@@ -2657,6 +2921,10 @@ def _render_page(
       color: #2f5c7d;
       background: rgba(168, 206, 236, 0.4);
     }}
+    .status-canceling {{
+      color: #6a4c93;
+      background: rgba(197, 178, 226, 0.42);
+    }}
     .status-succeeded {{
       color: #35643b;
       background: rgba(170, 214, 176, 0.42);
@@ -2664,6 +2932,10 @@ def _render_page(
     .status-failed {{
       color: #7f2d2d;
       background: rgba(232, 177, 177, 0.4);
+    }}
+    .status-canceled {{
+      color: #6b5a4a;
+      background: rgba(195, 183, 170, 0.45);
     }}
     .job-progress {{
       width: 100%;
@@ -3107,6 +3379,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             return
 
         parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
+        if len(parts) == 3 and parts[0] == "job" and parts[2] == "cancel":
+            self._handle_job_cancel(parts[1])
+            return
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "continue":
             self._handle_continue_async(parts[1], form)
             return
@@ -3730,6 +4005,26 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             return
         self._write_json(job)
 
+    def _handle_job_cancel(self, job_id: str) -> None:
+        job = JOB_REGISTRY.request_cancel(job_id)
+        if job is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "任务不存在")
+            return
+        if job.get("status") not in JOB_ACTIVE_STATUSES:
+            self._redirect(
+                "/job/"
+                + urllib.parse.quote(job_id)
+                + "?error="
+                + urllib.parse.quote("任务已经结束，无法取消。")
+            )
+            return
+        self._redirect(
+            "/job/"
+            + urllib.parse.quote(job_id)
+            + "?notice="
+            + urllib.parse.quote("已请求取消后台任务，系统会在当前步骤停止后回滚并清理文件。")
+        )
+
     def _handle_job(self, job_id: str, notice: str = "", error: str = "") -> None:
         job = JOB_REGISTRY.get(job_id)
         if job is None:
@@ -3738,15 +4033,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         auth_settings = self._current_auth_settings()
         authenticated = self._is_authenticated(auth_settings)
 
-        action_html = ""
-        if job.get("result_url"):
-            action_html += (
-                f'<a href="{escape(job["result_url"])}">{escape(job.get("result_label") or "查看结果")}</a>'
-            )
-        elif job.get("project_id"):
-            action_html += f'<a href="/project/{escape(job["project_id"])}">返回项目页</a>'
-        else:
-            action_html += '<a href="/projects">返回项目列表</a>'
+        action_html = _render_job_actions(job)
 
         body = f"""
         <div class="status-shell">
@@ -3787,17 +4074,24 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
           const errorBoxEl = document.getElementById("job-error-box");
           const errorEl = document.getElementById("job-error");
           const progressWrapEl = document.getElementById("job-progress-wrap");
-          const labelMap = {json.dumps({"queued": "排队中", "running": "运行中", "succeeded": "已完成", "failed": "失败"}, ensure_ascii=False)};
-          const classMap = {json.dumps({"queued": "status-pill status-queued", "running": "status-pill status-running", "succeeded": "status-pill status-succeeded", "failed": "status-pill status-failed"})};
+          const labelMap = {json.dumps({"queued": "排队中", "running": "运行中", "canceling": "取消中", "succeeded": "已完成", "failed": "失败", "canceled": "已取消"}, ensure_ascii=False)};
+          const classMap = {json.dumps({"queued": "status-pill status-queued", "running": "status-pill status-running", "canceling": "status-pill status-canceling", "succeeded": "status-pill status-succeeded", "failed": "status-pill status-failed", "canceled": "status-pill status-canceled"})};
           const escapeHtml = (value) => String(value ?? "").replace(/[&<>\"']/g, (ch) => ({{"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#39;"}})[ch]);
           const renderActions = (job) => {{
+            const parts = [];
+            if (["queued", "running", "canceling"].includes(job.status)) {{
+              const disabled = job.status === "canceling" ? " disabled" : "";
+              const label = job.status === "canceling" ? "正在取消" : "取消任务";
+              parts.push(`<form class="inline-form" method="post" action="/job/${{encodeURIComponent(job.id)}}/cancel"><button class="danger-button" type="submit"${{disabled}}>${{label}}</button></form>`);
+            }}
             if (job.result_url) {{
-              return `<a href="${{escapeHtml(job.result_url)}}">${{escapeHtml(job.result_label || "查看结果")}}</a>`;
+              parts.push(`<a class="ghost-button" href="${{escapeHtml(job.result_url)}}">${{escapeHtml(job.result_label || "查看结果")}}</a>`);
+            }} else if (job.project_id) {{
+              parts.push(`<a class="ghost-button" href="/project/${{encodeURIComponent(job.project_id)}}">返回项目页</a>`);
+            }} else {{
+              parts.push('<a class="ghost-button" href="/projects">返回项目列表</a>');
             }}
-            if (job.project_id) {{
-              return `<a href="/project/${{encodeURIComponent(job.project_id)}}">返回项目页</a>`;
-            }}
-            return '<a href="/projects">返回项目列表</a>';
+            return parts.join("");
           }};
           const renderProgress = (job) => {{
             const total = Number(job.total || 0);
@@ -3833,7 +4127,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               errorBoxEl.style.display = "none";
               errorEl.textContent = "";
             }}
-            if (["succeeded", "failed"].includes(job.status)) {{
+            if (["succeeded", "failed", "canceled"].includes(job.status)) {{
               clearInterval(timer);
             }}
           }};
@@ -4686,6 +4980,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             return
 
         api_keys = _load_api_keys()
+        cancel_checkpoint = None
         try:
             count = int(form.get("count") or "1")
             if count < 1:
@@ -4719,6 +5014,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 + urllib.parse.quote(notice)
             )
         except Exception as exc:
+            _discard_checkpoint(cancel_checkpoint)
             self._redirect(
                 "/project/"
                 + urllib.parse.quote(project_id)
@@ -4807,7 +5103,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <span>创建时间：{escape(job.get("created_at", ""))}</span>
               <span>更新时间：<span id="job-updated">{escape(job.get("updated_at", ""))}</span></span>
             </div>
-            <div class="button-row" id="job-actions"></div>
+            <div class="button-row" id="job-actions">{_render_job_actions(job)}</div>
             <div id="job-error-box" class="status-box" style="display:{'block' if job.get('error') else 'none'}">
               <strong>错误信息</strong>
               <div id="job-error" class="mono">{escape(job.get("error", ""))}</div>
@@ -4823,8 +5119,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         <script>
         (() => {{
           const jobId = {json.dumps(job_id)};
-          const labelMap = {json.dumps({"queued": "排队中", "running": "运行中", "succeeded": "已完成", "failed": "失败"}, ensure_ascii=False)};
-          const classMap = {json.dumps({"queued": "status-pill status-queued", "running": "status-pill status-running", "succeeded": "status-pill status-succeeded", "failed": "status-pill status-failed"})};
+          const labelMap = {json.dumps({"queued": "排队中", "running": "运行中", "canceling": "取消中", "succeeded": "已完成", "failed": "失败", "canceled": "已取消"}, ensure_ascii=False)};
+          const classMap = {json.dumps({"queued": "status-pill status-queued", "running": "status-pill status-running", "canceling": "status-pill status-canceling", "succeeded": "status-pill status-succeeded", "failed": "status-pill status-failed", "canceled": "status-pill status-canceled"})};
           const statusEl = document.getElementById("job-status");
           const messageEl = document.getElementById("job-message");
           const updatedEl = document.getElementById("job-updated");
@@ -4851,13 +5147,20 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             }}).join("");
           }};
           const renderActions = (job) => {{
+            const parts = [];
+            if (["queued", "running", "canceling"].includes(job.status)) {{
+              const disabled = job.status === "canceling" ? " disabled" : "";
+              const label = job.status === "canceling" ? "正在取消" : "取消任务";
+              parts.push(`<form class="inline-form" method="post" action="/job/${{encodeURIComponent(job.id)}}/cancel"><button class="danger-button" type="submit"${{disabled}}>${{label}}</button></form>`);
+            }}
             if (job.result_url) {{
-              return `<a href="${{escapeHtml(job.result_url)}}">${{escapeHtml(job.result_label || "查看结果")}}</a>`;
+              parts.push(`<a class="ghost-button" href="${{escapeHtml(job.result_url)}}">${{escapeHtml(job.result_label || "查看结果")}}</a>`);
+            }} else if (job.project_id) {{
+              parts.push(`<a class="ghost-button" href="/project/${{encodeURIComponent(job.project_id)}}">返回项目页</a>`);
+            }} else {{
+              parts.push('<a class="ghost-button" href="/projects">返回项目列表</a>');
             }}
-            if (job.project_id) {{
-              return `<a href="/project/${{encodeURIComponent(job.project_id)}}">返回项目页</a>`;
-            }}
-            return '<a href="/projects">返回项目列表</a>';
+            return parts.join("");
           }};
           const renderProgress = (job) => {{
             const total = Number(job.total || 0);
@@ -4894,7 +5197,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               window.clearTimeout(redirectTimer);
               redirectTimer = null;
             }}
-            if (["succeeded", "failed"].includes(job.status)) {{
+            if (["succeeded", "failed", "canceled"].includes(job.status)) {{
               clearInterval(timer);
             }}
           }};
@@ -5283,16 +5586,23 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
 
     def _handle_create_project_async(self, form: dict[str, str]) -> None:
         api_keys = _load_api_keys()
+        cancel_checkpoint = None
         try:
             if not (form.get("story_request") or "").strip():
                 raise RuntimeError("故事需求不能为空。")
+            form = dict(form)
+            project_id = utc_now().replace("-", "").replace(":", "").replace("+00:00", "Z") + "_" + uuid4().hex[:8]
+            form["project_id"] = project_id
+            cancel_checkpoint = ProjectTreeCheckpoint(OUTPUT_DIR / f"novel_project_{project_id}")
             job = JOB_REGISTRY.create_job(kind="create_project", title="创建新项目")
         except Exception as exc:
+            _discard_checkpoint(cancel_checkpoint)
             self._redirect("/projects?error=" + urllib.parse.quote(str(exc)))
             return
 
         def runner(progress_callback):
             project_path = _create_project(form, api_keys, progress_callback=progress_callback)
+            progress_callback({"stage": "init_finalize", "message": "正在整理新项目状态"})
             project_path_obj = Path(project_path)
             project_meta = load_json(str(project_path_obj / "project.json"))
             new_project_id = project_meta.get("project_id", project_path_obj.name)
@@ -5314,7 +5624,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 "project_path": project_path,
             }
 
-        _start_background_job(job["id"], runner)
+        _start_background_job(job["id"], runner, cancel_checkpoint=cancel_checkpoint)
         self._redirect("/job/" + urllib.parse.quote(job["id"]))
 
     def _handle_continue_async(self, project_id: str, form: dict[str, str]) -> None:
@@ -5324,6 +5634,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             return
 
         api_keys = _load_api_keys()
+        cancel_checkpoint = None
         try:
             count = int(form.get("count") or "1")
             if count < 1:
@@ -5331,6 +5642,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             selection_mode = validate_selection_mode(form.get("selection_mode"), allow_manual=False)
             runtime_overrides = _runtime_overrides_from_form(form)
             runtime_config = _build_runtime_config(project_path, runtime_overrides, api_keys)
+            cancel_checkpoint = ProjectTreeCheckpoint(project_path)
             job = JOB_REGISTRY.create_job(
                 kind="continue",
                 title=f"续写《{project_id}》",
@@ -5338,6 +5650,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 project_path=str(project_path.resolve()),
             )
         except Exception as exc:
+            _discard_checkpoint(cancel_checkpoint)
             self._redirect(
                 "/project/"
                 + urllib.parse.quote(project_id)
@@ -5356,6 +5669,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 runtime_overrides=runtime_overrides,
                 progress_callback=progress_callback,
             )
+            progress_callback({"stage": "chapter_finalize", "message": "正在整理续写结果"})
             message = f"续写完成，共生成 {count} 章。"
             auto_job = _enqueue_progression_job(
                 project_id,
@@ -5387,7 +5701,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 "project_path": str(project_path.resolve()),
             }
 
-        _start_background_job(job["id"], runner)
+        _start_background_job(job["id"], runner, cancel_checkpoint=cancel_checkpoint)
         self._redirect("/job/" + urllib.parse.quote(job["id"]))
 
     def _handle_progression_options(self, project_id: str, form: dict[str, str]) -> None:
@@ -5447,6 +5761,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         session_id = (form.get("progression_session") or "").strip()
         option_ref = (form.get("progression_option") or "").strip()
         feedback = (form.get("progression_feedback") or "").strip()
+        cancel_checkpoint = None
         try:
             if not session_id or not option_ref:
                 raise RuntimeError("请选择一个推进选项后再继续写。")
@@ -5464,6 +5779,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 runtime_overrides,
                 api_keys,
             )
+            cancel_checkpoint = ProjectTreeCheckpoint(project_path)
             job = JOB_REGISTRY.create_job(
                 kind="continue_guided",
                 title=f"按推进选项续写《{project_id}》",
@@ -5471,6 +5787,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 project_path=str(project_path.resolve()),
             )
         except Exception as exc:
+            _discard_checkpoint(cancel_checkpoint)
             self._redirect(
                 "/project/"
                 + urllib.parse.quote(project_id)
@@ -5488,6 +5805,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 progression_feedback=feedback,
                 progress_callback=progress_callback,
             )
+            progress_callback({"stage": "chapter_finalize", "message": "正在整理续写结果"})
             auto_job = _enqueue_progression_job(
                 project_id,
                 project_path,
@@ -5507,7 +5825,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 "project_path": str(project_path.resolve()),
             }
 
-        _start_background_job(job["id"], runner)
+        _start_background_job(job["id"], runner, cancel_checkpoint=cancel_checkpoint)
         self._redirect("/job/" + urllib.parse.quote(job["id"]))
 
     def _handle_polish_chapter_async(self, project_id: str, chapter_slug: str, form: dict[str, str]) -> None:
@@ -5527,11 +5845,13 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             return
 
         api_keys = _load_api_keys()
+        cancel_checkpoint = None
         try:
             runtime_overrides = _runtime_overrides_from_form(form)
             runtime_config = _build_runtime_config(project_path, runtime_overrides, api_keys)
             preset_ids = _polish_preset_ids_from_form(form)
             custom_request = (form.get("polish_custom_request") or "").strip()
+            cancel_checkpoint = ProjectTreeCheckpoint(project_path)
             job = JOB_REGISTRY.create_job(
                 kind="polish_chapter",
                 title=f"润色章节：{chapter_slug}",
@@ -5539,6 +5859,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 project_path=str(project_path.resolve()),
             )
         except Exception as exc:
+            _discard_checkpoint(cancel_checkpoint)
             self._redirect(
                 "/project/"
                 + urllib.parse.quote(project_id)
@@ -5583,7 +5904,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 "project_path": str(project_path.resolve()),
             }
 
-        _start_background_job(job["id"], runner)
+        _start_background_job(job["id"], runner, cancel_checkpoint=cancel_checkpoint)
         self._redirect("/job/" + urllib.parse.quote(job["id"]))
 
     def _handle_audiobook_async(self, project_id: str, form: dict[str, str]) -> None:
@@ -5596,11 +5917,13 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         narrator_upload = self._uploaded_file("narrator_reference_audio")
         character_upload = self._uploaded_file("character_reference_audio")
         character_name = (form.get("character_voice_name") or "").strip()
+        cancel_checkpoint = None
         try:
             if _active_audiobook_job(project_path) is not None:
                 raise RuntimeError("当前项目已有有声章节生成任务正在运行，请稍后再生成有声章节。")
             if character_upload and not character_name:
                 raise RuntimeError("上传角色参考音频前，请先选择角色。")
+            cancel_checkpoint = ProjectSubtreeCheckpoint(project_path, ["audiobook"])
             job = JOB_REGISTRY.create_job(
                 kind="audiobook",
                 title=f"生成有声章节：{chapter_slug}",
@@ -5612,6 +5935,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 busy_message="当前项目已有后台任务在运行，请稍后再生成有声章节。",
             )
         except Exception as exc:
+            _discard_checkpoint(cancel_checkpoint)
             self._redirect(
                 "/project/"
                 + urllib.parse.quote(project_id)
@@ -5661,7 +5985,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 "project_path": str(project_path.resolve()),
             }
 
-        _start_background_job(job["id"], runner)
+        _start_background_job(job["id"], runner, cancel_checkpoint=cancel_checkpoint)
         self._redirect("/job/" + urllib.parse.quote(job["id"]))
 
     def _handle_illustrate_async(self, project_id: str, form: dict[str, str]) -> None:
@@ -5672,12 +5996,14 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
 
         api_keys = _load_api_keys()
         chapter_slug = (form.get("chapter_slug") or "latest").strip() or "latest"
+        cancel_checkpoint = None
         try:
             llm_runtime_config = None
             try:
                 llm_runtime_config = _build_runtime_config(project_path, {}, api_keys)
             except Exception:
                 llm_runtime_config = None
+            cancel_checkpoint = ProjectTreeCheckpoint(project_path)
             job = JOB_REGISTRY.create_job(
                 kind="illustrate",
                 title=f"生成插图：{chapter_slug}",
@@ -5685,6 +6011,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 project_path=str(project_path.resolve()),
             )
         except Exception as exc:
+            _discard_checkpoint(cancel_checkpoint)
             self._redirect(
                 "/project/"
                 + urllib.parse.quote(project_id)
@@ -5717,7 +6044,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 "project_path": str(project_path.resolve()),
             }
 
-        _start_background_job(job["id"], runner)
+        _start_background_job(job["id"], runner, cancel_checkpoint=cancel_checkpoint)
         self._redirect("/job/" + urllib.parse.quote(job["id"]))
 
 def main() -> None:

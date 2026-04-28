@@ -534,6 +534,47 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("当前项目已有写作任务正在运行", page.body)
         self.assertIn("Traceback line", page.body)
 
+    def test_cancel_running_continue_job_rolls_back_project_files(self) -> None:
+        mutated = threading.Event()
+        audio_path = self.project_path / "audiobook" / "chapter_0001" / "existing.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"existing audio")
+
+        def fake_run_next_chapters(project_path: str, _config: dict, _count: int, **kwargs) -> list[str]:
+            chapter_path = Path(project_path) / "chapters" / "chapter_0001.md"
+            chapter_path.write_text("未完成的后台章节\n", encoding="utf-8")
+            project = load_json(str(Path(project_path) / "project.json"))
+            project["chapter_count"] = 1
+            save_json(str(Path(project_path) / "project.json"), project)
+            mutated.set()
+            progress_callback = kwargs["progress_callback"]
+            for _ in range(30):
+                time.sleep(0.05)
+                progress_callback({"stage": "writer", "message": "正在写作"})
+            return [str(chapter_path)]
+
+        with patch("webui.run_next_chapters", side_effect=fake_run_next_chapters), patch(
+            "webui._enqueue_progression_job",
+            return_value=None,
+        ):
+            response = self._post(
+                "/project/web/continue",
+                "count=1&selection_mode=recommended",
+            )
+            self.assertEqual(response.status, 303)
+            job_id = response.getheader("Location").rsplit("/", 1)[-1]
+            self.assertTrue(mutated.wait(timeout=3))
+
+            cancel_response = self._post(f"/job/{job_id}/cancel", "")
+            self.assertEqual(cancel_response.status, 303)
+            job = self._wait_for_job_status(job_id, statuses={"canceled", "failed"})
+
+        self.assertEqual(job["status"], "canceled")
+        self.assertFalse((self.project_path / "chapters" / "chapter_0001.md").exists())
+        self.assertTrue(audio_path.exists())
+        project = load_json(str(self.project_path / "project.json"))
+        self.assertEqual(project["chapter_count"], 0)
+
     def test_continue_guided_rejects_blank_custom_option_without_user_idea(self) -> None:
         session = {
             "session_id": "session_web_custom",
