@@ -13,9 +13,11 @@ from project_manager import (
     _generate_initial_story_data,
     _build_persisted_llm_config,
     _prune_initial_supporting_characters,
+    acquire_project_audio_lock,
     acquire_project_write_lock,
     export_project_archive,
     import_project_archive,
+    project_audio_lock_is_active,
     rollback_project,
     save_json,
     update_project_stats,
@@ -106,6 +108,26 @@ class ProjectManagerTests(unittest.TestCase):
                     self.assertEqual(lock_data["owner"], "new-run")
 
             self.assertFalse(lock_path.exists())
+
+    def test_project_audio_lock_can_overlap_write_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="lock_audio")
+
+            with acquire_project_audio_lock(str(project_path), owner="audio") as audio_lock:
+                self.assertTrue(audio_lock.lock_path.exists())
+                self.assertTrue(project_audio_lock_is_active(project_path))
+                with acquire_project_write_lock(str(project_path), owner="writer") as write_lock:
+                    self.assertTrue(write_lock.lock_path.exists())
+
+            self.assertFalse((project_path / ".project_audio.lock").exists())
+
+    def test_rollback_rejects_active_audio_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="rollback_audio")
+
+            with acquire_project_audio_lock(str(project_path), owner="audio"):
+                with self.assertRaises(ProjectWriteLockError):
+                    rollback_project(str(project_path), 0)
 
     def test_export_project_archive_contains_complete_project_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

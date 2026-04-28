@@ -1052,6 +1052,31 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(job["project_id"], "web_b")
         mocked_run_next_chapters.assert_called_once()
 
+    def test_continue_async_allows_same_project_when_audiobook_job_active(self) -> None:
+        audio_job = webui.JOB_REGISTRY.create_job(
+            kind="audiobook",
+            title="生成有声章节",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+            blocks_project=False,
+        )
+        webui.JOB_REGISTRY.mark_running(audio_job["id"], "正在生成有声章节")
+
+        with patch(
+            "webui.run_next_chapters",
+            return_value=[str(self.project_path / "chapters" / "chapter_0001.md")],
+        ) as mocked_run_next_chapters, patch("webui._enqueue_progression_job", return_value=None):
+            response = self._post(
+                "/project/web/continue",
+                "count=1&selection_mode=recommended",
+            )
+
+        self.assertEqual(response.status, 303)
+        location = response.getheader("Location")
+        self.assertTrue(location.startswith("/job/"))
+        self._wait_for_job_status(location.rsplit("/", 1)[-1])
+        mocked_run_next_chapters.assert_called_once()
+
     def test_create_project_async_starts_followup_progression_job(self) -> None:
         session_payload = {
             "session_id": "session_project_bootstrap",
@@ -1099,6 +1124,22 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         page = self._get("/project/web")
         self.assertEqual(page.status, 200)
         self.assertIn("下一章推进选项正在后台生成", page.body)
+        self.assertNotIn("为避免并发写入冲突", page.body)
+
+    def test_project_page_allows_continue_but_warns_during_audiobook_job(self) -> None:
+        job = webui.JOB_REGISTRY.create_job(
+            kind="audiobook",
+            title="生成有声章节",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+            blocks_project=False,
+        )
+        webui.JOB_REGISTRY.mark_running(job["id"], "正在生成有声章节")
+
+        page = self._get("/project/web")
+
+        self.assertEqual(page.status, 200)
+        self.assertIn("有声章节正在生成中，可以继续续写", page.body)
         self.assertNotIn("为避免并发写入冲突", page.body)
 
     def test_chapter_page_shows_polish_form(self) -> None:
@@ -1268,6 +1309,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             job = self._wait_for_job_status(job_id)
 
         self.assertEqual(job["kind"], "audiobook")
+        self.assertFalse(job.get("blocks_project", True))
 
         _, kwargs = mocked_generate.call_args
         self.assertEqual(kwargs["chapter_refs"], ["chapter_0001"])
@@ -1278,6 +1320,50 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         voices = load_json(str(self.project_path / "audiobook" / "voices.json"))
         self.assertTrue(voices["character_voices"]["林宇"]["reference_audio"].startswith("audiobook/voice_refs/"))
         self.assertEqual(voices["character_voices"]["林宇"]["prompt_text"], "这是参考文本")
+
+    def test_rollback_rejects_active_audiobook_job(self) -> None:
+        job = webui.JOB_REGISTRY.create_job(
+            kind="audiobook",
+            title="生成有声章节",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+            blocks_project=False,
+        )
+        webui.JOB_REGISTRY.mark_running(job["id"], "正在生成有声章节")
+
+        with patch("webui.rollback_project") as mocked_rollback:
+            response = self._post("/project/web/rollback", "to_chapter=0")
+
+        self.assertEqual(response.status, 303)
+        self.assertIn("/project/web?error=", response.getheader("Location"))
+        mocked_rollback.assert_not_called()
+
+    def test_polish_chapter_rejects_active_audiobook_job(self) -> None:
+        (self.project_path / "chapters" / "chapter_0001.md").write_text(
+            "林宇推上储物箱。\n\n苏浅检查控制板。",
+            encoding="utf-8",
+        )
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 1
+        save_json(str(self.project_path / "project.json"), project)
+        job = webui.JOB_REGISTRY.create_job(
+            kind="audiobook",
+            title="生成有声章节",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+            blocks_project=False,
+        )
+        webui.JOB_REGISTRY.mark_running(job["id"], "正在生成有声章节")
+
+        with patch("webui.run_chapter_polish") as mocked_polish:
+            response = self._post(
+                "/project/web/chapter/chapter_0001/polish",
+                "polish_preset_details=1",
+            )
+
+        self.assertEqual(response.status, 303)
+        self.assertIn("/project/web/chapter/chapter_0001?error=", response.getheader("Location"))
+        mocked_polish.assert_not_called()
 
     def test_polish_chapter_endpoint_creates_background_job_with_runtime_overrides(self) -> None:
         (self.project_path / "chapters" / "chapter_0001.md").write_text(

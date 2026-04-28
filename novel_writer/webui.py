@@ -66,6 +66,7 @@ from project_manager import (
     load_json,
     load_project,
     normalize_planning_mode,
+    project_audio_lock_is_active,
     rollback_project,
 )
 from runtime_config import (
@@ -121,6 +122,7 @@ EXTERNAL_SERVICE_HEALTH_TIMEOUT_SECONDS = 3.0
 JOB_ACTIVE_STATUSES = {"queued", "running"}
 JOB_FINISHED_STATUSES = {"succeeded", "failed"}
 PROGRESSION_JOB_KINDS = {"progression_options", "progression_options_auto"}
+AUDIOBOOK_JOB_KINDS = {"audiobook"}
 
 _LOGIN_ATTEMPT_GUARDS: dict[tuple[int, int, int], LoginAttemptGuard] = {}
 _LOGIN_ATTEMPT_GUARDS_LOCK = threading.Lock()
@@ -142,10 +144,20 @@ class BackgroundJobRegistry:
         project_path: str = "",
         busy_message: str = "",
         blocks_project: bool = True,
+        conflicts_with_blocking: bool | None = None,
+        conflict_kinds: set[str] | None = None,
     ) -> dict:
         with self._lock:
-            if project_path and blocks_project:
+            check_blocking = blocks_project if conflicts_with_blocking is None else conflicts_with_blocking
+            if project_path and check_blocking:
                 active = self._find_active_project_job_locked(project_path, blocking_only=True)
+                if active is not None:
+                    raise RuntimeError(
+                        busy_message
+                        or f"当前项目已有后台任务在运行：{active.get('title', active.get('id', 'unknown'))}"
+                    )
+            if project_path and conflict_kinds:
+                active = self._find_active_project_job_locked(project_path, blocking_only=False, kinds=conflict_kinds)
                 if active is not None:
                     raise RuntimeError(
                         busy_message
@@ -325,6 +337,27 @@ class BackgroundJobRegistry:
 
 
 JOB_REGISTRY = BackgroundJobRegistry()
+
+
+def _active_audiobook_job(project_path: Path) -> dict | None:
+    if project_audio_lock_is_active(project_path):
+        return {
+            "kind": "audiobook",
+            "title": "外部有声章节生成任务",
+            "project_path": str(project_path.resolve()),
+        }
+    jobs = JOB_REGISTRY.list_jobs(
+        project_path=str(project_path.resolve()),
+        active_only=True,
+        blocking_only=False,
+        kinds=AUDIOBOOK_JOB_KINDS,
+        limit=1,
+    )
+    return jobs[0] if jobs else None
+
+
+def _audiobook_conflict_message(action: str) -> str:
+    return f"有声章节正在生成中，可以继续续写，但暂时不能{action}。请等音频任务完成后再试。"
 
 
 def _looks_like_mojibake(text: str) -> bool:
@@ -4249,10 +4282,18 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         active_jobs = JOB_REGISTRY.list_jobs(project_id=project_id, active_only=True, limit=4)
         blocking_jobs = [job for job in active_jobs if job.get("blocks_project", True)]
         project_busy = bool(blocking_jobs)
+        audiobook_busy = _active_audiobook_job(project_path) is not None
+        destructive_busy = project_busy or audiobook_busy
         busy_attr = " disabled" if project_busy else ""
+        destructive_busy_attr = " disabled" if destructive_busy else ""
         busy_notice = (
             '<div class="warning-box">当前项目有后台任务正在运行。为避免并发写入冲突，章节润色暂时禁用。</div>'
             if project_busy
+            else ""
+        )
+        audiobook_notice = (
+            '<div class="warning-box">有声章节正在生成中，可以继续续写，但回滚和章节润色暂时禁用。</div>'
+            if audiobook_busy
             else ""
         )
         project_llm_config = project.get("llm_config") or {}
@@ -4313,16 +4354,17 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <form method="post" action="/project/{escape(project_id)}/rollback">
               <input type="hidden" name="to_chapter" value="{chapter_number if chapter_number is not None else 0}">
               <input type="hidden" name="return_to_chapter" value="{escape(chapter_slug)}">
-              <button class="ghost-button" type="submit">回滚到本章并从这里继续写</button>
+              <button class="ghost-button" type="submit"{destructive_busy_attr}>回滚到本章并从这里继续写</button>
             </form>
           </section>
           {quality_panel_html}
           {busy_notice}
+          {audiobook_notice}
           <section class="panel">
             <h2>章节润色</h2>
             <p class="muted">对当前章节做表达、节奏和细节层面的润色。完成后会直接覆盖本章正文，并在项目下自动备份原文。</p>
             <form method="post" action="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}/polish">
-              <fieldset{busy_attr}>
+              <fieldset{destructive_busy_attr}>
                 <label>润色方向（可多选）
                   <div class="button-row polish-preset-row">
                     {polish_preset_html}
@@ -4360,7 +4402,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <h2>本章有声小说</h2>
             {audiobook_player_html}
             <form method="post" action="/project/{escape(project_id)}/audiobook" enctype="multipart/form-data">
-              <fieldset{busy_attr}>
+              <fieldset{destructive_busy_attr}>
                 <input type="hidden" name="chapter_slug" value="{escape(chapter_slug)}">
                 <label>生成模式
                   <select name="generation_mode">
@@ -4689,6 +4731,14 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if project_path is None:
             self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
             return
+        if _active_audiobook_job(project_path) is not None:
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote(_audiobook_conflict_message("回滚"))
+            )
+            return
 
         try:
             to_chapter = int((form.get("to_chapter") or "").strip())
@@ -4898,6 +4948,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         blocking_jobs = [job for job in active_jobs if job.get("blocks_project", True)]
         progression_jobs = [job for job in active_jobs if job.get("kind") in PROGRESSION_JOB_KINDS]
         project_busy = bool(blocking_jobs)
+        audiobook_busy = _active_audiobook_job(project_path) is not None
+        destructive_busy = project_busy or audiobook_busy
         progression_session = get_latest_active_progression_session(str(project_path))
         project_llm_config = project.get("llm_config") or {}
         runtime_override_fields_html = _render_runtime_override_fields(
@@ -4911,9 +4963,15 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             active_job=progression_jobs[0] if progression_jobs else None,
         )
         busy_attr = " disabled" if project_busy else ""
+        destructive_busy_attr = " disabled" if destructive_busy else ""
         busy_notice = (
             '<div class="warning-box">当前项目有后台任务正在运行。为避免并发写入冲突，续写、回滚和插图表单已暂时禁用。你可以打开上方任务卡片查看实时进度。</div>'
             if project_busy
+            else ""
+        )
+        audiobook_notice = (
+            '<div class="warning-box">有声章节正在生成中，可以继续续写，但回滚和章节润色暂时禁用。</div>'
+            if audiobook_busy
             else ""
         )
         progression_notice = (
@@ -5010,6 +5068,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             </section>
             {external_service_panel_html}
             {busy_notice}
+            {audiobook_notice}
             <section class="panel">
               <h3>续写</h3>
               <form method="post" action="/project/{escape(project_id)}/continue">
@@ -5040,7 +5099,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <section class="panel">
               <h3>状态回滚</h3>
               <form method="post" action="/project/{escape(project_id)}/rollback">
-                <fieldset{busy_attr}>
+                <fieldset{destructive_busy_attr}>
                   <label>保留到第几章
                     <input type="number" name="to_chapter" value="{max(0, int(project.get('chapter_count', 0) or 0))}" min="0" max="{max(0, int(project.get('chapter_count', 0) or 0))}">
                   </label>
@@ -5100,7 +5159,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <section class="panel">
               <h3>有声小说</h3>
               <form method="post" action="/project/{escape(project_id)}/audiobook" enctype="multipart/form-data">
-                <fieldset{busy_attr}>
+                <fieldset{destructive_busy_attr}>
                   <label>目标章节
                     <select name="chapter_slug">
                       {''.join(chapter_options)}
@@ -5456,6 +5515,16 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if project_path is None:
             self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
             return
+        if _active_audiobook_job(project_path) is not None:
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "/chapter/"
+                + urllib.parse.quote(chapter_slug)
+                + "?error="
+                + urllib.parse.quote(_audiobook_conflict_message("润色章节"))
+            )
+            return
 
         api_keys = _load_api_keys()
         try:
@@ -5528,6 +5597,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         character_upload = self._uploaded_file("character_reference_audio")
         character_name = (form.get("character_voice_name") or "").strip()
         try:
+            if _active_audiobook_job(project_path) is not None:
+                raise RuntimeError("当前项目已有有声章节生成任务正在运行，请稍后再生成有声章节。")
             if character_upload and not character_name:
                 raise RuntimeError("上传角色参考音频前，请先选择角色。")
             job = JOB_REGISTRY.create_job(
@@ -5535,6 +5606,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 title=f"生成有声章节：{chapter_slug}",
                 project_id=project_id,
                 project_path=str(project_path.resolve()),
+                blocks_project=False,
+                conflicts_with_blocking=True,
+                conflict_kinds=AUDIOBOOK_JOB_KINDS,
+                busy_message="当前项目已有后台任务在运行，请稍后再生成有声章节。",
             )
         except Exception as exc:
             self._redirect(

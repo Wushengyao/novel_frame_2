@@ -26,7 +26,7 @@ from external_services import (
     load_voxcpm2_runtime,
     normalize_voxcpm2_runtime,
 )
-from project_manager import load_json, load_project, save_json
+from project_manager import acquire_project_audio_lock, load_json, load_project, save_json
 
 
 AUDIOBOOK_DIR_NAME = "audiobook"
@@ -1219,7 +1219,22 @@ def generate_audiobook_chapter(
     runtime_overrides: dict | None = None,
     split_config: dict | None = None,
     progress_callback=None,
+    lock_project: bool = True,
 ) -> dict:
+    if lock_project:
+        with acquire_project_audio_lock(str(project_path), owner="generate_audiobook_chapter"):
+            return generate_audiobook_chapter(
+                project_path,
+                chapter_ref,
+                force=force,
+                narrator_preset=narrator_preset,
+                generation_mode=generation_mode,
+                runtime_overrides=runtime_overrides,
+                split_config=split_config,
+                progress_callback=progress_callback,
+                lock_project=False,
+            )
+
     project_path = Path(project_path)
     chapter_file = _resolve_chapter_file(project_path, chapter_ref)
     chapter_slug = chapter_file.stem
@@ -1310,7 +1325,21 @@ def generate_audiobook_chapters(
     generation_mode: str = GENERATION_MODE_ADVANCED,
     runtime_overrides: dict | None = None,
     progress_callback=None,
+    lock_project: bool = True,
 ) -> list[dict]:
+    if lock_project:
+        with acquire_project_audio_lock(str(project_path), owner="generate_audiobook_chapters"):
+            return generate_audiobook_chapters(
+                project_path,
+                chapter_refs=chapter_refs,
+                force=force,
+                narrator_preset=narrator_preset,
+                generation_mode=generation_mode,
+                runtime_overrides=runtime_overrides,
+                progress_callback=progress_callback,
+                lock_project=False,
+            )
+
     refs = chapter_refs or ["latest"]
     results = []
     for index, chapter_ref in enumerate(refs):
@@ -1330,6 +1359,7 @@ def generate_audiobook_chapters(
                 generation_mode=generation_mode,
                 runtime_overrides=runtime_overrides,
                 progress_callback=progress_callback,
+                lock_project=False,
             )
         )
     return results

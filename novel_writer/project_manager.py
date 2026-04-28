@@ -125,6 +125,8 @@ ROLLBACK_SUMMARY_KEYS = (
     "next_chapter_goal",
 )
 PROJECT_WRITE_LOCK_FILENAME = ".project_write.lock"
+PROJECT_AUDIO_LOCK_FILENAME = ".project_audio.lock"
+PROJECT_LOCK_FILENAMES = (PROJECT_WRITE_LOCK_FILENAME, PROJECT_AUDIO_LOCK_FILENAME)
 PROJECT_DIR_PATTERN = re.compile(r"^novel_project_")
 PROJECT_WRITE_LOCK_PROCESS_MARKERS = (
     "webui.py",
@@ -170,12 +172,15 @@ class ProjectWriteLock:
         owner: str = "",
         timeout: float = 0,
         poll_interval: float = 0.2,
+        lock_filename: str = PROJECT_WRITE_LOCK_FILENAME,
+        busy_message: str = "当前项目已有写作任务正在运行，请稍后再试。",
     ) -> None:
         self.project_path = Path(project_path).resolve()
-        self.lock_path = self.project_path / PROJECT_WRITE_LOCK_FILENAME
+        self.lock_path = self.project_path / lock_filename
         self.owner = str(owner or "").strip()
         self.timeout = max(0.0, float(timeout or 0))
         self.poll_interval = max(0.05, float(poll_interval or 0.2))
+        self.busy_message = str(busy_message or "").strip()
         self.token = uuid4().hex
         self._acquired = False
 
@@ -238,7 +243,8 @@ class ProjectWriteLock:
 
     def _busy_message(self) -> str:
         return (
-            "当前项目已有写作任务正在运行，请稍后再试。"
+            (self.busy_message or "当前项目已有任务正在运行，请稍后再试。")
+            + " "
             f"锁文件: {self.lock_path}。"
             "如果确认没有任务运行，可手动删除该锁文件。"
         )
@@ -265,6 +271,16 @@ class ProjectWriteLock:
 
 def acquire_project_write_lock(project_path: str, *, owner: str = "", timeout: float = 0) -> ProjectWriteLock:
     return ProjectWriteLock(project_path, owner=owner, timeout=timeout)
+
+
+def acquire_project_audio_lock(project_path: str, *, owner: str = "", timeout: float = 0) -> ProjectWriteLock:
+    return ProjectWriteLock(
+        project_path,
+        owner=owner,
+        timeout=timeout,
+        lock_filename=PROJECT_AUDIO_LOCK_FILENAME,
+        busy_message="当前项目已有有声章节生成任务正在运行，请稍后再试。",
+    )
 
 
 def _process_exists(pid: int) -> bool:
@@ -1142,8 +1158,8 @@ def _safe_project_id(value: object, default: str = "imported") -> str:
     return _safe_filename_part(value, default=default)
 
 
-def _project_lock_is_active(project_path: Path) -> bool:
-    lock_path = project_path / PROJECT_WRITE_LOCK_FILENAME
+def _project_file_lock_is_active(project_path: Path, lock_filename: str) -> bool:
+    lock_path = project_path / lock_filename
     if not lock_path.exists():
         return False
     try:
@@ -1151,6 +1167,19 @@ def _project_lock_is_active(project_path: Path) -> bool:
     except Exception:
         return True
     return _lock_owner_process_still_active(lock_data)
+
+
+def _project_lock_is_active(project_path: Path) -> bool:
+    return _project_file_lock_is_active(project_path, PROJECT_WRITE_LOCK_FILENAME)
+
+
+def project_audio_lock_is_active(project_path: str | Path) -> bool:
+    return _project_file_lock_is_active(Path(project_path), PROJECT_AUDIO_LOCK_FILENAME)
+
+
+def ensure_no_project_audio_lock(project_path: str | Path, action: str) -> None:
+    if project_audio_lock_is_active(project_path):
+        raise ProjectWriteLockError(f"有声章节正在生成中，可以继续续写，但暂时不能{action}。请等音频任务完成后再试。")
 
 
 def _project_archive_default_path(project_path: Path) -> Path:
@@ -1166,7 +1195,7 @@ def _should_export_project_file(path: Path, project_path: Path, archive_path: Pa
     except OSError:
         pass
     relative = path.relative_to(project_path)
-    if PROJECT_WRITE_LOCK_FILENAME in relative.parts:
+    if any(lock_name in relative.parts for lock_name in PROJECT_LOCK_FILENAMES):
         return False
     if "__pycache__" in relative.parts:
         return False
@@ -1361,7 +1390,7 @@ def _extract_project_archive(
             raise ValueError("项目包包含不属于项目目录的文件。")
         relative_name = member_name[len(prefix) :]
         relative_path = PurePosixPath(relative_name)
-        if relative_path.name == PROJECT_WRITE_LOCK_FILENAME:
+        if relative_path.name in PROJECT_LOCK_FILENAMES:
             continue
         target_path = target_dir.joinpath(*relative_path.parts)
         resolved_target = target_path.resolve()
@@ -1702,6 +1731,7 @@ def rollback_project(project_path: str, to_chapter: int) -> dict:
     project_file = base / "project.json"
     if not project_file.exists():
         raise FileNotFoundError(f"项目目录中缺少 project.json: {project_path}")
+    ensure_no_project_audio_lock(project_path, "回滚")
 
     current_project = load_json(str(project_file))
     current_count = max(0, int(current_project.get("chapter_count", 0) or 0))

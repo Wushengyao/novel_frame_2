@@ -11,6 +11,7 @@ from console_logger import log_error, log_info, log_success
 from llm_client import generate_text_with_metadata
 from progression_manager import mark_active_progression_sessions_stale
 from project_manager import (
+    ensure_no_project_audio_lock,
     load_json,
     load_project,
     normalize_chapter_text,
@@ -164,6 +165,7 @@ def run_chapter_polish(
     *,
     progress_callback=None,
 ) -> dict:
+    ensure_no_project_audio_lock(project_path, "润色章节")
     normalized_preset_ids = normalize_polish_preset_ids(preset_ids)
     custom_request = str(custom_request or "").strip()
     chapter_file = _chapter_path(project_path, chapter_slug)
