@@ -134,6 +134,13 @@ PROJECT_WRITE_LOCK_PROCESS_MARKERS = (
 )
 PROJECT_EXPORT_MANIFEST_FILENAME = ".novel_writer_project_export.json"
 PROJECT_EXPORT_FORMAT_VERSION = 1
+PROJECT_IMPORT_REQUIRED_FILES = (
+    "project.json",
+    "world.json",
+    "characters.json",
+    "plot_state.json",
+    "style.json",
+)
 PROJECT_STANDARD_DIRS = (
     "chapters",
     "summaries",
@@ -1131,6 +1138,10 @@ def _safe_filename_part(value: object, default: str = "project") -> str:
     return safe or default
 
 
+def _safe_project_id(value: object, default: str = "imported") -> str:
+    return _safe_filename_part(value, default=default)
+
+
 def _project_lock_is_active(project_path: Path) -> bool:
     lock_path = project_path / PROJECT_WRITE_LOCK_FILENAME
     if not lock_path.exists():
@@ -1292,8 +1303,13 @@ def _validate_project_archive_members(archive: zipfile.ZipFile) -> tuple[dict, s
     if len(top_levels) != 1:
         raise ValueError("项目包必须且只能包含一个项目目录。")
     project_root = next(iter(top_levels))
-    if f"{project_root}/project.json" not in members:
-        raise ValueError("项目包中的项目目录缺少 project.json。")
+    missing_required = [
+        filename
+        for filename in PROJECT_IMPORT_REQUIRED_FILES
+        if f"{project_root}/{filename}" not in members
+    ]
+    if missing_required:
+        raise ValueError("项目包中的项目目录缺少必需文件: " + ", ".join(missing_required))
     return manifest, project_root, members
 
 
@@ -1392,11 +1408,13 @@ def import_project_archive(archive_path: str, output_dir: str, conflict_strategy
             source_project_id = str(project.get("project_id") or manifest.get("project_id") or project_root).strip()
             if not source_project_id:
                 source_project_id = project_root
-            candidate_dir_name = _import_project_dir_name(project_root, source_project_id)
-            final_project_id = source_project_id
+            final_project_id = _safe_project_id(source_project_id)
+            candidate_dir_name = _import_project_dir_name(project_root, final_project_id)
             final_dir = output_path / candidate_dir_name
-            renamed = final_project_id in existing_ids or final_dir.exists()
-            if renamed:
+            project_id_normalized = final_project_id != source_project_id
+            project_conflicts = final_project_id in existing_ids or final_dir.exists()
+            renamed = project_id_normalized or project_conflicts
+            if project_conflicts:
                 final_project_id = _unique_import_project_id(source_project_id, output_path, existing_ids)
                 final_dir = output_path / f"novel_project_{final_project_id}"
 
@@ -1407,6 +1425,7 @@ def import_project_archive(archive_path: str, output_dir: str, conflict_strategy
             project["project_path"] = str(final_dir)
             save_json(str(project_file), project)
             _ensure_project_subdirs(temp_project_path)
+            load_project(str(temp_project_path))
             temp_project_path.replace(final_dir)
 
     return {

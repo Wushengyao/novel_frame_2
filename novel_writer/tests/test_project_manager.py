@@ -192,6 +192,27 @@ class ProjectManagerTests(unittest.TestCase):
             self.assertEqual(imported_project["project_id"], result["project_id"])
             self.assertEqual(imported_project["project_path"], result["project_path"])
 
+    def test_import_project_archive_sanitizes_unsafe_project_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            project_path = create_test_project(base / "source", project_id="unsafe_source")
+            project_file = project_path / "project.json"
+            project = read_json(project_file)
+            project["project_id"] = "bad/id"
+            save_json(str(project_file), project)
+            archive_path = base / "unsafe_id.zip"
+            export_project_archive(str(project_path), str(archive_path))
+
+            result = import_project_archive(str(archive_path), str(base / "output"))
+
+            self.assertTrue(result["renamed"])
+            self.assertEqual(result["source_project_id"], "bad/id")
+            self.assertEqual(result["project_id"], "bad_id")
+            self.assertNotIn("/", result["project_id"])
+            imported_project = read_json(Path(result["project_path"]) / "project.json")
+            self.assertEqual(imported_project["project_id"], "bad_id")
+            self.assertEqual(imported_project["project_path"], result["project_path"])
+
     def test_import_project_archive_rejects_unsafe_or_malformed_archives(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -210,6 +231,13 @@ class ProjectManagerTests(unittest.TestCase):
                 archive.writestr("novel_project_bad/project.json", "{}")
             with self.assertRaises(ValueError):
                 import_project_archive(str(missing_manifest), str(base / "out_missing"))
+
+            incomplete_project = base / "incomplete_project.zip"
+            with zipfile.ZipFile(incomplete_project, "w") as archive:
+                archive.writestr(PROJECT_EXPORT_MANIFEST_FILENAME, manifest)
+                archive.writestr("novel_project_bad/project.json", "{}")
+            with self.assertRaisesRegex(ValueError, "world.json"):
+                import_project_archive(str(incomplete_project), str(base / "out_incomplete"))
 
             zip_slip = base / "zip_slip.zip"
             with zipfile.ZipFile(zip_slip, "w") as archive:

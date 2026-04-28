@@ -3519,7 +3519,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             result = import_project_archive(str(temp_archive_path), str(OUTPUT_DIR))
             notice = "项目导入完成。"
             if result.get("renamed"):
-                notice += f" 因 project_id 冲突，已改名为 {result.get('project_id', '')}。"
+                notice += f" 原 project_id 不可用或冲突，已改名为 {result.get('project_id', '')}。"
             self._redirect(
                 "/project/"
                 + urllib.parse.quote(str(result.get("project_id", "")))
