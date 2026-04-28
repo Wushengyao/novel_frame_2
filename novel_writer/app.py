@@ -150,6 +150,11 @@ def _extract_illustration_workers(args: argparse.Namespace) -> int | None:
 def _add_audiobook_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--audiobook-backend", choices=("local_worker", "audio_frame"), help="Audiobook backend")
     parser.add_argument("--audio-frame-api-base", help="Audio Frame API base URL")
+    parser.add_argument(
+        "--audio-frame-api-bases",
+        help="Comma/space separated Audio Frame API base URLs for parallel synthesis",
+    )
+    parser.add_argument("--audio-frame-workers", type=int, help="Max concurrent Audio Frame synthesis requests")
     parser.add_argument("--audio-frame-timeout", type=int, help="Audio Frame request timeout in seconds")
     parser.add_argument("--voxcpm-root", help="VoxCPM2 repository/root directory")
     parser.add_argument("--voxcpm-python", help="Python executable for the VoxCPM2 environment")
@@ -174,6 +179,8 @@ def _extract_audiobook_overrides(args: argparse.Namespace) -> dict:
     mapping = {
         "backend": getattr(args, "audiobook_backend", None),
         "audio_frame_api_base": getattr(args, "audio_frame_api_base", None),
+        "audio_frame_api_bases": getattr(args, "audio_frame_api_bases", None),
+        "audio_frame_workers": getattr(args, "audio_frame_workers", None),
         "audio_frame_timeout": getattr(args, "audio_frame_timeout", None),
         "root": getattr(args, "voxcpm_root", None),
         "python": getattr(args, "voxcpm_python", None),

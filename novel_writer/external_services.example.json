@@ -59,7 +59,11 @@
   },
   "audio_frame": {
     "_note": "Audio Frame HTTP service used when audiobook backend is audio_frame.",
-    "api_base": "http://127.0.0.1:8808",
+    "api_base": "http://127.0.0.1:8810",
+    "api_bases": [
+      "http://127.0.0.1:8810"
+    ],
+    "workers": 1,
     "timeout": 0
   },
   "audiobook": {

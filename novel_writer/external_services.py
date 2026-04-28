@@ -41,7 +41,7 @@ DEFAULT_VOXCPM2_ROOT = "/home/wsy/VoxCPM2"
 DEFAULT_VOXCPM2_PYTHON = "/home/wsy/VoxCPM2/.venv/bin/python"
 DEFAULT_VOXCPM2_MODEL_ID = "openbmb/VoxCPM2"
 DEFAULT_IMAGE_FRAME_API_BASE = "http://127.0.0.1:8010"
-DEFAULT_AUDIO_FRAME_API_BASE = "http://127.0.0.1:8808"
+DEFAULT_AUDIO_FRAME_API_BASE = "http://127.0.0.1:8810"
 
 DEFAULT_EXTERNAL_SERVICES_CONFIG: dict[str, Any] = {
     "version": 1,
@@ -96,6 +96,8 @@ DEFAULT_EXTERNAL_SERVICES_CONFIG: dict[str, Any] = {
     },
     "audio_frame": {
         "api_base": DEFAULT_AUDIO_FRAME_API_BASE,
+        "api_bases": [DEFAULT_AUDIO_FRAME_API_BASE],
+        "workers": 1,
         "timeout": 0,
     },
     "audiobook": {
@@ -154,6 +156,29 @@ def normalize_http_base(value: object, default: str = "http://127.0.0.1:8188") -
     if not text.startswith(("http://", "https://")):
         text = "http://" + text
     return text
+
+
+def normalize_http_bases(value: object, default: str) -> list[str]:
+    raw_items: list[object]
+    if isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        text = str(value or "").strip()
+        raw_items = text.replace(",", " ").replace(";", " ").split()
+    if not raw_items:
+        raw_items = [default]
+
+    bases: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        base = normalize_http_base(text, default)
+        if base not in seen:
+            bases.append(base)
+            seen.add(base)
+    return bases or [normalize_http_base(default, default)]
 
 
 def coerce_bool(raw_value: object, default: bool = False) -> bool:
@@ -349,8 +374,11 @@ def normalize_image_frame_runtime(raw_config: dict[str, Any] | None) -> dict[str
 
 def normalize_audio_frame_runtime(raw_config: dict[str, Any] | None) -> dict[str, Any]:
     raw = raw_config if isinstance(raw_config, dict) else {}
+    api_bases = normalize_http_bases(raw.get("api_bases") or raw.get("api_base"), DEFAULT_AUDIO_FRAME_API_BASE)
     return {
-        "api_base": normalize_http_base(raw.get("api_base"), DEFAULT_AUDIO_FRAME_API_BASE),
+        "api_base": api_bases[0],
+        "api_bases": api_bases,
+        "workers": max(1, coerce_int(raw.get("workers"), len(api_bases))),
         "timeout": coerce_int(raw.get("timeout"), 0),
     }
 
@@ -378,6 +406,8 @@ def _image_frame_env_overrides() -> dict[str, Any]:
 def _audio_frame_env_overrides() -> dict[str, Any]:
     mapping = {
         "api_base": "NOVEL_AUDIO_FRAME_API_BASE",
+        "api_bases": "NOVEL_AUDIO_FRAME_API_BASES",
+        "workers": "NOVEL_AUDIO_FRAME_WORKERS",
         "timeout": "NOVEL_AUDIO_FRAME_TIMEOUT",
     }
     return {key: os.environ[env_name] for key, env_name in mapping.items() if os.environ.get(env_name, "") != ""}
@@ -403,6 +433,8 @@ def load_audio_frame_runtime(runtime_overrides: dict[str, Any] | None = None) ->
         runtime_overrides or {},
     ):
         if isinstance(layer, dict):
+            if layer.get("api_base") not in (None, "") and "api_bases" not in layer:
+                raw.pop("api_bases", None)
             raw.update(layer)
     return normalize_audio_frame_runtime(raw)
 

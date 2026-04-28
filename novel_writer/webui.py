@@ -2169,6 +2169,12 @@ def _external_service_payload_summary(payload: object) -> dict:
     return summary
 
 
+def _external_service_api_bases(runtime: dict) -> list[str]:
+    bases = runtime.get("api_bases") or [runtime.get("api_base")]
+    result = [str(base or "").strip() for base in bases if str(base or "").strip()]
+    return result or [str(runtime.get("api_base") or "").strip()]
+
+
 def _external_service_status_label(status: str) -> str:
     mapping = {
         "succeeded": "连通",
@@ -2185,7 +2191,7 @@ def _external_service_placeholder() -> dict:
         message = "启动检测尚未完成"
         try:
             runtime = definition["runtime_loader"]()
-            api_base = str(runtime.get("api_base") or "").strip()
+            api_base = ", ".join(_external_service_api_bases(runtime))
         except Exception as exc:
             message = f"配置读取失败：{exc}"
         services.append(
@@ -2209,7 +2215,36 @@ def _check_external_service(definition: dict) -> dict:
     api_base = ""
     try:
         runtime = definition["runtime_loader"]()
-        api_base = str(runtime.get("api_base") or "").strip()
+        api_bases = _external_service_api_bases(runtime)
+        api_base = ", ".join(api_bases)
+        if len(api_bases) > 1:
+            endpoint_payloads = []
+            ok_count = 0
+            for endpoint in api_bases:
+                client = definition["client_class"](endpoint)
+                payload = client.request_json(
+                    definition["health_path"],
+                    timeout=EXTERNAL_SERVICE_HEALTH_TIMEOUT_SECONDS,
+                )
+                endpoint_ok = bool(payload.get("ok", True)) if isinstance(payload, dict) else True
+                ok_count += 1 if endpoint_ok else 0
+                endpoint_payloads.append(payload)
+            ok = ok_count == len(api_bases)
+            details = _external_service_payload_summary(endpoint_payloads[0] if endpoint_payloads else {})
+            details["endpoints"] = len(api_bases)
+            details["ok_endpoints"] = ok_count
+            return {
+                "id": definition["id"],
+                "label": definition["label"],
+                "api_base": api_base,
+                "health_path": definition["health_path"],
+                "ok": ok,
+                "status": "succeeded" if ok else "failed",
+                "message": f"{ok_count}/{len(api_bases)} endpoint(s) ok",
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "details": details,
+            }
+        api_base = api_bases[0]
         client = definition["client_class"](api_base)
         payload = client.request_json(
             definition["health_path"],

@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import illustration_manager
+from external_services import load_audio_frame_runtime
 from project_manager import load_json, save_json
 from tests.test_support import create_test_project
 
@@ -71,6 +72,53 @@ class ExternalServicesConfigTests(unittest.TestCase):
         self.assertEqual(runtime["width"], 1024)
         self.assertEqual(runtime["height"], 768)
         self.assertEqual(runtime["steps"], 12)
+
+    def test_audio_frame_runtime_supports_parallel_api_bases(self) -> None:
+        service_config = Path(self.temp_dir.name) / "external_services.json"
+        service_config.write_text(
+            json.dumps(
+                {
+                    "audio_frame": {
+                        "api_bases": [
+                            "127.0.0.1:8810",
+                            "http://127.0.0.1:8811",
+                            "http://127.0.0.1:8811",
+                        ],
+                        "workers": 3,
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "NOVEL_EXTERNAL_SERVICES_CONFIG": str(service_config),
+                "NOVEL_AUDIO_FRAME_API_BASE": "",
+                "NOVEL_AUDIO_FRAME_API_BASES": "",
+                "NOVEL_AUDIO_FRAME_WORKERS": "",
+            },
+        ):
+            runtime = load_audio_frame_runtime()
+
+        self.assertEqual(runtime["api_base"], "http://127.0.0.1:8810")
+        self.assertEqual(runtime["api_bases"], ["http://127.0.0.1:8810", "http://127.0.0.1:8811"])
+        self.assertEqual(runtime["workers"], 3)
+
+        with patch.dict(
+            os.environ,
+            {
+                "NOVEL_EXTERNAL_SERVICES_CONFIG": str(service_config),
+                "NOVEL_AUDIO_FRAME_API_BASE": "",
+                "NOVEL_AUDIO_FRAME_API_BASES": "",
+                "NOVEL_AUDIO_FRAME_WORKERS": "",
+            },
+        ):
+            override_runtime = load_audio_frame_runtime({"api_base": "127.0.0.1:8899"})
+
+        self.assertEqual(override_runtime["api_bases"], ["http://127.0.0.1:8899"])
 
 
 if __name__ == "__main__":

@@ -6,7 +6,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import tempfile
+import time
 import unittest
 import wave
 from pathlib import Path
@@ -430,6 +432,81 @@ class AudiobookManagerTests(unittest.TestCase):
         voices = load_json(str(self.project_path / "audiobook" / "voices.json"))
         self.assertEqual(voices["simple_voice"]["reference_source"], "auto")
         self.assertTrue((self.project_path / voices["simple_voice"]["reference_audio"]).exists())
+
+    def test_audio_frame_parallel_runtime_round_robins_api_bases(self) -> None:
+        calls = []
+
+        class FakeAudioFrameClient:
+            def __init__(self, api_base: str) -> None:
+                self.api_base = api_base
+
+            def synthesize(self, **kwargs):
+                calls.append((self.api_base, kwargs))
+                return {"audio_base64": base64.b64encode(_tiny_wav_bytes()).decode("ascii")}
+
+        with patch("audiobook_manager.AudioFrameClient", FakeAudioFrameClient):
+            manifest = generate_audiobook_chapter(
+                self.project_path,
+                "chapter_0001",
+                force=True,
+                generation_mode="simple",
+                runtime_overrides={
+                    "backend": "audio_frame",
+                    "audio_frame_api_bases": "http://127.0.0.1:8810 http://127.0.0.1:8811 http://127.0.0.1:8812",
+                    "audio_frame_workers": 3,
+                },
+            )
+
+        used_bases = {api_base for api_base, kwargs in calls if kwargs["reference_audio"]}
+        self.assertEqual(
+            used_bases,
+            {"http://127.0.0.1:8810", "http://127.0.0.1:8811", "http://127.0.0.1:8812"},
+        )
+        self.assertEqual(manifest["audio_frame"]["workers"], 3)
+        self.assertEqual(len(manifest["audio_frame"]["api_bases"]), 3)
+
+    def test_audio_frame_parallel_runtime_serializes_auto_reference_generation(self) -> None:
+        calls = []
+        lock = threading.Lock()
+        in_flight_references = 0
+        max_in_flight_references = 0
+
+        class FakeAudioFrameClient:
+            def __init__(self, api_base: str) -> None:
+                self.api_base = api_base
+
+            def synthesize(self, **kwargs):
+                nonlocal in_flight_references, max_in_flight_references
+                is_auto_reference = not kwargs["reference_audio"]
+                if is_auto_reference:
+                    with lock:
+                        in_flight_references += 1
+                        max_in_flight_references = max(max_in_flight_references, in_flight_references)
+                    time.sleep(0.02)
+                try:
+                    calls.append((self.api_base, kwargs))
+                    return {"audio_base64": base64.b64encode(_tiny_wav_bytes()).decode("ascii")}
+                finally:
+                    if is_auto_reference:
+                        with lock:
+                            in_flight_references -= 1
+
+        with patch("audiobook_manager.AudioFrameClient", FakeAudioFrameClient):
+            generate_audiobook_chapter(
+                self.project_path,
+                "chapter_0001",
+                force=True,
+                generation_mode="advanced",
+                runtime_overrides={
+                    "backend": "audio_frame",
+                    "audio_frame_api_bases": "http://127.0.0.1:8810 http://127.0.0.1:8811 http://127.0.0.1:8812",
+                    "audio_frame_workers": 3,
+                },
+            )
+
+        reference_calls = [kwargs for _, kwargs in calls if not kwargs["reference_audio"]]
+        self.assertGreater(len(reference_calls), 1)
+        self.assertEqual(max_in_flight_references, 1)
 
     def test_generate_audiobook_chapter_uses_external_service_config(self) -> None:
         service_config = Path(self.temp_dir.name) / "external_services.json"
