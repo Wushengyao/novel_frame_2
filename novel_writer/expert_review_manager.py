@@ -345,6 +345,24 @@ def _fallback_report(reason: str) -> dict:
     return report
 
 
+def _is_report_available(report: dict) -> bool:
+    return isinstance(report, dict) and not _coerce_bool(report.get("review_unavailable"), default=False)
+
+
+def _first_available_report_index(reports: list[dict]) -> int | None:
+    for index, report in enumerate(reports):
+        if _is_report_available(report):
+            return index
+    return None
+
+
+def _aggregate_from_successful_report(report: dict, error_text: str) -> dict:
+    aggregate = deepcopy(report)
+    aggregate["review_unavailable"] = False
+    aggregate["aggregation_error"] = str(error_text or "").strip()
+    return aggregate
+
+
 def _save_report(path: Path, report: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     save_json(str(path), report)
@@ -455,14 +473,34 @@ def run_expert_review_for_chapter(
             log_success(f"expert_review: saved aggregate for chapter_{chapter_number:04d}")
             return list_expert_review_artifacts(project_path, chapter_number)
 
-        first_config = model_configs[0]
-        provider = str(first_config.get("model_provider") or "").strip()
-        model = str(first_config.get("model_name") or first_config.get("model") or "").strip()
+        aggregate_source = "model_group"
+        available_index = _first_available_report_index(reports)
+        if available_index is None:
+            aggregate = _fallback_report("All expert models were unavailable.")
+            aggregate["model_reports"] = reports
+            aggregate = _decorate_report(
+                aggregate,
+                chapter_number=chapter_number,
+                workflow_id=workflow_id,
+                provider="",
+                model="",
+                report_type="aggregate",
+            )
+            aggregate["aggregate_source"] = "all_models_unavailable"
+            aggregate["model_report_count"] = len(reports)
+            aggregate["successful_model_report_count"] = 0
+            _save_report(aggregate_path, aggregate)
+            log_success(f"expert_review: saved aggregate for chapter_{chapter_number:04d}")
+            return list_expert_review_artifacts(project_path, chapter_number)
+
+        aggregate_config = model_configs[available_index]
+        provider = str(aggregate_config.get("model_provider") or "").strip()
+        model = str(aggregate_config.get("model_name") or aggregate_config.get("model") or "").strip()
         try:
             emit_progress(progress_callback, "expert_review_aggregate", "Aggregating expert diagnostics")
             response_text, metadata = generate_text_with_metadata(
                 _build_aggregate_prompt(context, reports),
-                first_config,
+                aggregate_config,
                 log_context={
                     "phase": "expert_review",
                     "expert_role": "aggregate",
@@ -480,8 +518,9 @@ def run_expert_review_for_chapter(
         except Exception as exc:  # pragma: no cover - external model resilience
             update_project_stats(project_path, phase="expert_review", success=False, usage=None)
             log_warning(f"expert_review: aggregate unavailable, reason={exc}")
-            aggregate = _fallback_report(str(exc))
+            aggregate = _aggregate_from_successful_report(reports[available_index], str(exc))
             aggregate["model_reports"] = reports
+            aggregate_source = "successful_model_fallback"
         aggregate = _decorate_report(
             aggregate,
             chapter_number=chapter_number,
@@ -490,8 +529,9 @@ def run_expert_review_for_chapter(
             model=model,
             report_type="aggregate",
         )
-        aggregate["aggregate_source"] = "model_group"
+        aggregate["aggregate_source"] = aggregate_source
         aggregate["model_report_count"] = len(reports)
+        aggregate["successful_model_report_count"] = len([report for report in reports if _is_report_available(report)])
         _save_report(aggregate_path, aggregate)
         log_success(f"expert_review: saved aggregate for chapter_{chapter_number:04d}")
         return list_expert_review_artifacts(project_path, chapter_number)

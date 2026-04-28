@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import re
 import socket
 import ssl
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 from typing import Any
@@ -20,9 +23,16 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 120
 LOCAL_LLM_MIN_TIMEOUT_SECONDS = 900
 LOCAL_OPENAI_COMPATIBLE_PROVIDERS = {"ollama", "llama_cpp"}
 LLM_LOG_FILENAME = "llm_interactions.jsonl"
+LLM_ACTIVITY_DIR_ENV = "NOVEL_LLM_ACTIVITY_DIR"
+LLM_ACTIVITY_DEFAULT_DIR = Path.home() / ".cache" / "novel_writer" / "llm_activity"
 SENSITIVE_CONFIG_KEYS = {"api_key", "api_base", "model_name", "model"}
+SENSITIVE_URL_QUERY_RE = re.compile(r"([?&](?:key|api_key|access_token|token)=)[^&\s]+", re.IGNORECASE)
 LLM_REQUEST_MAX_ATTEMPTS = 4
 RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+GEMINI_LOCATION_ERROR_SNIPPETS = (
+    "User location is not supported for the API use",
+    "FAILED_PRECONDITION",
+)
 CREATIVE_PHASES = {
     "writer",
     "rewrite",
@@ -120,6 +130,45 @@ def _coerce_llm_log_enabled(value: object) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
+def _sanitize_error_text(value: object) -> str:
+    return SENSITIVE_URL_QUERY_RE.sub(r"\1***", str(value or ""))
+
+
+def _llm_activity_dir() -> Path:
+    raw = os.environ.get(LLM_ACTIVITY_DIR_ENV, "")
+    if raw.strip():
+        return Path(raw).expanduser()
+    return LLM_ACTIVITY_DEFAULT_DIR
+
+
+@contextmanager
+def _llm_activity_marker(config: dict[str, Any], phase: str, log_context: dict[str, Any] | None):
+    marker_path: Path | None = None
+    try:
+        marker_dir = _llm_activity_dir()
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        marker_path = marker_dir / f"{int(time.time())}_{os.getpid()}_{uuid4().hex}.json"
+        marker = {
+            "pid": os.getpid(),
+            "created_at": utc_now(),
+            "phase": phase,
+            "provider": config.get("model_provider", ""),
+            "model": config.get("model") or config.get("model_name"),
+            "workflow_id": (log_context or {}).get("workflow_id", ""),
+        }
+        marker_path.write_text(json.dumps(marker, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        marker_path = None
+    try:
+        yield
+    finally:
+        if marker_path is not None:
+            try:
+                marker_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 def _resolve_log_path(config: dict[str, Any]) -> Path | None:
     project_path = str(config.get("project_path") or "").strip()
     if not project_path:
@@ -176,7 +225,7 @@ def _append_log_entry(
         "config": _mask_config_for_log(config),
     }
     if error_summary:
-        entry["error"] = str(error_summary)[:1200]
+        entry["error"] = _sanitize_error_text(error_summary)[:1200]
     if log_context:
         entry["log_context"] = log_context
 
@@ -214,6 +263,32 @@ def _resolve_timeout(config: dict[str, Any], provider: str) -> int:
     return timeout
 
 
+def _is_gemini_location_error(status_code: int, detail: str) -> bool:
+    return status_code == 400 and all(snippet in detail for snippet in GEMINI_LOCATION_ERROR_SNIPPETS)
+
+
+def _retry_delay(attempt: int, *, slow: bool = False, retry_after: float = 0.0) -> float:
+    if slow:
+        return max(retry_after, 20.0 * (attempt + 1))
+    return max(retry_after, 1.5 * (attempt + 1))
+
+
+def _is_retryable_network_error(exc: BaseException) -> bool:
+    retryable_errors = (
+        http.client.RemoteDisconnected,
+        http.client.IncompleteRead,
+        ConnectionAbortedError,
+        ConnectionRefusedError,
+        ConnectionResetError,
+        BrokenPipeError,
+        TimeoutError,
+        socket.timeout,
+        ssl.SSLEOFError,
+        ssl.SSLZeroReturnError,
+    )
+    return isinstance(exc, retryable_errors)
+
+
 def _request_json(
     endpoint: str,
     headers: dict[str, str],
@@ -223,15 +298,6 @@ def _request_json(
     data = json.dumps(body).encode("utf-8")
 
     last_error: Exception | None = None
-    retryable_errors = (
-        http.client.RemoteDisconnected,
-        http.client.IncompleteRead,
-        ConnectionResetError,
-        TimeoutError,
-        socket.timeout,
-        ssl.SSLEOFError,
-        ssl.SSLZeroReturnError,
-    )
 
     for attempt in range(LLM_REQUEST_MAX_ATTEMPTS):
         try:
@@ -247,37 +313,63 @@ def _request_json(
                         continue
                     raise RuntimeError(f"LLM endpoint returned invalid JSON: {raw_response[:500]}") from exc
         except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            if exc.code in RETRYABLE_HTTP_STATUS_CODES and attempt < LLM_REQUEST_MAX_ATTEMPTS - 1:
+            detail = _sanitize_error_text(exc.read().decode("utf-8", errors="replace"))
+            retryable_location_error = _is_gemini_location_error(exc.code, detail)
+            if (
+                exc.code in RETRYABLE_HTTP_STATUS_CODES or retryable_location_error
+            ) and attempt < LLM_REQUEST_MAX_ATTEMPTS - 1:
                 last_error = RuntimeError(f"HTTP {exc.code}: {detail}")
-                retry_after = 0.0
                 try:
                     retry_after = float(exc.headers.get("Retry-After", "0") or 0)
                 except (AttributeError, TypeError, ValueError):
                     retry_after = 0.0
-                time.sleep(max(retry_after, 1.5 * (attempt + 1)))
+                time.sleep(_retry_delay(attempt, slow=retryable_location_error, retry_after=retry_after))
                 continue
             raise RuntimeError(
                 f"LLM request failed with HTTP {exc.code}: {detail}"
             ) from exc
-        except retryable_errors as exc:
+        except (
+            http.client.RemoteDisconnected,
+            http.client.IncompleteRead,
+            ConnectionAbortedError,
+            ConnectionRefusedError,
+            ConnectionResetError,
+            BrokenPipeError,
+            TimeoutError,
+            socket.timeout,
+            ssl.SSLEOFError,
+            ssl.SSLZeroReturnError,
+        ) as exc:
             last_error = exc
             if attempt < LLM_REQUEST_MAX_ATTEMPTS - 1:
-                time.sleep(1.5 * (attempt + 1))
+                time.sleep(_retry_delay(attempt))
             continue
         except error.URLError as exc:
             reason = getattr(exc, "reason", exc)
-            if isinstance(reason, retryable_errors):
+            if _is_retryable_network_error(reason):
                 last_error = exc
                 if attempt < LLM_REQUEST_MAX_ATTEMPTS - 1:
-                    time.sleep(1.5 * (attempt + 1))
+                    time.sleep(_retry_delay(attempt))
                 continue
-            raise RuntimeError(f"Failed to connect to LLM endpoint: {exc}") from exc
+            raise RuntimeError(f"Failed to connect to LLM endpoint: {_sanitize_error_text(exc)}") from exc
 
     raise RuntimeError(
         "LLM connection was closed before a response was returned after multiple retries. "
-        f"Endpoint: {endpoint}. Last error: {last_error}"
+        f"Endpoint: {_sanitize_error_text(endpoint)}. Last error: {_sanitize_error_text(last_error)}"
     )
+
+
+def _request_json_with_activity(
+    endpoint: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    timeout: int,
+    config: dict[str, Any],
+    phase: str,
+    log_context: dict[str, Any] | None,
+) -> tuple[dict[str, Any], int]:
+    with _llm_activity_marker(config, phase, log_context):
+        return _request_json(endpoint, headers, body, timeout)
 
 
 def _build_openai_compatible_headers(api_key: str) -> dict[str, str]:
@@ -802,7 +894,15 @@ def generate_text_with_metadata(
         payload = None
         request_attempts = 0
         try:
-            payload, request_attempts = _request_json(endpoint, headers, body, timeout)
+            payload, request_attempts = _request_json_with_activity(
+                endpoint,
+                headers,
+                body,
+                timeout,
+                config,
+                phase,
+                log_context,
+            )
             response_text = _extract_openai_text(payload)
         except Exception as exc:
             if should_log:
@@ -895,7 +995,15 @@ def generate_text_with_metadata(
         payload = None
         request_attempts = 0
         try:
-            payload, request_attempts = _request_json(endpoint, headers, body, timeout)
+            payload, request_attempts = _request_json_with_activity(
+                endpoint,
+                headers,
+                body,
+                timeout,
+                config,
+                phase,
+                log_context,
+            )
             response_text = _extract_gemini_text(payload)
         except Exception as exc:
             if should_log:

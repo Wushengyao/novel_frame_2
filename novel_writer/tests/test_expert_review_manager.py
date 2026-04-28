@@ -107,6 +107,91 @@ class ExpertReviewManagerTests(unittest.TestCase):
             self.assertEqual(aggregate["report_type"], "aggregate")
             self.assertEqual(aggregate["root_causes"][0]["category"], "workflow")
 
+    def test_aggregate_uses_first_successful_expert_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="expert_partial")
+            save_chapter(str(project_path), "第一章正文。")
+            config = runtime_config(
+                "chapter",
+                expert_mode={
+                    "enabled": True,
+                    "models": [
+                        {"model_provider": "gemini", "model_name": "gemini-expert"},
+                        {"model_provider": "deepseek", "model_name": "deepseek-expert"},
+                    ],
+                },
+            )
+
+            with patch(
+                "expert_review_manager.generate_text_with_metadata",
+                side_effect=[
+                    RuntimeError("location unsupported"),
+                    (json.dumps(self._expert_payload("prompt"), ensure_ascii=False), {"usage": {}}),
+                    (json.dumps(self._expert_payload("workflow"), ensure_ascii=False), {"usage": {}}),
+                ],
+            ) as mocked_generate:
+                artifacts = run_expert_review_for_chapter(str(project_path), 1, "wf_partial", config)
+
+            self.assertEqual(mocked_generate.call_count, 3)
+            aggregate_call_config = mocked_generate.call_args_list[2].args[1]
+            self.assertEqual(aggregate_call_config["model_provider"], "deepseek")
+            self.assertFalse(artifacts["aggregate"]["review_unavailable"])
+            self.assertEqual(artifacts["aggregate"]["provider"], "deepseek")
+            self.assertEqual(artifacts["aggregate"]["root_causes"][0]["category"], "workflow")
+
+    def test_aggregate_failure_falls_back_to_successful_model_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="expert_aggregate_fail")
+            save_chapter(str(project_path), "第一章正文。")
+            config = runtime_config(
+                "chapter",
+                expert_mode={
+                    "enabled": True,
+                    "models": [
+                        {"model_provider": "ollama", "model_name": "expert-a"},
+                        {"model_provider": "ollama", "model_name": "expert-b"},
+                    ],
+                },
+            )
+
+            with patch(
+                "expert_review_manager.generate_text_with_metadata",
+                side_effect=[
+                    (json.dumps(self._expert_payload("prompt"), ensure_ascii=False), {"usage": {}}),
+                    (json.dumps(self._expert_payload("workflow"), ensure_ascii=False), {"usage": {}}),
+                    RuntimeError("aggregate timeout"),
+                ],
+            ):
+                artifacts = run_expert_review_for_chapter(str(project_path), 1, "wf_aggregate_fail", config)
+
+            aggregate = artifacts["aggregate"]
+            self.assertFalse(aggregate["review_unavailable"])
+            self.assertEqual(aggregate["aggregate_source"], "successful_model_fallback")
+            self.assertIn("aggregate timeout", aggregate["aggregation_error"])
+            self.assertEqual(aggregate["root_causes"][0]["category"], "prompt")
+
+    def test_all_experts_unavailable_keeps_aggregate_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="expert_all_fail")
+            save_chapter(str(project_path), "第一章正文。")
+            config = runtime_config(
+                "chapter",
+                expert_mode={
+                    "enabled": True,
+                    "models": [
+                        {"model_provider": "ollama", "model_name": "expert-a"},
+                        {"model_provider": "ollama", "model_name": "expert-b"},
+                    ],
+                },
+            )
+
+            with patch("expert_review_manager.generate_text_with_metadata", side_effect=RuntimeError("timeout")):
+                artifacts = run_expert_review_for_chapter(str(project_path), 1, "wf_all_fail", config)
+
+            self.assertTrue(artifacts["aggregate"]["review_unavailable"])
+            self.assertEqual(artifacts["aggregate"]["aggregate_source"], "all_models_unavailable")
+            self.assertEqual(artifacts["aggregate"]["successful_model_report_count"], 0)
+
     def test_expert_failure_saves_unavailable_report_without_raising(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp), project_id="expert_fail")

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +14,19 @@ from llm_client import _request_json, generate_text_with_metadata
 
 
 class LLMClientTests(unittest.TestCase):
+    class FakeJSONResponse:
+        def __init__(self, payload: dict):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(self.payload).encode("utf-8")
+
     def test_request_json_retries_retryable_http_status(self) -> None:
         calls = []
 
@@ -48,6 +63,69 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(payload, {"ok": True})
         self.assertEqual(attempts, 2)
         sleep.assert_called_once()
+
+    def test_request_json_retries_gemini_location_error(self) -> None:
+        calls = []
+
+        def fake_urlopen(req, timeout):
+            calls.append((req, timeout))
+            if len(calls) == 1:
+                raise error.HTTPError(
+                    req.full_url,
+                    400,
+                    "failed precondition",
+                    hdrs={},
+                    fp=io.BytesIO(
+                        b'{"error":{"code":400,"message":"User location is not supported for the API use.","status":"FAILED_PRECONDITION"}}'
+                    ),
+                )
+            return self.FakeJSONResponse({"ok": True})
+
+        with patch("llm_client.request.urlopen", side_effect=fake_urlopen), patch("llm_client.time.sleep") as sleep:
+            payload, attempts = _request_json(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent?key=secret-key",
+                {"Content-Type": "application/json"},
+                {"contents": []},
+                120,
+            )
+
+        self.assertEqual(payload, {"ok": True})
+        self.assertEqual(attempts, 2)
+        sleep.assert_called_once_with(20.0)
+
+    def test_request_json_retries_proxy_connection_refused(self) -> None:
+        calls = []
+
+        def fake_urlopen(req, timeout):
+            calls.append((req, timeout))
+            if len(calls) == 1:
+                raise error.URLError(ConnectionRefusedError("proxy restarting"))
+            return self.FakeJSONResponse({"ok": True})
+
+        with patch("llm_client.request.urlopen", side_effect=fake_urlopen), patch("llm_client.time.sleep") as sleep:
+            payload, attempts = _request_json(
+                "https://example.local/v1/chat/completions",
+                {"Content-Type": "application/json"},
+                {"model": "test", "messages": []},
+                120,
+            )
+
+        self.assertEqual(payload, {"ok": True})
+        self.assertEqual(attempts, 2)
+        sleep.assert_called_once()
+
+    def test_request_json_sanitizes_endpoint_key_after_retries(self) -> None:
+        with patch("llm_client.request.urlopen", side_effect=socket.timeout("timed out")), patch("llm_client.time.sleep"):
+            with self.assertRaises(RuntimeError) as ctx:
+                _request_json(
+                    "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent?key=secret-key",
+                    {"Content-Type": "application/json"},
+                    {"contents": []},
+                    120,
+                )
+
+        self.assertNotIn("secret-key", str(ctx.exception))
+        self.assertIn("key=***", str(ctx.exception))
 
     def test_generate_text_with_metadata_logs_prompt_and_response(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -98,6 +176,39 @@ class LLMClientTests(unittest.TestCase):
             self.assertEqual(entry["attempts"], 2)
             self.assertEqual(entry["config"]["api_key"], "***")
             self.assertEqual(entry["log_context"]["project_id"], "unit-test")
+
+    def test_generate_text_with_metadata_cleans_activity_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project"
+            activity_path = Path(tmp) / "activity"
+            project_path.mkdir()
+            config = {
+                "project_path": str(project_path.resolve()),
+                "model_provider": "openai_compatible",
+                "model": "llama3.2",
+                "api_key": "secret-key",
+                "api_base": "https://example.local/v1",
+                "temperature": 0.8,
+                "max_tokens": 4000,
+                "timeout": 120,
+                "log_llm_payload": "1",
+            }
+            response_payload = {
+                "choices": [{"message": {"content": "正文"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+
+            def fake_request(*args, **kwargs):
+                self.assertTrue(list(activity_path.glob("*.json")))
+                return response_payload, 1
+
+            with patch.dict(os.environ, {"NOVEL_LLM_ACTIVITY_DIR": str(activity_path)}), patch(
+                "llm_client._request_json",
+                side_effect=fake_request,
+            ):
+                generate_text_with_metadata("请写一段正文。", config, log_context={"phase": "writer"})
+
+            self.assertEqual(list(activity_path.glob("*.json")), [])
 
     def test_openai_compatible_omits_system_message_when_not_provided(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -159,6 +270,34 @@ class LLMClientTests(unittest.TestCase):
             self.assertIn("boom", entry["error"])
             self.assertEqual(entry["request"]["messages"][0]["content"], "请写一段正文。")
             self.assertEqual(entry["log_context"]["workflow_id"], "wf-fail")
+
+    def test_generate_text_with_metadata_sanitizes_failed_error_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project"
+            project_path.mkdir()
+            config = {
+                "project_path": str(project_path.resolve()),
+                "model_provider": "openai_compatible",
+                "model": "llama3.2",
+                "api_key": "secret-key",
+                "api_base": "https://example.local/v1",
+                "temperature": 0.8,
+                "max_tokens": 4000,
+                "timeout": 120,
+                "log_llm_payload": "1",
+            }
+
+            with patch(
+                "llm_client._request_json",
+                side_effect=RuntimeError("Endpoint: https://example.local/v1?key=secret-key failed"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    generate_text_with_metadata("请写一段正文。", config, log_context={"phase": "writer"})
+
+            log_file = project_path / "llm_logs" / "llm_interactions.jsonl"
+            entry = json.loads(log_file.read_text(encoding="utf-8").strip())
+            self.assertNotIn("secret-key", entry["error"])
+            self.assertIn("key=***", entry["error"])
 
     def test_gemini_uses_system_instruction_and_explicit_json_response_format(self) -> None:
         config = {
