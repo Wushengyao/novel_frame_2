@@ -636,6 +636,10 @@ class WebUiGuidedFlowTests(unittest.TestCase):
 
         self.assertEqual(projects_page.status, 200)
         self.assertIn('name="model_preset"', projects_page.body)
+        self.assertIn('name="quality_model_preset"', projects_page.body)
+        self.assertIn('name="expert_model_preset_1"', projects_page.body)
+        self.assertIn('data-model-target="quality"', projects_page.body)
+        self.assertIn('data-model-target="expert-1"', projects_page.body)
         self.assertIn("使用 gemini 默认模型", projects_page.body)
         self.assertIn(f"版本 {DISPLAY_VERSION}", projects_page.body)
         self.assertNotIn("维护操作", projects_page.body)
@@ -903,7 +907,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                     "model_preset": "qwen2.5:14b",
                     "story_request": "娴嬭瘯鏁呬簨",
                     "quality_provider": "gemini",
-                    "quality_model_name": "gemini-2.5-pro",
+                    "quality_model_preset": "gemini-2.5-pro",
                 },
                 {"OLLAMA_API_KEY": "", "GEMINI_API_KEY": "gemini-key"},
             )
@@ -921,7 +925,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                     "story_request": "专家模式故事",
                     "expert_mode_enabled": "1",
                     "expert_provider_1": "gemini",
-                    "expert_model_name_1": "gemini-3.1-pro-preview",
+                    "expert_model_preset_1": "gemini-3.1-pro-preview",
                     "expert_timeout_1": "300",
                 },
                 {"OLLAMA_API_KEY": "", "GEMINI_API_KEY": "gemini-key"},
@@ -930,6 +934,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertTrue(captured["config"]["expert_mode"]["enabled"])
         self.assertTrue(captured["config"]["log_llm_payload"])
         self.assertEqual(captured["config"]["expert_mode"]["models"][0]["model_provider"], "gemini")
+        self.assertEqual(captured["config"]["expert_mode"]["models"][0]["model_name"], "gemini-3.1-pro-preview")
         self.assertEqual(captured["config"]["expert_mode"]["models"][0]["api_key"], "gemini-key")
 
         with patch("webui.init_project", side_effect=fake_init_project):
@@ -1026,7 +1031,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         overrides = webui._runtime_overrides_from_form(
             {
                 "quality_provider": "gemini",
-                "quality_model_name": "gemini-2.5-pro",
+                "quality_model_preset": "gemini-2.5-pro",
                 "temperature": "1.7",
             }
         )
@@ -1035,6 +1040,25 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(overrides["quality_model"]["model_name"], "gemini-2.5-pro")
         self.assertNotIn("temperature", overrides)
         self.assertNotIn("temperature", overrides["quality_model"])
+
+        overrides = webui._runtime_overrides_from_form(
+            {
+                "quality_provider": "gemini",
+                "quality_model_preset": "gemini-2.5-pro",
+                "quality_model_name_custom": "gemini-custom-reviewer",
+            }
+        )
+
+        self.assertEqual(overrides["quality_model"]["model_name"], "gemini-custom-reviewer")
+
+        legacy_overrides = webui._runtime_overrides_from_form(
+            {
+                "quality_provider": "gemini",
+                "quality_model_name": "gemini-legacy-reviewer",
+            }
+        )
+
+        self.assertEqual(legacy_overrides["quality_model"]["model_name"], "gemini-legacy-reviewer")
 
     def test_runtime_overrides_includes_log_llm_payload_when_checked(self) -> None:
         overrides = webui._runtime_overrides_from_form(

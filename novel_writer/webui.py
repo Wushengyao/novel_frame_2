@@ -935,9 +935,30 @@ def _resolve_model_name_from_form(form: dict[str, str]) -> str:
     return (form.get("model_name") or "").strip()
 
 
+def _resolve_aux_model_name_from_form(
+    form: dict[str, str],
+    *,
+    custom_key: str,
+    preset_key: str,
+    legacy_key: str,
+) -> str:
+    custom_model = (form.get(custom_key) or "").strip()
+    if custom_model:
+        return custom_model
+    preset_model = (form.get(preset_key) or "").strip()
+    if preset_model:
+        return preset_model
+    return (form.get(legacy_key) or "").strip()
+
+
 def _quality_model_from_form(form: dict[str, str], api_keys: dict[str, str] | None = None) -> dict:
     provider = _normalize_provider_for_ui(form.get("quality_provider"), default="")
-    model_name = (form.get("quality_model_name") or "").strip()
+    model_name = _resolve_aux_model_name_from_form(
+        form,
+        custom_key="quality_model_name_custom",
+        preset_key="quality_model_preset",
+        legacy_key="quality_model_name",
+    )
     api_base = (form.get("quality_api_base") or "").strip()
     quality_model: dict[str, object] = {}
     if provider:
@@ -979,7 +1000,12 @@ def _expert_mode_from_form(form: dict[str, str], api_keys: dict[str, str] | None
     models = []
     for index in range(1, 4):
         provider = _normalize_provider_for_ui(form.get(f"expert_provider_{index}"), default="")
-        model_name = (form.get(f"expert_model_name_{index}") or "").strip()
+        model_name = _resolve_aux_model_name_from_form(
+            form,
+            custom_key=f"expert_model_name_custom_{index}",
+            preset_key=f"expert_model_preset_{index}",
+            legacy_key=f"expert_model_name_{index}",
+        )
         api_base = (form.get(f"expert_api_base_{index}") or "").strip()
         model_config: dict[str, object] = {}
         if provider:
@@ -1021,18 +1047,42 @@ def _expert_mode_label(llm_config: dict) -> str:
 def _render_expert_mode_fields() -> str:
     rows = []
     for index in range(1, 4):
+        target = f"expert-{index}"
+        initial_blank_label = _model_blank_label("gemini", base_model="", provider_explicit=True)
         rows.append(
             f"""
             <div class="two-col">
               <label>Expert Provider {index}
-                <select name="expert_provider_{index}">
+                <select
+                  name="expert_provider_{index}"
+                  data-model-provider-select
+                  data-model-target="{escape(target)}"
+                  data-base-provider="gemini"
+                  data-base-provider-target="main"
+                >
                   {_render_quality_provider_options()}
                 </select>
               </label>
               <label>Expert Model {index}
-                <input type="text" name="expert_model_name_{index}" placeholder="inherit/default">
+                <select
+                  name="expert_model_preset_{index}"
+                  data-model-preset-select
+                  data-model-target="{escape(target)}"
+                  data-base-model=""
+                >
+                  {_render_model_preset_options("gemini", blank_label=initial_blank_label)}
+                </select>
               </label>
             </div>
+            <label>Expert Custom Model {index}（可选）
+              <input
+                type="text"
+                name="expert_model_name_custom_{index}"
+                data-model-custom-input
+                data-model-target="{escape(target)}"
+                placeholder="预设里没有时再手填 Model ID"
+              >
+            </label>
             <div class="two-col">
               <label>Expert API Base {index}
                 <input type="text" name="expert_api_base_{index}" placeholder="inherit or provider default">
@@ -1052,7 +1102,7 @@ def _render_expert_mode_fields() -> str:
       启用专家模式：每章完成后追加顶级模型诊断，并强制保存完整 llm_logs
     </label>
     {''.join(rows)}
-    <div class="muted">最多配置 3 个专家模型；留空时会优先继承 Quality Model，再继承主模型。</div>
+    <div class="muted">最多配置 3 个专家模型；先选 Provider，再从预设里选模型。留空时会优先继承 Quality Model，再继承主模型。</div>
     """
 
 
@@ -1492,10 +1542,11 @@ def _render_provider_options(selected: str = "", *, include_project_default: boo
     return "".join(options)
 
 
-def _render_quality_provider_options() -> str:
+def _render_quality_provider_options(selected: str = "") -> str:
     options = ['<option value="">inherit main provider</option>']
     for provider in sorted(WEB_SELECTABLE_PROVIDERS):
-        options.append(f'<option value="{provider}">{provider}</option>')
+        selected_attr = ' selected' if selected == provider else ""
+        options.append(f'<option value="{provider}"{selected_attr}>{provider}</option>')
     return "".join(options)
 
 
@@ -1547,18 +1598,45 @@ def _render_runtime_override_fields(
         if include_quality_fields
         else ""
     )
+    quality_blank_label = _model_blank_label(
+        effective_provider,
+        base_model=base_model,
+        provider_explicit=False,
+    )
     quality_model_fields_html = (
-        """
+        f"""
     <div class="two-col">
       <label>Quality Provider
-        <select name="quality_provider">
+        <select
+          name="quality_provider"
+          data-model-provider-select
+          data-model-target="quality"
+          data-base-provider="{escape(effective_provider)}"
+          data-base-provider-target="main"
+        >
           {_render_quality_provider_options()}
         </select>
       </label>
       <label>Quality Model
-        <input type="text" name="quality_model_name" placeholder="inherit main model">
+        <select
+          name="quality_model_preset"
+          data-model-preset-select
+          data-model-target="quality"
+          data-base-model="{escape(base_model)}"
+        >
+          {_render_model_preset_options(effective_provider, blank_label=quality_blank_label)}
+        </select>
       </label>
     </div>
+    <label>Quality Custom Model（可选）
+      <input
+        type="text"
+        name="quality_model_name_custom"
+        data-model-custom-input
+        data-model-target="quality"
+        placeholder="预设里没有时再手填 Model ID"
+      >
+    </label>
     <div class="two-col">
       <label>Quality API Base
         <input type="text" name="quality_api_base" placeholder="inherit or provider default">
@@ -1578,7 +1656,12 @@ def _render_runtime_override_fields(
     return f"""
     <div class="two-col">
       <label>临时后端覆盖
-        <select name="provider" data-model-provider-select data-base-provider="{escape(effective_provider)}">
+        <select
+          name="provider"
+          data-model-provider-select
+          data-model-target="main"
+          data-base-provider="{escape(effective_provider)}"
+        >
           {_render_provider_options()}
         </select>
       </label>
@@ -1592,6 +1675,7 @@ def _render_runtime_override_fields(
         <select
           name="model_preset"
           data-model-preset-select
+          data-model-target="main"
           data-base-model="{escape(base_model)}"
         >
           {_render_model_preset_options(effective_provider, blank_label=initial_blank_label)}
@@ -1602,6 +1686,7 @@ def _render_runtime_override_fields(
           type="text"
           name="model_name_custom"
           data-model-custom-input
+          data-model-target="main"
           placeholder="如需未预设的 Model ID，可在这里手填覆盖"
         >
       </label>
@@ -3321,8 +3406,30 @@ def _render_page(
         const value = String(provider || "").trim().toLowerCase();
         return Object.prototype.hasOwnProperty.call(modelPresets, value) ? value : fallback;
       }};
+      const findTargetElement = (form, selector, target) => {{
+        const elements = Array.from(form.querySelectorAll(selector));
+        if (!target) {{
+          return elements.find((element) => !element.dataset.modelTarget) || elements[0] || null;
+        }}
+        return elements.find((element) => element.dataset.modelTarget === target) || null;
+      }};
+      const resolveBaseProvider = (providerSelect) => {{
+        const form = providerSelect.form || providerSelect.closest("form");
+        let baseProvider = providerSelect.dataset.baseProvider || "gemini";
+        const sourceTarget = providerSelect.dataset.baseProviderTarget || "";
+        if (form && sourceTarget) {{
+          const sourceProviderSelect = findTargetElement(form, "[data-model-provider-select]", sourceTarget);
+          const sourceProvider = String(
+            (sourceProviderSelect && (sourceProviderSelect.value || sourceProviderSelect.dataset.baseProvider)) || ""
+          ).trim();
+          if (sourceProvider) {{
+            baseProvider = sourceProvider;
+          }}
+        }}
+        return normalizeProvider(baseProvider, "gemini");
+      }};
       const buildBlankLabel = (providerSelect, presetSelect) => {{
-        const baseProvider = normalizeProvider(providerSelect.dataset.baseProvider || "gemini", "gemini");
+        const baseProvider = resolveBaseProvider(providerSelect);
         const explicitProvider = String(providerSelect.value || "").trim().toLowerCase();
         const effectiveProvider = normalizeProvider(explicitProvider || baseProvider, baseProvider);
         const baseModel = String(presetSelect.dataset.baseModel || "").trim();
@@ -3337,12 +3444,13 @@ def _render_page(
       const bindPresetForm = (providerSelect) => {{
         const form = providerSelect.form || providerSelect.closest("form");
         if (!form) return;
-        const presetSelect = form.querySelector("[data-model-preset-select]");
-        const customInput = form.querySelector("[data-model-custom-input]");
+        const target = providerSelect.dataset.modelTarget || "";
+        const presetSelect = findTargetElement(form, "[data-model-preset-select]", target);
+        const customInput = findTargetElement(form, "[data-model-custom-input]", target);
         if (!presetSelect || !customInput) return;
 
         const rebuildOptions = () => {{
-          const baseProvider = normalizeProvider(providerSelect.dataset.baseProvider || "gemini", "gemini");
+          const baseProvider = resolveBaseProvider(providerSelect);
           const explicitProvider = String(providerSelect.value || "").trim().toLowerCase();
           const effectiveProvider = normalizeProvider(explicitProvider || baseProvider, baseProvider);
           const entries = Array.isArray(modelPresets[effectiveProvider]) ? modelPresets[effectiveProvider] : [];
@@ -3384,6 +3492,13 @@ def _render_page(
             presetSelect.value = "";
           }}
         }});
+        const sourceTarget = providerSelect.dataset.baseProviderTarget || "";
+        const sourceProviderSelect = sourceTarget
+          ? findTargetElement(form, "[data-model-provider-select]", sourceTarget)
+          : null;
+        if (sourceProviderSelect && sourceProviderSelect !== providerSelect) {{
+          sourceProviderSelect.addEventListener("change", rebuildOptions);
+        }}
         rebuildOptions();
       }};
 
@@ -4410,18 +4525,34 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <form method="post" action="/projects/create">
                 <div class="two-col">
                   <label>模型后端
-                    <select name="provider" data-model-provider-select data-base-provider="gemini">
+                    <select
+                      name="provider"
+                      data-model-provider-select
+                      data-model-target="main"
+                      data-base-provider="gemini"
+                    >
                       {_render_provider_options("gemini", include_project_default=False)}
                     </select>
                   </label>
                   <label>模型预设
-                    <select name="model_preset" data-model-preset-select data-base-model="">
+                    <select
+                      name="model_preset"
+                      data-model-preset-select
+                      data-model-target="main"
+                      data-base-model=""
+                    >
                       {_render_model_preset_options("gemini", blank_label=_model_blank_label("gemini", base_model="", provider_explicit=True))}
                     </select>
                   </label>
                 </div>
                 <label>自定义模型名（可选）
-                  <input type="text" name="model_name_custom" data-model-custom-input placeholder="如需未预设的 Model ID，可在这里手填覆盖">
+                  <input
+                    type="text"
+                    name="model_name_custom"
+                    data-model-custom-input
+                    data-model-target="main"
+                    placeholder="如需未预设的 Model ID，可在这里手填覆盖"
+                  >
                 </label>
                 <div class="muted">默认可直接使用预设下拉，不需要每次手填 Model ID。</div>
                 <label>项目名
@@ -4465,14 +4596,36 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 <div class="muted">默认平衡模式会先生成短蓝图，写后保存质检报告；高质量模式可在自动审稿失败时重写一次。</div>
                 <div class="two-col">
                   <label>Quality Provider
-                    <select name="quality_provider">
+                    <select
+                      name="quality_provider"
+                      data-model-provider-select
+                      data-model-target="quality"
+                      data-base-provider="gemini"
+                      data-base-provider-target="main"
+                    >
                       {_render_quality_provider_options()}
                     </select>
                   </label>
                   <label>Quality Model
-                    <input type="text" name="quality_model_name" placeholder="inherit main model">
+                    <select
+                      name="quality_model_preset"
+                      data-model-preset-select
+                      data-model-target="quality"
+                      data-base-model=""
+                    >
+                      {_render_model_preset_options("gemini", blank_label=_model_blank_label("gemini", base_model="", provider_explicit=False))}
+                    </select>
                   </label>
                 </div>
+                <label>Quality Custom Model（可选）
+                  <input
+                    type="text"
+                    name="quality_model_name_custom"
+                    data-model-custom-input
+                    data-model-target="quality"
+                    placeholder="预设里没有时再手填 Model ID"
+                  >
+                </label>
                 <div class="two-col">
                   <label>Quality API Base
                     <input type="text" name="quality_api_base" placeholder="inherit or provider default">
