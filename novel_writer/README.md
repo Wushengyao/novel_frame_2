@@ -7,7 +7,7 @@
 - 每次生成都带上最近正文，保持文风连续
 - 每章生成后自动更新剧情状态
 - 每章生成后自动保存状态快照，支持按章节回滚再继续写
-- 初始化阶段可直接让模型根据你的需求生成设定，并先完成分卷/分章规划
+- 初始化阶段会先让模型根据你的故事需求具体化并创造人物和背景设定，再生成完整设定与分卷/分章规划
 
 ## 现在的推荐用法
 
@@ -69,6 +69,7 @@ novel_writer/
 output/
   novel_project_<project_id>/
     project.json
+    story_setup.json
     world.json
     characters.json
     plot_state.json

@@ -183,6 +183,69 @@ def build_init_prompt(data: dict) -> str:
 """
 
 
+def build_story_setup_prompt(data: dict) -> str:
+    project_name = data.get("project_name", "")
+    project_description = data.get("project_description", "")
+    story_request = data.get("story_request", "")
+    world_seed = _to_block(data.get("world_seed", {}))
+    characters_seed = _to_block(data.get("characters_seed", {}))
+
+    return f"""你是一名长篇小说前期设定策划。请在项目正式初始化和大纲规划之前，先根据用户输入的故事需求，具体化并创造人物和背景设定。
+
+【项目名】
+{project_name}
+
+【项目简介】
+{project_description}
+
+【用户故事需求】
+{story_request}
+
+【已有世界观种子】
+{world_seed}
+
+【已有人物种子】
+{characters_seed}
+
+要求：
+1. 输出必须是合法 JSON，不要输出 Markdown 或解释
+2. 这个阶段不是记录或复述用户需求，而是把需求扩写成可直接支撑后续写作的原创设定
+3. 必须主动补足用户没有细写但故事需要的内容：人物姓名、身份来历、关系张力、能力边界、背景机制、资源限制、开篇困境
+4. 可以在不违背用户需求的前提下创造具体细节；如果用户需求含糊，要选择一个清晰可写的版本落地
+5. 这个阶段只做人设和背景设定，不要写章节大纲，不要提前安排具体章节事件
+6. `world.background` 要把故事前情、当前危机、社会/科技/魔法/组织背景、资源约束和开篇处境整理清楚，避免只把用户原话拆成条目
+7. `world.rules` 只写会影响后续连续性的硬设定、限制和禁忌
+8. `protagonists` 只放核心常驻人物；`supporting` 只保留开篇前几章实际需要出场的必要配角，没有就返回空数组
+9. 不要为了“以后可能会用到”提前创建暂时不会出场的导师、邻居、系统 AI、反派手下等配角档案
+10. 每个角色对象都必须包含 `name`、`role`、`description`、`appearance` 四个字段
+11. `description` 侧重身份、性格、能力、关系、欲望/弱点和叙事功能，不要只列用户已经说过的标签
+12. `appearance` 单独描写人物外貌特征（包括人种，避免文生图模型的不确定性）、体态气质、发型发色、五官特点、常见衣着与穿搭风格
+13. 人物设定必须直接服务用户需求中的关系、题材、冲突和长期写作方向
+
+输出 JSON：
+{{
+  "world": {{
+    "title": "",
+    "genre": "",
+    "setting": "",
+    "background": [],
+    "rules": []
+  }},
+  "characters": {{
+    "protagonists": [
+      {{
+        "name": "",
+        "role": "",
+        "description": "",
+        "appearance": ""
+      }}
+    ],
+    "supporting": []
+  }}
+}}
+"""
+
+
 def build_volume_outline_prompt(data: dict, user_request: str = "") -> str:
     if isinstance(data, dict) and isinstance(data.get("sections"), dict):
         sections = data["sections"]

@@ -17,7 +17,7 @@ from common_utils import emit_progress, extract_json_object, utc_now
 from console_logger import log_error, log_info, log_success, log_warning
 from llm_client import generate_text_with_metadata
 from pricing import estimate_llm_cost
-from prompt_builder import build_init_prompt, build_system_prompt
+from prompt_builder import build_init_prompt, build_story_setup_prompt, build_system_prompt
 
 
 EMPTY_WORLD = {
@@ -86,6 +86,8 @@ PLANNING_MODES = {
 }
 
 INIT_SECTION_KEYS = ("world", "characters", "plot_state", "style")
+STORY_SETUP_SECTION_KEYS = ("world", "characters")
+STORY_SETUP_FILENAME = "story_setup.json"
 CHAPTER_TITLE_PATTERN = re.compile(
     r"^\s*(?:#{1,6}\s*)?第[0-9零一二三四五六七八九十百千万两〇]+[章节卷回部篇]\s*[：:.-]?\s*.+$"
 )
@@ -104,6 +106,7 @@ STATS_PHASES = (
 SNAPSHOT_DIR_NAME = "snapshots"
 SNAPSHOT_STATE_FILES = (
     "project.json",
+    STORY_SETUP_FILENAME,
     "world.json",
     "characters.json",
     "plot_state.json",
@@ -700,6 +703,33 @@ def _build_persisted_llm_config(config: dict) -> dict:
     return persisted
 
 
+def _normalize_world(world: dict) -> dict:
+    normalized = deepcopy(EMPTY_WORLD)
+    if isinstance(world, dict):
+        normalized = _deep_merge(normalized, world)
+
+    result = {}
+    for key, default_value in EMPTY_WORLD.items():
+        value = normalized.get(key, default_value)
+        if isinstance(default_value, list):
+            if not isinstance(value, list):
+                value = [value]
+            result[key] = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            result[key] = str(value or "").strip()
+    return result
+
+
+def _normalize_story_setup_result(data: dict) -> dict:
+    normalized = {}
+    for key in STORY_SETUP_SECTION_KEYS:
+        value = data.get(key, {})
+        normalized[key] = value if isinstance(value, dict) else {}
+    normalized["world"] = _normalize_world(normalized.get("world", {}))
+    normalized["characters"] = _normalize_characters(normalized.get("characters", {}))
+    return normalized
+
+
 def _normalize_init_result(data: dict) -> dict:
     normalized = {}
     for key in INIT_SECTION_KEYS:
@@ -731,6 +761,16 @@ def _normalize_characters(characters: dict) -> dict:
             items = []
         result[group] = [_normalize_character_entry(item) for item in items if isinstance(item, dict)]
     return result
+
+
+def _has_character_profiles(characters: dict) -> bool:
+    if not isinstance(characters, dict):
+        return False
+    for group in ("protagonists", "supporting"):
+        items = characters.get(group)
+        if isinstance(items, list) and any(isinstance(item, dict) for item in items):
+            return True
+    return False
 
 
 def _normalize_name_list(value: object, *, max_items: int = 8) -> list[str]:
@@ -876,6 +916,32 @@ def _build_seed_story_data(config: dict) -> dict:
     }
 
 
+def _story_setup_enabled(config: dict) -> bool:
+    if not config.get("init_with_llm", False):
+        return False
+    if "init_with_story_setup" in config:
+        return _coerce_config_bool(config.get("init_with_story_setup"), default=True)
+    if "init_story_setup" in config:
+        return _coerce_config_bool(config.get("init_story_setup"), default=True)
+    return True
+
+
+def _merge_story_setup_seed(seed_data: dict, story_setup: dict | None) -> dict:
+    if not story_setup:
+        return deepcopy(seed_data)
+
+    merged = deepcopy(seed_data)
+    setup_world = story_setup.get("world") if isinstance(story_setup.get("world"), dict) else {}
+    if setup_world:
+        merged["world"] = _deep_merge(merged.get("world", {}), setup_world)
+
+    setup_characters = story_setup.get("characters") if isinstance(story_setup.get("characters"), dict) else {}
+    if setup_characters:
+        merged["characters"] = _normalize_characters(_deep_merge(merged.get("characters", {}), setup_characters))
+
+    return merged
+
+
 def _build_fallback_story_data(config: dict, seed_data: dict) -> dict:
     fallback = deepcopy(seed_data)
     project_name = str(config.get("project_name", "")).strip()
@@ -947,14 +1013,94 @@ def _normalize_initial_plot_state(plot_state: dict) -> dict:
     return normalized
 
 
-def _generate_initial_story_data(config: dict) -> tuple[dict, dict]:
+def _generate_story_setup_data(
+    config: dict,
+    seed_data: dict,
+    init_stats: dict,
+    progress_callback=None,
+) -> tuple[dict | None, dict]:
+    meta = {
+        "used_story_setup_llm": False,
+        "llm_story_setup_error": "",
+    }
+    if not _story_setup_enabled(config):
+        return None, meta
+
+    prompt = build_story_setup_prompt(
+        {
+            "project_name": config.get("project_name", "Novel Project"),
+            "project_description": config.get("project_description", ""),
+            "story_request": config.get("story_request", ""),
+            "world_seed": seed_data["world"],
+            "characters_seed": seed_data["characters"],
+        }
+    )
+    llm_config = _build_llm_config(config)
+
+    emit_progress(progress_callback, "init_story_setup", "正在根据故事需求生成人物和背景设定")
+    log_info("初始化设定: 先请求模型生成人物和背景设定。")
+    for attempt in range(2):
+        try:
+            log_info(f"初始化设定: 人物和背景设定第 {attempt + 1} 次请求模型。")
+            response_text, metadata = generate_text_with_metadata(
+                prompt,
+                llm_config,
+                system_prompt=build_system_prompt("planner"),
+                response_format="json",
+            )
+        except Exception as exc:  # pragma: no cover - resilience path
+            _merge_project_stats(init_stats, phase="init", success=False, usage=None, metadata=None)
+            meta["llm_story_setup_error"] = str(exc)
+            log_warning(
+                "初始化设定: 人物和背景设定请求失败，"
+                f"原因: {meta['llm_story_setup_error']}"
+            )
+            continue
+
+        try:
+            _merge_project_stats(
+                init_stats,
+                phase="init",
+                success=True,
+                usage=metadata.get("usage"),
+                metadata=metadata,
+            )
+            setup_data = _normalize_story_setup_result(
+                extract_json_object(response_text, "Could not parse JSON from story setup response.")
+            )
+            meta["used_story_setup_llm"] = True
+            log_success("初始化设定: 人物和背景设定已生成。")
+            return setup_data, meta
+        except Exception as exc:  # pragma: no cover - resilience path
+            meta["llm_story_setup_error"] = str(exc)
+            log_warning(
+                "初始化设定: 人物和背景设定解析失败，"
+                f"原因: {meta['llm_story_setup_error']}"
+            )
+
+    return None, meta
+
+
+def _generate_initial_story_data(config: dict, progress_callback=None) -> tuple[dict, dict]:
     seed_data = _build_seed_story_data(config)
-    fallback_data = _build_fallback_story_data(config, seed_data)
     init_stats = _build_project_stats()
+    story_setup, story_setup_meta = _generate_story_setup_data(
+        config,
+        seed_data,
+        init_stats,
+        progress_callback=progress_callback,
+    )
+    effective_seed_data = _merge_story_setup_seed(seed_data, story_setup)
+    fallback_data = _build_fallback_story_data(config, effective_seed_data)
 
     if not config.get("init_with_llm", False):
         log_info("初始化设定: 已关闭 LLM 初始化，使用本地兜底设定。")
+        fallback_data["story_setup"] = {
+            "world": _normalize_world(fallback_data["world"]),
+            "characters": _normalize_characters(fallback_data["characters"]),
+        }
         return fallback_data, {
+            **story_setup_meta,
             "used_llm": False,
             "llm_init_error": "",
             "stats": init_stats,
@@ -965,10 +1111,10 @@ def _generate_initial_story_data(config: dict) -> tuple[dict, dict]:
             "project_name": config.get("project_name", "Novel Project"),
             "project_description": config.get("project_description", ""),
             "story_request": config.get("story_request", ""),
-            "world_seed": seed_data["world"],
-            "characters_seed": seed_data["characters"],
-            "plot_state_seed": seed_data["plot_state"],
-            "style_seed": seed_data["style"],
+            "world_seed": effective_seed_data["world"],
+            "characters_seed": effective_seed_data["characters"],
+            "plot_state_seed": effective_seed_data["plot_state"],
+            "style_seed": effective_seed_data["style"],
         }
     )
 
@@ -1014,23 +1160,36 @@ def _generate_initial_story_data(config: dict) -> tuple[dict, dict]:
             log_warning(f"初始化设定: 改用本地兜底设定。最后错误: {llm_init_error}")
         else:
             log_warning("初始化设定: 未拿到可用结果，改用本地兜底设定。")
+        fallback_data["story_setup"] = story_setup or {
+            "world": _normalize_world(fallback_data["world"]),
+            "characters": _normalize_characters(fallback_data["characters"]),
+        }
         return fallback_data, {
+            **story_setup_meta,
             "used_llm": False,
             "llm_init_error": llm_init_error,
             "stats": init_stats,
         }
 
-    final_data = {
-        key: _deep_merge(fallback_data[key], generated_data.get(key, {}))
-        for key in INIT_SECTION_KEYS
-    }
+    final_data = {}
+    for key in INIT_SECTION_KEYS:
+        generated_section = generated_data.get(key, {})
+        if key == "characters" and not _has_character_profiles(generated_section):
+            final_data[key] = deepcopy(fallback_data[key])
+        else:
+            final_data[key] = _deep_merge(fallback_data[key], generated_section)
     final_data["characters"] = _prune_initial_supporting_characters(
         final_data["characters"],
         final_data["plot_state"],
         seeded_characters=seed_data["characters"],
     )
     final_data["plot_state"] = _normalize_initial_plot_state(final_data["plot_state"])
+    final_data["story_setup"] = story_setup or {
+        "world": _normalize_world(final_data["world"]),
+        "characters": _normalize_characters(final_data["characters"]),
+    }
     return final_data, {
+        **story_setup_meta,
         "used_llm": True,
         "llm_init_error": llm_init_error,
         "stats": init_stats,
@@ -1079,7 +1238,8 @@ def init_project(config_path: str, progress_callback=None) -> str:
     log_success("init_project: base directories ready")
 
     emit_progress(progress_callback, "init_story", "Generating initial story data")
-    generated_data, init_meta = _generate_initial_story_data(config)
+    generated_data, init_meta = _generate_initial_story_data(config, progress_callback=progress_callback)
+    story_setup = generated_data.get("story_setup") or {}
     world = generated_data["world"]
     characters = generated_data["characters"]
     plot_state = _normalize_initial_plot_state(generated_data["plot_state"])
@@ -1112,6 +1272,7 @@ def init_project(config_path: str, progress_callback=None) -> str:
 
     emit_progress(progress_callback, "init_files", "Writing project files")
     save_json(str(project_path / "project.json"), project_data)
+    save_json(str(project_path / STORY_SETUP_FILENAME), story_setup or {"world": world, "characters": characters})
     save_json(str(project_path / "world.json"), world)
     save_json(str(project_path / "characters.json"), characters)
     save_json(str(project_path / "plot_state.json"), plot_state)

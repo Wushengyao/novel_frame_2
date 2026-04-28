@@ -22,7 +22,7 @@ from project_manager import (
     save_json,
     update_project_stats,
 )
-from prompt_builder import build_init_prompt
+from prompt_builder import build_init_prompt, build_story_setup_prompt
 
 from tests.test_support import create_test_project, read_json
 
@@ -403,6 +403,24 @@ class ProjectManagerTests(unittest.TestCase):
         self.assertIn("不要为了“以后可能会用到”提前创建", prompt)
         self.assertIn('"supporting": []', prompt)
 
+    def test_story_setup_prompt_focuses_on_characters_and_background(self) -> None:
+        prompt = build_story_setup_prompt(
+            {
+                "project_name": "Test Project",
+                "project_description": "高层封闭空间求生",
+                "story_request": "男女主被困大楼，在开篇建立临时安全区。",
+                "world_seed": {},
+                "characters_seed": {},
+            }
+        )
+
+        self.assertIn("先根据用户输入的故事需求，具体化并创造人物和背景设定", prompt)
+        self.assertIn("不是记录或复述用户需求", prompt)
+        self.assertIn("主动补足用户没有细写但故事需要的内容", prompt)
+        self.assertIn("这个阶段只做人设和背景设定", prompt)
+        self.assertIn('"world"', prompt)
+        self.assertIn('"characters"', prompt)
+
     def test_prune_initial_supporting_characters_keeps_only_opening_cast(self) -> None:
         characters = {
             "protagonists": [
@@ -501,6 +519,66 @@ class ProjectManagerTests(unittest.TestCase):
 
         self.assertTrue(meta["used_llm"])
         self.assertEqual([item["name"] for item in data["characters"]["supporting"]], ["王建国"])
+
+    def test_generate_initial_story_data_uses_story_setup_as_init_seed(self) -> None:
+        config = {
+            "init_with_llm": True,
+            "project_name": "Test Project",
+            "project_description": "",
+            "story_request": "空间站入侵后，三名幸存者建立避难据点。",
+            "model_provider": "openai_compatible",
+            "model": "test-model",
+            "api_base": "https://example.local/v1",
+            "api_key": "test-key",
+        }
+        setup_payload = {
+            "world": {
+                "title": "星环余烬",
+                "genre": "科幻生存",
+                "setting": "被异族占领的高级太空站",
+                "background": ["异族突袭后，隔离区成为少数安全地带。"],
+                "rules": ["安全门需要能源配额。"],
+            },
+            "characters": {
+                "protagonists": [
+                    {"name": "林宇", "role": "男主", "description": "团队力量担当", "appearance": "黑发青年"},
+                ],
+                "supporting": [],
+            },
+        }
+        init_payload = {
+            "world": {},
+            "characters": {},
+            "plot_state": {
+                "main_plot": "幸存者在太空站中建立据点并寻找出路",
+                "current_arc": "开篇阶段",
+                "active_characters": ["林宇"],
+            },
+            "style": {
+                "tone": "温馨求生",
+                "pov": "第三人称",
+                "requirements": ["重视协作细节"],
+            },
+        }
+
+        with patch(
+            "project_manager.generate_text_with_metadata",
+            side_effect=[
+                (json.dumps(setup_payload, ensure_ascii=False), {"usage": {}}),
+                (json.dumps(init_payload, ensure_ascii=False), {"usage": {}}),
+            ],
+        ) as mocked_generate:
+            data, meta = _generate_initial_story_data(config)
+
+        self.assertEqual(mocked_generate.call_count, 2)
+        first_prompt = mocked_generate.call_args_list[0].args[0]
+        second_prompt = mocked_generate.call_args_list[1].args[0]
+        self.assertIn("具体化并创造人物和背景设定", first_prompt)
+        self.assertIn("被异族占领的高级太空站", second_prompt)
+        self.assertTrue(meta["used_story_setup_llm"])
+        self.assertEqual(data["world"]["setting"], "被异族占领的高级太空站")
+        self.assertEqual(data["characters"]["protagonists"][0]["name"], "林宇")
+        self.assertEqual(data["story_setup"]["world"]["title"], "星环余烬")
 
     def test_rollback_removes_future_quality_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
