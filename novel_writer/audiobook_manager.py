@@ -1644,6 +1644,34 @@ def _assign_audio_frame_jobs(
     return {slot_id: items for slot_id, items in assignments.items() if items}
 
 
+def _assign_audio_frame_retry_jobs(
+    jobs: list[AudioFrameSegmentJob],
+    slots: list[AudioFrameEndpointSlot],
+) -> tuple[dict[str, list[AudioFrameSegmentJob]], list[AudioFrameSegmentJob]]:
+    if not jobs:
+        return {}, []
+    if any(slot.kind != "cpu" for slot in slots):
+        return _assign_audio_frame_jobs(jobs, slots), []
+
+    cpu_slots = [slot for slot in slots if slot.kind == "cpu" and slot.max_chars > 0]
+    if not cpu_slots:
+        return {}, list(jobs)
+
+    assignments: dict[str, list[AudioFrameSegmentJob]] = {slot.slot_id: [] for slot in cpu_slots}
+    cpu_loads = {slot.slot_id: 0.0 for slot in cpu_slots}
+    unassigned: list[AudioFrameSegmentJob] = []
+    for job in sorted(jobs, key=lambda item: item.text_chars):
+        eligible_slots = [slot for slot in cpu_slots if job.text_chars <= slot.max_chars]
+        if not eligible_slots:
+            unassigned.append(job)
+            continue
+        slot = min(eligible_slots, key=lambda item: cpu_loads[item.slot_id])
+        assignments[slot.slot_id].append(job)
+        cpu_loads[slot.slot_id] += _slot_estimated_seconds(slot, job.text_chars)
+
+    return {slot_id: items for slot_id, items in assignments.items() if items}, unassigned
+
+
 def _wav_duration_seconds(path: Path) -> float:
     with wave.open(str(path), "rb") as wav_file:
         frame_count = wav_file.getnframes()
@@ -1795,9 +1823,29 @@ def _run_audio_frame_batch_service(
             total=len(jobs),
         )
 
-    assignments = _assign_audio_frame_jobs(jobs, slots)
     save_lock = Lock()
+    retry_lock = Lock()
+    unhealthy_lock = Lock()
+    unhealthy_slot_ids: set[str] = set()
+    retry_counts: dict[tuple[int, int], int] = {}
+    retry_errors: dict[tuple[int, int], list[str]] = {}
     batch_completed = 0
+    max_retries = max(0, int(runtime.get("max_retries") or runtime.get("retries") or 2))
+
+    def job_key(job: AudioFrameSegmentJob) -> tuple[int, int]:
+        return (job.payload_index, job.position)
+
+    def pending_unique(jobs_to_retry: list[AudioFrameSegmentJob]) -> list[AudioFrameSegmentJob]:
+        seen: set[tuple[int, int]] = set()
+        result: list[AudioFrameSegmentJob] = []
+        with save_lock:
+            for job in jobs_to_retry:
+                key = job_key(job)
+                if key in seen or generated_paths[job.payload_index][job.position] is not None:
+                    continue
+                seen.add(key)
+                result.append(job)
+        return result
 
     def synthesize_segment(slot: AudioFrameEndpointSlot, job: AudioFrameSegmentJob) -> tuple[AudioFrameSegmentJob, bytes]:
         request_payload = request_payloads[job.payload_index]
@@ -1833,6 +1881,9 @@ def _run_audio_frame_batch_service(
             "slot": slot.slot_id,
             "text_chars": job.text_chars,
         }
+        retry_count = retry_counts.get(job_key(job), 0)
+        if retry_count:
+            item["audio_frame"]["retry_count"] = retry_count
         with save_lock:
             generated_paths[job.payload_index][job.position] = local_path
             manifest_segments[job.payload_index][job.position] = item
@@ -1850,17 +1901,95 @@ def _run_audio_frame_batch_service(
                 total=len(jobs),
             )
 
-    def run_slot(slot_id: str, slot_jobs: list[AudioFrameSegmentJob]) -> None:
+    def record_endpoint_failure(
+        slot: AudioFrameEndpointSlot,
+        job: AudioFrameSegmentJob,
+        exc: Exception,
+        retry_jobs: list[AudioFrameSegmentJob],
+        remaining_jobs: list[AudioFrameSegmentJob],
+    ) -> None:
+        with unhealthy_lock:
+            unhealthy_slot_ids.add(slot.slot_id)
+        message = f"{slot.api_base} ({slot.kind}) failed: {exc}"
+        with retry_lock:
+            retry_counts[job_key(job)] = retry_counts.get(job_key(job), 0) + 1
+            retry_errors.setdefault(job_key(job), []).append(message)
+            retry_jobs.extend(remaining_jobs)
+        emit_progress(
+            progress_callback,
+            "audiobook_audio_frame_retry",
+            (
+                f"Audio Frame endpoint {slot.api_base} failed; "
+                f"requeued {len(remaining_jobs)} segment task(s)"
+            ),
+            current=batch_completed,
+            total=len(jobs),
+        )
+
+    def run_slot(slot_id: str, slot_jobs: list[AudioFrameSegmentJob], retry_jobs: list[AudioFrameSegmentJob]) -> None:
         slot = slot_by_id[slot_id]
-        for job in slot_jobs:
-            completed_job, audio_bytes = synthesize_segment(slot, job)
+        for index, job in enumerate(slot_jobs):
+            with unhealthy_lock:
+                if slot_id in unhealthy_slot_ids:
+                    with retry_lock:
+                        retry_jobs.extend(slot_jobs[index:])
+                    return
+            try:
+                completed_job, audio_bytes = synthesize_segment(slot, job)
+            except Exception as exc:
+                record_endpoint_failure(slot, job, exc, retry_jobs, slot_jobs[index:])
+                return
             save_segment_result(slot, completed_job, audio_bytes)
 
-    if assignments:
+    def run_assignment_round(assignments: dict[str, list[AudioFrameSegmentJob]]) -> list[AudioFrameSegmentJob]:
+        retry_jobs: list[AudioFrameSegmentJob] = []
+        if not assignments:
+            return retry_jobs
         with ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="audio-frame-slot") as executor:
-            futures = [executor.submit(run_slot, slot_id, slot_jobs) for slot_id, slot_jobs in assignments.items()]
+            futures = [
+                executor.submit(run_slot, slot_id, slot_jobs, retry_jobs)
+                for slot_id, slot_jobs in assignments.items()
+            ]
             for future in as_completed(futures):
                 future.result()
+        return pending_unique(retry_jobs)
+
+    pending_retry_jobs = run_assignment_round(_assign_audio_frame_jobs(jobs, slots))
+    retry_round = 0
+    while pending_retry_jobs and retry_round < max_retries:
+        retry_round += 1
+        with unhealthy_lock:
+            available_slots = [slot for slot in slots if slot.slot_id not in unhealthy_slot_ids]
+        retry_assignments, unassigned_jobs = _assign_audio_frame_retry_jobs(pending_retry_jobs, available_slots)
+        for job in unassigned_jobs:
+            retry_errors.setdefault(job_key(job), []).append(
+                "No healthy GPU endpoint remained and the segment is too long for CPU fallback."
+            )
+        if not retry_assignments:
+            pending_retry_jobs = pending_unique(unassigned_jobs)
+            break
+        retry_task_count = sum(len(items) for items in retry_assignments.values())
+        emit_progress(
+            progress_callback,
+            "audiobook_audio_frame_retry",
+            f"Audio Frame retry round {retry_round}/{max_retries}: {retry_task_count} segment task(s)",
+            current=batch_completed,
+            total=len(jobs),
+        )
+        pending_retry_jobs = pending_unique(unassigned_jobs + run_assignment_round(retry_assignments))
+
+    if pending_retry_jobs:
+        samples = []
+        for job in pending_retry_jobs[:5]:
+            request_payload = request_payloads[job.payload_index]
+            segment_id = job.item.get("segment_id") or f"segment_{job.position + 1:04d}"
+            errors = "; ".join(retry_errors.get(job_key(job), [])[-2:])
+            samples.append(f"{request_payload['chapter_slug']}:{segment_id} ({errors or 'not attempted'})")
+        raise RuntimeError(
+            "Audio Frame failed to generate "
+            f"{len(pending_retry_jobs)} segment(s) after {max_retries} retry round(s): "
+            + "; ".join(samples)
+        )
 
     for payload_index, request_payload in enumerate(request_payloads):
         project_path = Path(request_payload["project_path"])
@@ -1895,6 +2024,15 @@ def _run_audio_frame_batch_service(
                     "workers": max(1, len(used_slots[payload_index])),
                     "scheduler": "batch_global_weighted",
                     "endpoints": configured_endpoints,
+                    "failed_slots": [
+                        {
+                            "slot": slot.slot_id,
+                            "api_base": slot.api_base,
+                            "kind": slot.kind,
+                        }
+                        for slot in slots
+                        if slot.slot_id in unhealthy_slot_ids
+                    ],
                 },
                 "voxcpm_runtime": {
                     "clone_mode": request_payload["runtime"].get("clone_mode", CLONE_MODE_STYLE_CONTROL),
