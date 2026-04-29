@@ -1986,6 +1986,35 @@ def rollback_project(project_path: str, to_chapter: int) -> dict:
     }
 
 
+def delete_project(project_path: str) -> dict[str, object]:
+    base = Path(project_path).resolve()
+    if not base.exists():
+        raise FileNotFoundError(f"项目目录不存在: {project_path}")
+    if not base.is_dir():
+        raise ValueError(f"指定路径不是目录: {project_path}")
+    if not PROJECT_DIR_PATTERN.match(base.name):
+        raise ValueError(f"仅支持删除项目目录，当前路径不符合规则: {base.name}")
+
+    project_file = base / "project.json"
+    if not project_file.exists():
+        raise FileNotFoundError(f"项目目录中缺少 project.json: {project_path}")
+    project = load_json(str(project_file))
+    project_id = str(project.get("project_id") or base.name).strip() or base.name
+    project_name = str(project.get("name") or project_id).strip() or project_id
+    chapter_count = int(project.get("chapter_count", 0) or 0)
+
+    with acquire_project_write_lock(str(base), owner="webui-project-delete", timeout=0):
+        shutil.rmtree(base)
+
+    return {
+        "project_path": str(base),
+        "project_id": project_id,
+        "project_name": project_name,
+        "chapter_count": chapter_count,
+        "deleted": True,
+    }
+
+
 def save_chapter(project_path: str, text: str) -> str:
     base = Path(project_path)
     chapters_dir = base / "chapters"

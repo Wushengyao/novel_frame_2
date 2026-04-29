@@ -63,6 +63,7 @@ from project_manager import (
     PLANNING_MODE_NONE,
     PLANNING_MODE_VOLUME,
     get_latest_state_snapshot_chapter,
+    delete_project,
     export_project_archive,
     import_project_archive,
     init_project,
@@ -1423,7 +1424,7 @@ def _list_projects() -> list[dict]:
                 "dir_name": path.name,
                 "path": path,
                 "project_id": project.get("project_id", path.name),
-            "name": _repair_display_text(project.get("name", path.name)),
+                "name": _repair_display_text(project.get("name", path.name)),
                 "description": project.get("description", ""),
                 "chapter_count": project.get("chapter_count", 0),
                 "updated_at": project.get("updated_at", ""),
@@ -1439,6 +1440,15 @@ def _find_project(project_id: str) -> Path | None:
         if project["project_id"] == project_id or project["dir_name"] == project_id:
             return project["path"]
     return None
+
+
+def _project_has_active_job(project_path: Path) -> bool:
+    if _active_audiobook_job(project_path) is not None:
+        return True
+    return JOB_REGISTRY.has_active_project_job(
+        project_path,
+        blocking_only=False,
+    )
 
 
 def _build_runtime_config(project_path: Path, overrides: dict[str, str], api_keys: dict[str, str]) -> dict:
@@ -3782,6 +3792,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if len(parts) == 5 and parts[0] == "project" and parts[2] == "chapter" and parts[4] == "polish":
             self._handle_polish_chapter_async(parts[1], parts[3], form)
             return
+        if len(parts) == 3 and parts[0] == "project" and parts[2] == "delete":
+            self._handle_delete_project(parts[1], form)
+            return
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "rollback":
             self._handle_rollback(parts[1], form)
             return
@@ -4544,6 +4557,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         projects = _list_projects()
         cards = []
         for item in projects:
+            project_id = str(item["project_id"])
+            delete_disabled = _project_has_active_job(item["path"])
+            delete_disabled_attr = " disabled" if delete_disabled else ""
             cards.append(
                 f"""
                 <div class="project-card">
@@ -4555,6 +4571,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                     <span class="pill">{escape(item['updated_at'] or '')}</span>
                   </div>
                   {_render_cost_meta(item.get("stats") or {})}
+                  <form method="post" action="/project/{escape(project_id)}/delete" onsubmit="return confirm('删除后将永久移除项目的全部数据，且无法恢复。确定继续吗？')">
+                    <input type="hidden" name="confirm_delete" value="1">
+                    <button class="ghost-button" type="submit"{delete_disabled_attr}>{'项目运行中，暂不可删除' if delete_disabled else '删除项目'}</button>
+                  </form>
                 </div>
                 """
             )
@@ -5614,6 +5634,41 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             )
 
 
+    def _handle_delete_project(self, project_id: str, form: dict[str, str]) -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+        if not form.get("confirm_delete"):
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote("未确认删除操作。")
+            )
+            return
+        if _project_has_active_job(project_path):
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote("当前项目有任务在运行，请稍后再删除项目。")
+            )
+            return
+        try:
+            deleted = delete_project(str(project_path))
+            self._redirect(
+                "/projects?notice="
+                + urllib.parse.quote(f"已删除项目：{(deleted.get('project_name') or project_id)}")
+            )
+        except Exception as exc:
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote(str(exc))
+            )
+
     def _handle_job_page(self, job_id: str, notice: str = "", error: str = "") -> None:
         job = JOB_REGISTRY.get(job_id)
         if job is None:
@@ -5997,6 +6052,16 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <h3>项目迁移</h3>
               <p class="muted">导出完整项目 ZIP，包含正文、状态、快照、插图、有声章节和 llm_logs。llm_logs 可能含模型请求与返回内容。</p>
               {export_control_html}
+            </section>
+            <section class="panel">
+              <h3>删除项目</h3>
+              <form method="post" action="/project/{escape(project_id)}/delete" onsubmit="return confirm('删除后将永久移除项目全部内容且不可恢复。确定继续吗？')">
+                <fieldset{destructive_busy_attr}>
+                  <input type="hidden" name="confirm_delete" value="1">
+                  <div class="warning-box">删除后将移除项目目录、章节、快照、插图、日志和后台任务记录。请确认你已备份需要保留的数据。</div>
+                  <button class="ghost-button" type="submit">删除此项目</button>
+                </fieldset>
+              </form>
             </section>
             <section class="panel">
               <h3>生成插图</h3>
