@@ -9,6 +9,7 @@ from unittest.mock import patch
 from progression_manager import (
     CUSTOM_PROGRESSION_OPTION_ID,
     SELECTION_MODE_RANDOM,
+    SELECTION_MODE_SINGLE,
     auto_select_progression_option,
     ensure_fresh_progression_session,
     normalize_progression_options_response,
@@ -25,10 +26,12 @@ class ProgressionManagerTests(unittest.TestCase):
     def test_validate_option_count_rejects_unsupported_values(self) -> None:
         with self.assertRaises(ValueError):
             validate_option_count(2)
+        self.assertEqual(validate_option_count(1), 1)
 
     def test_validate_selection_mode_rejects_manual_for_auto_only_paths(self) -> None:
         with self.assertRaises(ValueError):
             validate_selection_mode("manual", allow_manual=False)
+        self.assertEqual(validate_selection_mode("single", allow_manual=False), SELECTION_MODE_SINGLE)
 
     @patch("progression_manager.random.choice")
     def test_auto_select_progression_option_ignores_custom_option(self, mocked_choice) -> None:
@@ -47,6 +50,41 @@ class ProgressionManagerTests(unittest.TestCase):
         self.assertEqual(selected, "option_2")
         random_candidates = mocked_choice.call_args.args[0]
         self.assertEqual([item["option_id"] for item in random_candidates], ["option_1", "option_2"])
+
+    @patch("progression_manager.random.choice")
+    def test_auto_select_single_uses_recommended_option_without_random_choice(self, mocked_choice) -> None:
+        session = {
+            "recommended_option_id": "option_2",
+            "options": [
+                {"option_id": "option_1", "custom": False},
+                {"option_id": "option_2", "custom": False},
+                {"option_id": CUSTOM_PROGRESSION_OPTION_ID, "custom": True},
+            ],
+        }
+
+        selected = auto_select_progression_option(session, SELECTION_MODE_SINGLE)
+
+        self.assertEqual(selected, "option_2")
+        mocked_choice.assert_not_called()
+
+    def test_single_option_response_is_auto_marked_recommended(self) -> None:
+        payload = {
+            "options": [
+                {
+                    "option_id": "option_1",
+                    "title": "短程试探",
+                    "plan_summary": "谨慎离开隔离区进行一次短程侦查。",
+                    "plan_steps": ["规划路线", "短程侦查"],
+                    "plan_guidance": "保持紧张感并推进外部风险认知。",
+                    "recommended": False,
+                }
+            ]
+        }
+
+        normalized = normalize_progression_options_response(payload, 1)
+
+        self.assertEqual(normalized["recommended_option_id"], "option_1")
+        self.assertTrue(normalized["options"][0]["recommended"])
 
     def test_normalize_progression_options_requires_exactly_one_recommended(self) -> None:
         payload = {

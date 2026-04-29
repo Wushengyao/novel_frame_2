@@ -1115,6 +1115,44 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         auto_job = self._wait_for_job_status(auto_jobs[0]["id"])
         self.assertFalse(auto_job.get("blocks_project", True))
 
+    def test_continue_async_single_passes_single_mode_and_refreshes_one_plan(self) -> None:
+        session_payload = {
+            "session_id": "session_single_auto",
+            "created_at": "2026-04-20T00:00:00+00:00",
+            "project_chapter_count": 1,
+            "target_chapter_number": 2,
+            "planning_mode": "chapter",
+            "source_user_request": "",
+            "runtime_overrides": {},
+            "recommended_option_id": "option_1",
+            "option_count": 1,
+            "options": [],
+            "status": "pending",
+            "selected_option_id": "",
+            "selection_feedback": "",
+        }
+
+        with patch("webui.run_next_chapters", return_value=[str(self.project_path / "chapters" / "chapter_0001.md")]) as mocked_run_next_chapters, patch(
+            "webui.generate_progression_options",
+            return_value=session_payload,
+        ) as mocked_generate_progression:
+            response = self._post(
+                "/project/web/continue",
+                "count=1&selection_mode=single&user_request=%E5%BF%AB%E9%80%9F%E6%8E%A8%E8%BF%9B",
+            )
+            self.assertEqual(response.status, 303)
+            job_id = response.getheader("Location").rsplit("/", 1)[-1]
+            self._wait_for_job_status(job_id)
+            _, run_kwargs = mocked_run_next_chapters.call_args
+            self.assertEqual(run_kwargs["selection_mode"], "single")
+
+            jobs = webui.JOB_REGISTRY.list_jobs(project_id="web", active_only=False, limit=8)
+            auto_jobs = [job for job in jobs if job.get("kind") == "progression_options_auto"]
+            self.assertEqual(len(auto_jobs), 1)
+            self._wait_for_job_status(auto_jobs[0]["id"])
+            _, progression_kwargs = mocked_generate_progression.call_args
+            self.assertEqual(progression_kwargs["option_count"], 1)
+
     def test_continue_async_rejects_same_project_when_blocking_job_active(self) -> None:
         webui.JOB_REGISTRY.create_job(
             kind="continue",

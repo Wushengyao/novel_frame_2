@@ -46,7 +46,9 @@ from illustration_manager import get_illustration_record, illustrate_chapters, l
 from polish_manager import POLISH_PRESETS, run_chapter_polish
 from progression_manager import (
     CUSTOM_PROGRESSION_OPTION_ID,
+    DEFAULT_OPTION_COUNT,
     SELECTION_MODE_RECOMMENDED,
+    SELECTION_MODE_SINGLE,
     ensure_fresh_progression_session,
     generate_progression_options,
     get_latest_active_progression_session,
@@ -1371,13 +1373,18 @@ def _render_review_mode_options(selected: str, *, include_project_default: bool 
 
 
 def _auto_selection_mode_label(mode: str) -> str:
-    return "随机模式" if str(mode or "").strip().lower() == "random" else "推荐模式"
+    normalized = str(mode or "").strip().lower()
+    if normalized == "random":
+        return "随机模式"
+    if normalized == SELECTION_MODE_SINGLE:
+        return "单项快速"
+    return "推荐模式"
 
 
 def _render_auto_selection_mode_options(selected: str) -> str:
     normalized = validate_selection_mode(selected, allow_manual=False)
     options = []
-    for value in ("recommended", "random"):
+    for value in ("recommended", "random", SELECTION_MODE_SINGLE):
         selected_attr = ' selected' if normalized == value else ""
         options.append(f'<option value="{value}"{selected_attr}>{_auto_selection_mode_label(value)}</option>')
     return "".join(options)
@@ -1386,8 +1393,8 @@ def _render_auto_selection_mode_options(selected: str) -> str:
 def _auto_continue_help(mode: str) -> str:
     normalized_mode = normalize_planning_mode(mode)
     if normalized_mode == PLANNING_MODE_NONE:
-        return "自动续写时，每一章都会先提炼 objective，再生成多个 plan；你这次填写的目标 / 倾向会同时影响每章 objective 与 plan。"
-    return "自动续写时，每一章都会先围绕当前 objective 生成多个 plan，再按所选策略自动挑一个执行；你这次填写的目标 / 倾向只影响 plan，不改写 objective。"
+        return "自动续写时，每一章都会先提炼 objective；推荐/随机模式会生成多个 plan，单项快速只生成 1 个 plan 并直接执行。你这次填写的目标 / 倾向会同时影响每章 objective 与 plan。"
+    return "自动续写时，每一章都会先围绕当前 objective 生成 plan；推荐/随机模式会生成多个 plan，单项快速只生成 1 个 plan 并直接执行。你这次填写的目标 / 倾向只影响 plan，不改写 objective。"
 
 
 def _resolve_timeout_for_provider(provider: str, raw_value: object) -> int:
@@ -1519,7 +1526,11 @@ def _enqueue_progression_job(
             progress_callback=progress_callback,
         )
         return {
-            "message": f"已生成 {len(session.get('options', []))} 个下一章推进选项。",
+            "message": (
+                "已生成 "
+                f"{len([option for option in session.get('options', []) if not option.get('custom')])}"
+                " 个模型推进选项。"
+            ),
             "result_url": "/project/" + urllib.parse.quote(project_id),
             "result_label": "查看项目页",
             "project_id": project_id,
@@ -2533,7 +2544,7 @@ def _render_progression_session(
                 f'<div class="muted"><a href="/job/{escape(active_job.get("id", ""))}">查看任务详情</a></div>'
                 "</div>"
             )
-        return '<p class="muted">还没有已生成的下一章推进选项。先填写偏好并生成 3-5 个候选方案；系统会额外附带 1 个空白自定义项。</p>'
+        return '<p class="muted">还没有已生成的下一章推进选项。先填写偏好并生成 1、3、4 或 5 个候选方案；系统会额外附带 1 个空白自定义项。</p>'
 
     options_html = []
     recommended_option_id = str(session.get("recommended_option_id", "") or "").strip()
@@ -6076,7 +6087,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <div class="option-panel-head">
                 <div>
                   <h2>剧情推进选项</h2>
-                  <p class="muted">围绕当前小说状态生成下一章的多个推进方案。系统会生成 3-5 个候选方案，并额外附带 1 个空白自定义项。现在会在项目创建完成、正文写完后自动后台刷新，你也可以在这里手动再生成一组。</p>
+                  <p class="muted">围绕当前小说状态生成下一章推进方案。系统可生成 1、3、4 或 5 个候选方案，并额外附带 1 个空白自定义项。现在会在项目创建完成、正文写完后自动后台刷新，你也可以在这里手动再生成一组。</p>
                 </div>
                 <span class="pill">固定作用于下一章</span>
               </div>
@@ -6085,6 +6096,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                   <div class="two-col">
                     <label>选项数量
                       <select name="option_count">
+                        <option value="1">1 个（单项快速）</option>
                         <option value="3">3 个</option>
                         <option value="4" selected>4 个</option>
                         <option value="5">5 个</option>
@@ -6231,6 +6243,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 project_id,
                 project_path,
                 runtime_config,
+                option_count=1 if selection_mode == SELECTION_MODE_SINGLE else DEFAULT_OPTION_COUNT,
                 runtime_overrides=runtime_overrides,
                 title=f"生成《{project_id}》的下一章推进选项",
                 auto_generated=True,
@@ -6329,6 +6342,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             )
             if session.get("status") == "stale":
                 raise RuntimeError("当前推进选项已过期，请重新生成推进选项。")
+            try:
+                session_option_count = int(session.get("option_count") or DEFAULT_OPTION_COUNT)
+            except (TypeError, ValueError):
+                session_option_count = DEFAULT_OPTION_COUNT
             runtime_overrides = session.get("runtime_overrides") or {}
             runtime_config = _build_runtime_config(
                 project_path,
@@ -6366,6 +6383,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 project_id,
                 project_path,
                 runtime_config,
+                option_count=1 if session_option_count == 1 else DEFAULT_OPTION_COUNT,
                 runtime_overrides=runtime_overrides,
                 title=f"刷新《{project_id}》的下一章推进选项",
                 auto_generated=True,

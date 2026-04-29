@@ -36,7 +36,9 @@ from outline_manager import (
 )
 from progression_manager import (
     CUSTOM_PROGRESSION_OPTION_ID,
+    DEFAULT_OPTION_COUNT,
     SELECTION_MODE_RECOMMENDED,
+    SELECTION_MODE_SINGLE,
     auto_select_progression_option,
     generate_auto_chapter_objective,
     generate_progression_options,
@@ -645,6 +647,7 @@ def run_next_chapters(
             config,
             user_request=user_request,
             objective_override=objective_override,
+            option_count=1 if normalized_selection_mode == SELECTION_MODE_SINGLE else DEFAULT_OPTION_COUNT,
             runtime_overrides=runtime_overrides,
             progress_callback=progress_callback,
         )
@@ -798,7 +801,7 @@ def main() -> None:
     next_parser.add_argument(
         "--selection-mode",
         default=SELECTION_MODE_RECOMMENDED,
-        choices=("recommended", "random"),
+        choices=("recommended", "random", "single"),
         help="How automatic continuation chooses a plan for each chapter",
     )
     next_parser.add_argument("--progression-session", default="", help="Guided progression session id")
@@ -910,7 +913,7 @@ def main() -> None:
     options_parser.add_argument("--config", help="Optional config.json to override saved LLM settings")
     options_parser.add_argument("--objective", default="", help="Optional override for the next chapter objective before generating plans")
     options_parser.add_argument("--user-request", default="", help="Optional preference for guided options")
-    options_parser.add_argument("--option-count", type=int, default=4, choices=(3, 4, 5), help="How many model-generated options to generate; a blank custom option is always added")
+    options_parser.add_argument("--option-count", type=int, default=4, choices=(1, 3, 4, 5), help="How many model-generated options to generate; a blank custom option is always added")
     options_parser.add_argument(
         "--planning-mode",
         choices=(PLANNING_MODE_NONE, PLANNING_MODE_VOLUME, PLANNING_MODE_CHAPTER),

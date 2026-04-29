@@ -32,16 +32,18 @@ from runtime_config import sanitize_runtime_overrides
 
 
 DEFAULT_OPTION_COUNT = 4
-ALLOWED_OPTION_COUNTS = {3, 4, 5}
+ALLOWED_OPTION_COUNTS = {1, 3, 4, 5}
 SESSION_DIR_NAME = "progression_sessions"
 CUSTOM_PROGRESSION_OPTION_ID = "custom_user_option"
 SELECTION_MODE_MANUAL = "manual"
 SELECTION_MODE_RECOMMENDED = "recommended"
 SELECTION_MODE_RANDOM = "random"
+SELECTION_MODE_SINGLE = "single"
 ALLOWED_SELECTION_MODES = {
     SELECTION_MODE_MANUAL,
     SELECTION_MODE_RECOMMENDED,
     SELECTION_MODE_RANDOM,
+    SELECTION_MODE_SINGLE,
 }
 SELECTION_ORIGIN_USER = "user"
 SELECTION_ORIGIN_AUTO = "auto"
@@ -50,7 +52,7 @@ SELECTION_ORIGIN_AUTO = "auto"
 def validate_option_count(option_count: object) -> int:
     count = safe_int(option_count, DEFAULT_OPTION_COUNT)
     if count not in ALLOWED_OPTION_COUNTS:
-        raise ValueError("option_count must be one of: 3, 4, 5.")
+        raise ValueError("option_count must be one of: 1, 3, 4, 5.")
     return count
 
 
@@ -59,11 +61,11 @@ def validate_selection_mode(selection_mode: object, *, allow_manual: bool = True
     if not mode:
         return SELECTION_MODE_MANUAL if allow_manual else SELECTION_MODE_RECOMMENDED
     if mode == SELECTION_MODE_MANUAL and not allow_manual:
-        raise ValueError("selection_mode must be one of: recommended, random.")
+        raise ValueError("selection_mode must be one of: recommended, random, single.")
     if mode not in ALLOWED_SELECTION_MODES:
         if allow_manual:
-            raise ValueError("selection_mode must be one of: manual, recommended, random.")
-        raise ValueError("selection_mode must be one of: recommended, random.")
+            raise ValueError("selection_mode must be one of: manual, recommended, random, single.")
+        raise ValueError("selection_mode must be one of: recommended, random, single.")
     return mode
 
 
@@ -136,6 +138,9 @@ def normalize_progression_options_response(data: dict, option_count: int) -> dic
             found = found or option["recommended"]
         if not found:
             raise ValueError("recommended_option_id does not match any option_id")
+    elif count == 1:
+        recommended_option_id = normalized[0]["option_id"]
+        normalized[0]["recommended"] = True
 
     recommended = [option for option in normalized if option.get("recommended")]
     if len(recommended) != 1:
@@ -253,7 +258,7 @@ def auto_select_progression_option(session: dict, selection_mode: object) -> str
     options = _non_custom_options(session.get("options") or [])
     if not options:
         raise ValueError("当前没有可用的模型推进选项可供自动选择。")
-    if mode == SELECTION_MODE_RECOMMENDED:
+    if mode in {SELECTION_MODE_RECOMMENDED, SELECTION_MODE_SINGLE}:
         recommended_option_id = str(session.get("recommended_option_id", "") or "").strip()
         if recommended_option_id:
             return recommended_option_id
@@ -471,6 +476,7 @@ def generate_progression_options(
         "planning_mode": planning_mode,
         "source_user_request": user_request.strip(),
         "objective": objective_context,
+        "option_count": count,
         "runtime_overrides": sanitize_runtime_overrides(runtime_overrides),
         "recommended_option_id": normalized["recommended_option_id"],
         "options": normalized["options"] + [build_custom_progression_option()],

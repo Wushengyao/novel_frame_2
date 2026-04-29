@@ -187,10 +187,11 @@ try {
 		}
 	}
 	else {
-		$autoSelectionMode = Prompt-OptionalValue -PromptText "Auto plan selection mode (recommended/random)" -DefaultValue "recommended"
-		if ($autoSelectionMode -ne "random") {
-			$autoSelectionMode = "recommended"
-		}
+			$autoSelectionMode = Prompt-OptionalValue -PromptText "Auto plan selection mode (recommended/random/single)" -DefaultValue "recommended"
+			$autoSelectionMode = $autoSelectionMode.Trim().ToLowerInvariant()
+			if ($autoSelectionMode -notin @("random", "single")) {
+				$autoSelectionMode = "recommended"
+			}
 		$nextArgs = @(
 			(Join-Path $ProjectRoot "app.py"),
 			"next",

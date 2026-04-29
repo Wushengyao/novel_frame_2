@@ -617,6 +617,56 @@ class GuidedFlowTests(unittest.TestCase):
             task_card = read_json(project_path / "task_cards" / "chapter_0001.json")
             self.assertEqual(task_card["derived_from"]["option_id"], "option_2")
 
+    def test_auto_continue_single_generates_one_plan_and_selects_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="auto_single")
+            options_payload = {
+                "options": [
+                    {
+                        "option_id": "option_1",
+                        "title": "短程试探",
+                        "plan_summary": "谨慎离开隔离区进行一次短程侦查。",
+                        "plan_steps": ["规划路线", "短程侦查"],
+                        "plan_guidance": "保持紧张感并推进外部风险认知。",
+                        "recommended": False,
+                    }
+                ]
+            }
+
+            with patch(
+                "progression_manager.generate_text_with_metadata",
+                return_value=(json.dumps(options_payload, ensure_ascii=False), {"usage": {}}),
+            ) as mocked_progression_generate, patch(
+                "app.generate_text_with_metadata",
+                return_value=("第一章正文", {"usage": {}}),
+            ), patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ):
+                chapter_paths = run_next_chapters(
+                    str(project_path),
+                    runtime_config("chapter"),
+                    1,
+                    user_request="我想快速推进一次外部试探",
+                    selection_mode="single",
+                )
+
+            self.assertEqual(len(chapter_paths), 1)
+            mocked_progression_generate.assert_called_once()
+            _, progression_call_kwargs = mocked_progression_generate.call_args
+            self.assertEqual(progression_call_kwargs["log_context"]["option_count"], 1)
+            session_files = sorted((project_path / "progression_sessions").glob("progression_*.json"))
+            self.assertEqual(len(session_files), 1)
+            session = read_json(session_files[0])
+            self.assertEqual(session["option_count"], 1)
+            self.assertEqual(session["selection_mode"], "single")
+            self.assertEqual(session["selection_origin"], "auto")
+            self.assertEqual(session["selected_option_id"], "option_1")
+            self.assertEqual(session["recommended_option_id"], "option_1")
+            task_card = read_json(project_path / "task_cards" / "chapter_0001.json")
+            self.assertEqual(task_card["derived_from"]["option_id"], "option_1")
+            self.assertEqual(task_card["plan_summary"], "谨慎离开隔离区进行一次短程侦查。")
+
     def test_auto_continue_random_in_none_mode_regenerates_objective_each_chapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp), project_id="auto_none", planning_mode="none")

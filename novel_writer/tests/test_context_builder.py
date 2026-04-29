@@ -551,6 +551,56 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertNotIn("chapter_outline", progression_prompt)
             self.assertIn("plan_summary", progression_prompt)
 
+    def test_single_progression_prompt_requests_unique_best_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="single_prompt")
+            project_data = load_project(str(project_path))
+            next_context = {
+                "volume": {"volume_number": 1, "title": "第一卷", "story_goal": "建立据点"},
+                "chapter": {
+                    "chapter_number": 1,
+                    "title": "死寂的隔离区",
+                    "summary": "三人确认隔离区现状。",
+                    "goal": "建立临时安全区",
+                    "key_events": ["检查门锁", "分配值守"],
+                },
+            }
+            recent_text = "这是开篇前状态。"
+
+            progression_context = build_progression_context(
+                str(project_path),
+                project_data,
+                next_context,
+                recent_text,
+                user_request="快速推进一次外部试探",
+                option_count=1,
+                planning_mode="chapter",
+            )
+            single_prompt = build_progression_options_prompt(
+                progression_context,
+                recent_text,
+                next_context,
+                user_request="快速推进一次外部试探",
+                option_count=1,
+                planning_mode="chapter",
+            )
+            multi_context = dict(progression_context)
+            multi_context["sections"] = dict(progression_context["sections"])
+            multi_context["sections"]["option_count"] = 4
+            multi_prompt = build_progression_options_prompt(
+                multi_context,
+                recent_text,
+                next_context,
+                user_request="快速推进一次外部试探",
+                option_count=4,
+                planning_mode="chapter",
+            )
+
+            self.assertIn("唯一最优推进项", single_prompt)
+            self.assertIn("恰好 1 个推进项", single_prompt)
+            self.assertIn("recommended=true", single_prompt)
+            self.assertNotIn("唯一最优推进项", multi_prompt)
+
     def test_summary_context_includes_completed_task_and_prompt_guides_next_goal_forward(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp), project_id="summary_task")

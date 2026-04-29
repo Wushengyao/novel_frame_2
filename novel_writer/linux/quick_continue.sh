@@ -234,8 +234,9 @@ if [[ "$CONTINUE_MODE" == "guided" ]]; then
     NEXT_ARGS+=(--progression-feedback "$GUIDED_FEEDBACK")
   fi
 else
-  AUTO_SELECTION_MODE="$(prompt_optional_value "Auto plan selection mode (recommended/random)" "recommended")"
-  if [[ "$AUTO_SELECTION_MODE" != "random" ]]; then
+  AUTO_SELECTION_MODE="$(prompt_optional_value "Auto plan selection mode (recommended/random/single)" "recommended")"
+  AUTO_SELECTION_MODE="${AUTO_SELECTION_MODE,,}"
+  if [[ "$AUTO_SELECTION_MODE" != "random" && "$AUTO_SELECTION_MODE" != "single" ]]; then
     AUTO_SELECTION_MODE="recommended"
   fi
   NEXT_ARGS=(

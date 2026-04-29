@@ -700,8 +700,20 @@ def build_progression_options_prompt(
     if isinstance(data, dict) and isinstance(data.get("sections"), dict):
         sections = data["sections"]
         option_total = int(sections.get("option_count", option_count) or option_count)
+        if option_total == 1:
+            opening = "你是长篇连载小说的剧情推进顾问。请只为下一章设计一个唯一最优推进项，供自动续写直接执行。"
+            count_rule = "必须返回恰好 1 个推进项；它应是当前信息下质量最高、最稳妥且最有推进力的方案"
+            recommendation_rule = "这个唯一推进项必须 `recommended=true`，`recommended_option_id` 必须与它一致"
+            objective_rule = "推进项要尊重既有设定、当前状态、最近场景和下一章任务卡；把任务卡里的 `objective` 当作硬约束，设计一个可直接执行的 plan"
+            scope_rule = "推进项只明确这一章的切入角度、推进顺序和强调重点，不要另起一个与当前任务卡冲突的新目标"
+        else:
+            opening = "你是长篇连载小说的剧情推进顾问。请只为下一章设计若干互斥且都合理的推进方案。"
+            count_rule = f"必须返回恰好 {option_total} 个互斥选项，且只能有一个 `recommended=true`"
+            recommendation_rule = "`recommended_option_id` 必须与唯一的推荐项一致"
+            objective_rule = "方案要尊重既有设定、当前状态、最近场景和下一章任务卡；先把任务卡里的 `objective` 当作硬约束，再基于它设计不同 plan"
+            scope_rule = "选项只改变这一章的切入角度、推进顺序和强调重点，不要另起一个与当前任务卡冲突的新目标"
         prompt_body = _join_blocks(
-            "你是长篇连载小说的剧情推进顾问。请只为下一章设计若干互斥且都合理的推进方案。",
+            opening,
             _section_block("作者意图", sections.get("author_intent", "")),
             _section_block("下一章任务卡", sections.get("chapter_task", "")),
             _section_block("世界观速览", sections.get("static_world", "")),
@@ -718,10 +730,10 @@ def build_progression_options_prompt(
 要求：
 1. 输出必须是合法 JSON
 2. 只针对下一章给方案，不要把两三章后的核心剧情提前塞进来
-3. 必须返回恰好 {option_total} 个互斥选项，且只能有一个 `recommended=true`
-4. `recommended_option_id` 必须与唯一的推荐项一致
-5. 方案要尊重既有设定、当前状态、最近场景和下一章任务卡；先把任务卡里的 `objective` 当作硬约束，再基于它设计不同 plan
-6. 选项只改变这一章的切入角度、推进顺序和强调重点，不要另起一个与当前任务卡冲突的新目标
+3. {count_rule}
+4. {recommendation_rule}
+5. {objective_rule}
+6. {scope_rule}
 7. 每个选项都必须包含 `option_id`、`title`、`plan_summary`、`plan_steps`、`plan_guidance`、`recommended`
 8. `plan_steps` 给 2 到 5 个条目，写本章真正会发生的推进节点
 9. `plan_summary` 要描述这一章会怎么推进；`plan_guidance` 只补充写法与强调点，不要偷偷改写章节主目标
@@ -731,7 +743,21 @@ def build_progression_options_prompt(
 {{"recommended_option_id":"option_1","options":[{{"option_id":"option_1","title":"","plan_summary":"","plan_steps":["",""],"plan_guidance":"","recommended":true}}]}}
 """
 
-    return f"""你是长篇连载小说的剧情推进顾问。请为“下一章”设计若干互斥但都合理的推进方案，供用户二选一或多选一中的单选。
+    option_total = int(option_count or 4)
+    if option_total == 1:
+        opening = "你是长篇连载小说的剧情推进顾问。请为“下一章”设计一个唯一最优推进项，供自动续写直接执行。"
+        count_rule = "必须返回恰好 1 个推进项；它应是当前信息下质量最高、最稳妥且最有推进力的方案"
+        recommendation_rule = "这个唯一推进项必须 `recommended=true`，并且 `recommended_option_id` 必须与该推进项一致"
+        objective_rule = "推进项要尊重既有设定、最近正文、当前剧情状态和下一章上下文，不要推翻已有章纲；把当前任务卡里的 `objective` 当作硬约束，设计一个可直接执行的 plan"
+        scope_rule = "推进项只明确这一章怎么推进，不要另起一个与当前任务卡或章纲冲突的新目标"
+    else:
+        opening = "你是长篇连载小说的剧情推进顾问。请为“下一章”设计若干互斥但都合理的推进方案，供用户二选一或多选一中的单选。"
+        count_rule = f"必须返回恰好 {option_total} 个互斥选项，每个选项都应代表这一章的不同重心或不同推进路径"
+        recommendation_rule = "只能有一个选项 `recommended=true`，并且 `recommended_option_id` 必须与该选项一致"
+        objective_rule = "方案要尊重既有设定、最近正文、当前剧情状态和下一章上下文，不要推翻已有章纲；先把当前任务卡里的 `objective` 当作硬约束，再基于它设计不同 plan"
+        scope_rule = "选项只改变这一章怎么推进，不要另起一个与当前任务卡或章纲冲突的新目标"
+
+    return f"""{opening}
 
 【项目】{project}
 
@@ -758,14 +784,14 @@ def build_progression_options_prompt(
 {user_request_block}
 
 【需要给出的选项数】
-{option_count}
+{option_total}
 
 要求：
 1. 输出必须是合法 JSON
 2. 必须只针对“下一章”给方案，不要把两三章后的核心剧情提前塞进来
-3. 必须返回恰好 {option_count} 个互斥选项，每个选项都应代表这一章的不同重心或不同推进路径
-4. 方案要尊重既有设定、最近正文、当前剧情状态和下一章上下文，不要推翻已有章纲；先把当前任务卡里的 `objective` 当作硬约束，再基于它设计不同 plan
-5. 选项只改变这一章怎么推进，不要另起一个与当前任务卡或章纲冲突的新目标
+3. {count_rule}
+4. {objective_rule}
+5. {scope_rule}
 6. 每个选项都必须包含：
    - `option_id`
    - `title`
@@ -775,7 +801,7 @@ def build_progression_options_prompt(
    - `recommended`
 7. `plan_summary` 描述本章会怎么推进；`plan_guidance` 只补充写法、氛围和强调点，不要改写章节主目标
 8. `plan_steps` 要给出 2 到 5 个条目，写本章会实际发生的关键推进
-9. 只能有一个选项 `recommended=true`，并且 `recommended_option_id` 必须与该选项一致
+9. {recommendation_rule}
 10. 不要输出解释，不要输出 Markdown
 
 输出 JSON：
