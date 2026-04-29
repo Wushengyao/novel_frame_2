@@ -3930,6 +3930,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             auth_settings=auth_settings,
             authenticated=authenticated,
         )
+        external_service_panel_html = _render_external_service_panel()
 
         body = f"""
         <div class="grid">
@@ -3968,6 +3969,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               </form>
             </section>
             {admin_html}
+            {external_service_panel_html}
           </div>
           <section class="panel">
             <h2>主题预览</h2>
@@ -4561,8 +4563,6 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             JOB_REGISTRY.list_jobs(limit=6),
             "当前还没有后台任务。",
         )
-        external_service_panel_html = _render_external_service_panel()
-
         body = f"""
         <div class="grid">
           <div class="stack">
@@ -4698,7 +4698,6 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 <button type="submit">导入项目包</button>
               </form>
             </section>
-            {external_service_panel_html}
           </div>
           <section class="panel">
             <div class="hero">
@@ -4940,10 +4939,6 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <h3>章节目录</h3>
                 </fieldset>
               </form>
-            </section>
-            <section class="panel">
-              <h3>章节目录</h3>
-              <div class="chapter-list">{chapter_links}</div>
             </section>
           </aside>
           <main class="stack">
@@ -5874,6 +5869,31 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         character_voice_options_html = _render_character_voice_options(project_path)
         latest_chapter_text = escape(chapters[-1]["text"]) if chapters else "还没有正文。"
         snapshot_text = f"已保存到第 {latest_snapshot} 章" if latest_snapshot is not None else "暂无"
+        continue_advanced_toggle_script = """
+        <script>
+        (() => {
+          const toggle = document.querySelector("[data-continue-advanced-toggle]");
+          if (!toggle) {
+            return;
+          }
+          const panel = document.querySelector("[data-continue-advanced-panel]");
+          if (!panel) {
+            return;
+          }
+          let expanded = false;
+          const render = () => {
+            panel.hidden = !expanded;
+            toggle.textContent = expanded ? "收起高级选项" : "展开高级选项";
+            toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+          };
+          toggle.addEventListener("click", () => {
+            expanded = !expanded;
+            render();
+          });
+          render();
+        })();
+        </script>
+        """
         project_live_script = ""
         if progression_jobs:
             project_live_script = f"""
@@ -5894,6 +5914,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         body = f"""
         <div class="project-layout">
           <aside class="stack project-sidebar">
+            <section class="panel">
+              <h3>章节目录</h3>
+              <div class="chapter-list">{chapter_links}</div>
+            </section>
             <section class="panel">
               <h2>{escape(project_name)}</h2>
               <p class="meta">{escape(project.get("description", ""))}</p>
@@ -5941,7 +5965,12 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                   <label>想看的内容 / 情节走向
                     <textarea name="user_request" placeholder="例如：先推进食堂据点建设，再增加一点轻松互怼的互动。"></textarea>
                   </label>
-                  {runtime_override_fields_html}
+                  <button type="button" class="ghost-button" data-continue-advanced-toggle aria-expanded="false" aria-controls="continue-advanced-options">
+                    展开高级选项
+                  </button>
+                  <div id="continue-advanced-options" data-continue-advanced-panel hidden>
+                    {runtime_override_fields_html}
+                  </div>
                   <label><input type="checkbox" name="illustrate_generated" value="1"> 续写完成后立即调用 ComfyUI 生成插图</label>
                   <label>插图额外要求（可选）
                     <input type="text" name="illustration_request" placeholder="例如：突出雪夜窗景与室内暖光反差。">
@@ -6069,10 +6098,6 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 </fieldset>
               </form>
             </section>
-            <section class="panel">
-              <h3>章节目录</h3>
-              <div class="chapter-list">{chapter_links}</div>
-            </section>
           </aside>
           <main class="stack project-main">
             <section class="panel">
@@ -6139,6 +6164,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
           </main>
         </div>
         {project_live_script}
+        {continue_advanced_toggle_script}
         """
         self._write_html(
             _render_page(

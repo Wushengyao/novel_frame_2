@@ -204,18 +204,23 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         }
         with patch("webui._external_service_health_snapshot", return_value=cached_status):
             with patch("webui._refresh_external_service_health", return_value=refreshed_status) as refresh:
-                projects_page = self._get("/projects")
+                settings_page = self._get("/settings")
                 api_response = self._get("/api/external-services/check")
 
-        self.assertEqual(projects_page.status, 200)
-        self.assertIn("data-external-service-panel", projects_page.body)
-        self.assertIn("data-external-service-check", projects_page.body)
-        self.assertIn("/api/external-services/check", projects_page.body)
+        self.assertEqual(settings_page.status, 200)
+        self.assertIn("data-external-service-panel", settings_page.body)
+        self.assertIn("data-external-service-check", settings_page.body)
+        self.assertIn("/api/external-services/check", settings_page.body)
         self.assertEqual(api_response.status, 200)
         payload = json.loads(api_response.body)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["services"][1]["status"], "failed")
         refresh.assert_called_once_with()
+
+        # 项目列表页面不应再渲染外部服务面板（已迁移到设置页）。
+        projects_page = self._get("/projects")
+        self.assertEqual(projects_page.status, 200)
+        self.assertNotIn("data-external-service-panel", projects_page.body)
 
     def test_project_pages_show_token_cost_statistics(self) -> None:
         project_file = self.project_path / "project.json"
@@ -1893,6 +1898,26 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertNotIn("维护操作", page.body)
         self.assertNotIn("/admin/restart", page.body)
         self.assertNotIn("/admin/update", page.body)
+
+    def test_project_page_chapter_list_is_top_and_continue_advanced_collapsed_by_default(self) -> None:
+        page = self._get("/project/web")
+        self.assertEqual(page.status, 200)
+
+        chapter_section_pos = page.body.find("<h3>章节目录</h3>")
+        project_section_pos = page.body.find("<h2>Test Project</h2>")
+        self.assertGreater(chapter_section_pos, -1)
+        self.assertGreater(project_section_pos, -1)
+        self.assertLess(
+            chapter_section_pos,
+            project_section_pos,
+            "章节目录应当位于项目名称信息卡片之前（靠上）",
+        )
+        self.assertIn('data-continue-advanced-toggle', page.body)
+        self.assertIn('data-continue-advanced-panel', page.body)
+        self.assertIn(
+            'id="continue-advanced-options" data-continue-advanced-panel hidden',
+            page.body,
+        )
 
     # ── Settings navigation link ───────────────────────────────────
 
