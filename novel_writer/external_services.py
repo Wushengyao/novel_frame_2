@@ -98,6 +98,7 @@ DEFAULT_EXTERNAL_SERVICES_CONFIG: dict[str, Any] = {
         "api_base": DEFAULT_AUDIO_FRAME_API_BASE,
         "api_bases": [DEFAULT_AUDIO_FRAME_API_BASE],
         "workers": 1,
+        "endpoints": [],
         "timeout": 0,
     },
     "audiobook": {
@@ -201,6 +202,69 @@ def coerce_float(raw_value: object, default: float) -> float:
         return float(raw_value)
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_endpoint_items(value: object) -> list[object]:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return text.replace(",", " ").replace(";", " ").split()
+        return parsed if isinstance(parsed, list) else []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return []
+
+
+def normalize_audio_frame_endpoints(raw_endpoints: object, api_bases: list[str], workers: int) -> list[dict[str, Any]]:
+    endpoints: list[dict[str, Any]] = []
+    for item in _coerce_endpoint_items(raw_endpoints):
+        if isinstance(item, dict):
+            raw_base = item.get("api_base") or item.get("base") or item.get("url")
+            kind = str(item.get("kind") or "gpu").strip().lower()
+            endpoint = {
+                "api_base": normalize_http_base(raw_base, DEFAULT_AUDIO_FRAME_API_BASE),
+                "kind": kind if kind in {"gpu", "cpu"} else "gpu",
+                "capacity": max(1, coerce_int(item.get("capacity"), 1)),
+                "max_chars": max(0, coerce_int(item.get("max_chars"), 0)),
+                "speed": max(0.01, coerce_float(item.get("speed"), 1.0)),
+            }
+        else:
+            endpoint = {
+                "api_base": normalize_http_base(item, DEFAULT_AUDIO_FRAME_API_BASE),
+                "kind": "gpu",
+                "capacity": 1,
+                "max_chars": 0,
+                "speed": 1.0,
+            }
+        if endpoint["kind"] == "gpu":
+            endpoint["max_chars"] = 0
+        endpoints.append(endpoint)
+
+    if endpoints:
+        return endpoints
+
+    bases = api_bases or [DEFAULT_AUDIO_FRAME_API_BASE]
+    total_workers = max(1, workers)
+    if total_workers < len(bases):
+        bases = bases[:total_workers]
+    fallback_endpoints = []
+    for index, api_base in enumerate(bases):
+        base_capacity = total_workers // len(bases)
+        extra = 1 if index < total_workers % len(bases) else 0
+        fallback_endpoints.append(
+            {
+                "api_base": api_base,
+                "kind": "gpu",
+                "capacity": max(1, base_capacity + extra),
+                "max_chars": 0,
+                "speed": 1.0,
+            }
+        )
+    return fallback_endpoints
 
 
 class ComfyUIClient:
@@ -375,10 +439,20 @@ def normalize_image_frame_runtime(raw_config: dict[str, Any] | None) -> dict[str
 def normalize_audio_frame_runtime(raw_config: dict[str, Any] | None) -> dict[str, Any]:
     raw = raw_config if isinstance(raw_config, dict) else {}
     api_bases = normalize_http_bases(raw.get("api_bases") or raw.get("api_base"), DEFAULT_AUDIO_FRAME_API_BASE)
+    configured_workers = max(1, coerce_int(raw.get("workers"), len(api_bases)))
+    endpoints = normalize_audio_frame_endpoints(raw.get("endpoints"), api_bases, configured_workers)
+    endpoint_bases = []
+    seen: set[str] = set()
+    for endpoint in endpoints:
+        base = str(endpoint.get("api_base") or "").strip()
+        if base and base not in seen:
+            endpoint_bases.append(base)
+            seen.add(base)
     return {
-        "api_base": api_bases[0],
-        "api_bases": api_bases,
-        "workers": max(1, coerce_int(raw.get("workers"), len(api_bases))),
+        "api_base": endpoint_bases[0] if endpoint_bases else api_bases[0],
+        "api_bases": endpoint_bases or api_bases,
+        "workers": max(1, sum(max(1, coerce_int(endpoint.get("capacity"), 1)) for endpoint in endpoints)),
+        "endpoints": endpoints,
         "timeout": coerce_int(raw.get("timeout"), 0),
     }
 
@@ -407,6 +481,7 @@ def _audio_frame_env_overrides() -> dict[str, Any]:
     mapping = {
         "api_base": "NOVEL_AUDIO_FRAME_API_BASE",
         "api_bases": "NOVEL_AUDIO_FRAME_API_BASES",
+        "endpoints": "NOVEL_AUDIO_FRAME_ENDPOINTS",
         "workers": "NOVEL_AUDIO_FRAME_WORKERS",
         "timeout": "NOVEL_AUDIO_FRAME_TIMEOUT",
     }
@@ -433,6 +508,11 @@ def load_audio_frame_runtime(runtime_overrides: dict[str, Any] | None = None) ->
         runtime_overrides or {},
     ):
         if isinstance(layer, dict):
+            if (
+                (layer.get("api_base") not in (None, "") or layer.get("api_bases") not in (None, ""))
+                and "endpoints" not in layer
+            ):
+                raw.pop("endpoints", None)
             if layer.get("api_base") not in (None, "") and "api_bases" not in layer:
                 raw.pop("api_bases", None)
             raw.update(layer)

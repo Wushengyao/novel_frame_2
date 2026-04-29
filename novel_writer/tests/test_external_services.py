@@ -120,6 +120,50 @@ class ExternalServicesConfigTests(unittest.TestCase):
 
         self.assertEqual(override_runtime["api_bases"], ["http://127.0.0.1:8899"])
 
+    def test_audio_frame_runtime_supports_weighted_endpoints(self) -> None:
+        service_config = Path(self.temp_dir.name) / "external_services.json"
+        service_config.write_text(
+            json.dumps(
+                {
+                    "audio_frame": {
+                        "endpoints": [
+                            {"api_base": "127.0.0.1:8808", "kind": "gpu", "capacity": 1},
+                            {
+                                "api_base": "127.0.0.1:8812",
+                                "kind": "cpu",
+                                "capacity": 4,
+                                "max_chars": 24,
+                                "speed": 0.15,
+                            },
+                        ],
+                        "timeout": 30,
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "NOVEL_EXTERNAL_SERVICES_CONFIG": str(service_config),
+                "NOVEL_AUDIO_FRAME_API_BASE": "",
+                "NOVEL_AUDIO_FRAME_API_BASES": "",
+                "NOVEL_AUDIO_FRAME_ENDPOINTS": "",
+                "NOVEL_AUDIO_FRAME_WORKERS": "",
+            },
+        ):
+            runtime = load_audio_frame_runtime()
+
+        self.assertEqual(runtime["api_base"], "http://127.0.0.1:8808")
+        self.assertEqual(runtime["api_bases"], ["http://127.0.0.1:8808", "http://127.0.0.1:8812"])
+        self.assertEqual(runtime["workers"], 5)
+        self.assertEqual(runtime["timeout"], 30)
+        self.assertEqual(runtime["endpoints"][1]["kind"], "cpu")
+        self.assertEqual(runtime["endpoints"][1]["capacity"], 4)
+        self.assertEqual(runtime["endpoints"][1]["max_chars"], 24)
+
 
 if __name__ == "__main__":
     unittest.main()

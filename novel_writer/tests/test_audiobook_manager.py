@@ -465,6 +465,193 @@ class AudiobookManagerTests(unittest.TestCase):
         self.assertEqual(manifest["audio_frame"]["workers"], 3)
         self.assertEqual(len(manifest["audio_frame"]["api_bases"]), 3)
 
+    def test_audio_frame_weighted_scheduler_routes_short_segments_to_cpu(self) -> None:
+        calls = []
+        planned_segments = [
+            {"segment_id": "segment_0001", "index": 1, "type": "narration", "speaker": "旁白", "text": "短句。"},
+            {
+                "segment_id": "segment_0002",
+                "index": 2,
+                "type": "narration",
+                "speaker": "旁白",
+                "text": "这是一段明显更长的旁白内容，用来确认调度器会把主要工作继续交给 GPU 处理。",
+            },
+        ]
+
+        class FakeAudioFrameClient:
+            def __init__(self, api_base: str) -> None:
+                self.api_base = api_base
+
+            def synthesize(self, **kwargs):
+                calls.append((self.api_base, kwargs))
+                return {"audio_base64": base64.b64encode(_tiny_wav_bytes()).decode("ascii")}
+
+        with patch("audiobook_manager.parse_chapter_segments", return_value=planned_segments), patch(
+            "audiobook_manager.AudioFrameClient", FakeAudioFrameClient
+        ):
+            manifest = generate_audiobook_chapter(
+                self.project_path,
+                "chapter_0001",
+                force=True,
+                generation_mode="simple",
+                runtime_overrides={
+                    "backend": "audio_frame",
+                    "audio_frame_endpoints": [
+                        {"api_base": "http://gpu.local", "kind": "gpu", "capacity": 1, "speed": 1.0},
+                        {
+                            "api_base": "http://cpu.local",
+                            "kind": "cpu",
+                            "capacity": 2,
+                            "max_chars": 24,
+                            "speed": 1.0,
+                        },
+                    ],
+                },
+            )
+
+        by_text = {item["text"]: item["audio_frame"]["kind"] for item in manifest["segments"]}
+        self.assertEqual(by_text["短句。"], "cpu")
+        self.assertEqual(by_text[planned_segments[1]["text"]], "gpu")
+        segment_calls = [(base, kwargs) for base, kwargs in calls if kwargs["reference_audio"]]
+        self.assertTrue(any(base == "http://cpu.local" for base, _ in segment_calls))
+        self.assertFalse(any(base == "http://cpu.local" and len(kwargs["text"]) > 24 for base, kwargs in segment_calls))
+
+    def test_audio_frame_weighted_scheduler_avoids_cpu_tail_drag(self) -> None:
+        planned_segments = [
+            {
+                "segment_id": f"segment_{index:04d}",
+                "index": index,
+                "type": "narration",
+                "speaker": "旁白",
+                "text": "这是二十字左右短句",
+            }
+            for index in range(1, 4)
+        ]
+
+        class FakeAudioFrameClient:
+            def __init__(self, api_base: str) -> None:
+                self.api_base = api_base
+
+            def synthesize(self, **kwargs):
+                return {"audio_base64": base64.b64encode(_tiny_wav_bytes()).decode("ascii")}
+
+        with patch("audiobook_manager.parse_chapter_segments", return_value=planned_segments), patch(
+            "audiobook_manager.AudioFrameClient", FakeAudioFrameClient
+        ):
+            manifest = generate_audiobook_chapter(
+                self.project_path,
+                "chapter_0001",
+                force=True,
+                generation_mode="simple",
+                runtime_overrides={
+                    "backend": "audio_frame",
+                    "audio_frame_endpoints": [
+                        {"api_base": "http://gpu.local", "kind": "gpu", "capacity": 1, "speed": 1.0},
+                        {
+                            "api_base": "http://cpu.local",
+                            "kind": "cpu",
+                            "capacity": 2,
+                            "max_chars": 24,
+                            "speed": 0.15,
+                        },
+                    ],
+                },
+            )
+
+        self.assertEqual({item["audio_frame"]["kind"] for item in manifest["segments"]}, {"gpu"})
+
+    def test_audio_frame_batch_scheduler_runs_segments_across_chapters(self) -> None:
+        (self.project_path / "chapters" / "chapter_0002.md").write_text("第二章", encoding="utf-8")
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 2
+        save_json(str(self.project_path / "project.json"), project)
+        chapter_1_segments = [
+            {
+                "segment_id": "segment_0001",
+                "index": 1,
+                "type": "narration",
+                "speaker": "旁白",
+                "text": "chapter-one-long-" + "甲" * 60,
+            },
+            {
+                "segment_id": "segment_0002",
+                "index": 2,
+                "type": "narration",
+                "speaker": "旁白",
+                "text": "chapter-one-short",
+            },
+        ]
+        chapter_2_segments = [
+            {
+                "segment_id": "segment_0001",
+                "index": 1,
+                "type": "narration",
+                "speaker": "旁白",
+                "text": "chapter-two-long-" + "乙" * 60,
+            },
+            {
+                "segment_id": "segment_0002",
+                "index": 2,
+                "type": "narration",
+                "speaker": "旁白",
+                "text": "chapter-two-short-a",
+            },
+            {
+                "segment_id": "segment_0003",
+                "index": 3,
+                "type": "narration",
+                "speaker": "旁白",
+                "text": "chapter-two-short-b",
+            },
+        ]
+        timings = []
+        timing_lock = threading.Lock()
+
+        def fake_parse(chapter_text, *_args, **_kwargs):
+            return chapter_2_segments if "第二章" in chapter_text else chapter_1_segments
+
+        class FakeAudioFrameClient:
+            def __init__(self, api_base: str) -> None:
+                self.api_base = api_base
+
+            def synthesize(self, **kwargs):
+                text = kwargs["text"]
+                start = time.monotonic()
+                if kwargs["reference_audio"] and text.startswith("chapter-one-long"):
+                    time.sleep(0.05)
+                elif kwargs["reference_audio"]:
+                    time.sleep(0.01)
+                end = time.monotonic()
+                with timing_lock:
+                    timings.append((text, start, end, bool(kwargs["reference_audio"])))
+                return {"audio_base64": base64.b64encode(_tiny_wav_bytes()).decode("ascii")}
+
+        with patch("audiobook_manager.parse_chapter_segments", side_effect=fake_parse), patch(
+            "audiobook_manager.AudioFrameClient", FakeAudioFrameClient
+        ):
+            manifests = audiobook_manager.generate_audiobook_chapters(
+                self.project_path,
+                chapter_refs=["chapter_0001", "chapter_0002"],
+                force=True,
+                generation_mode="simple",
+                runtime_overrides={
+                    "backend": "audio_frame",
+                    "audio_frame_endpoints": [
+                        {"api_base": "http://gpu-a.local", "kind": "gpu", "capacity": 1},
+                        {"api_base": "http://gpu-b.local", "kind": "gpu", "capacity": 1},
+                    ],
+                },
+            )
+
+        segment_timings = [item for item in timings if item[3]]
+        first_chapter_end = max(end for text, _start, end, _is_segment in segment_timings if text.startswith("chapter-one"))
+        second_chapter_start = min(
+            start for text, start, _end, _is_segment in segment_timings if text.startswith("chapter-two")
+        )
+        self.assertLess(second_chapter_start, first_chapter_end)
+        self.assertEqual([manifest["chapter_slug"] for manifest in manifests], ["chapter_0001", "chapter_0002"])
+        self.assertTrue(all(manifest["audio_frame"]["scheduler"] == "batch_global_weighted" for manifest in manifests))
+
     def test_audio_frame_parallel_runtime_serializes_auto_reference_generation(self) -> None:
         calls = []
         lock = threading.Lock()

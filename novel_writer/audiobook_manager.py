@@ -12,6 +12,7 @@ import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from common_utils import emit_progress, extract_json_object, utc_now
@@ -135,6 +136,33 @@ class UploadedVoiceFile:
     filename: str
     content: bytes
     content_type: str = ""
+
+
+@dataclass(frozen=True)
+class AudioFrameEndpointSlot:
+    slot_id: str
+    api_base: str
+    kind: str
+    speed: float
+    max_chars: int = 0
+
+
+@dataclass(frozen=True)
+class AudioFrameSegmentJob:
+    payload_index: int
+    position: int
+    item: dict
+    text_chars: int
+
+
+@dataclass
+class PreparedAudiobookChapter:
+    project_path: Path
+    chapter_slug: str
+    manifest_path: Path
+    request_payload: dict | None
+    voice_config: dict | None = None
+    reused_manifest: dict | None = None
 
 
 def _audiobook_root(project_path: str | Path) -> Path:
@@ -1483,6 +1511,7 @@ def _audio_frame_overrides(runtime_overrides: dict | None) -> dict:
         for key, value in {
             "api_base": raw.get("audio_frame_api_base"),
             "api_bases": raw.get("audio_frame_api_bases"),
+            "endpoints": raw.get("audio_frame_endpoints") or raw.get("endpoints"),
             "workers": raw.get("audio_frame_workers"),
             "timeout": raw.get("audio_frame_timeout"),
         }.items()
@@ -1496,14 +1525,123 @@ def _audio_frame_api_bases(runtime: dict) -> list[str]:
     return result or [str(runtime["api_base"])]
 
 
-def _audio_frame_worker_count(runtime: dict, task_count: int) -> int:
-    if task_count <= 0:
-        return 1
-    try:
-        configured = int(runtime.get("workers") or 1)
-    except (TypeError, ValueError):
-        configured = 1
-    return max(1, min(configured, task_count))
+def _audio_frame_runtime_endpoints(runtime: dict) -> list[dict]:
+    endpoints = runtime.get("endpoints")
+    if isinstance(endpoints, list) and endpoints:
+        return [dict(item) for item in endpoints if isinstance(item, dict)]
+    return [
+        {
+            "api_base": api_base,
+            "kind": "gpu",
+            "capacity": 1,
+            "max_chars": 0,
+            "speed": 1.0,
+        }
+        for api_base in _audio_frame_api_bases(runtime)
+    ]
+
+
+def _audio_frame_endpoint_slots(runtime: dict) -> list[AudioFrameEndpointSlot]:
+    slots: list[AudioFrameEndpointSlot] = []
+    for endpoint_index, endpoint in enumerate(_audio_frame_runtime_endpoints(runtime)):
+        api_base = str(endpoint.get("api_base") or "").strip()
+        if not api_base:
+            continue
+        kind = str(endpoint.get("kind") or "gpu").strip().lower()
+        if kind not in {"gpu", "cpu"}:
+            kind = "gpu"
+        try:
+            capacity = int(endpoint.get("capacity") or 1)
+        except (TypeError, ValueError):
+            capacity = 1
+        try:
+            speed = float(endpoint.get("speed") or 1.0)
+        except (TypeError, ValueError):
+            speed = 1.0
+        try:
+            max_chars = int(endpoint.get("max_chars") or 0)
+        except (TypeError, ValueError):
+            max_chars = 0
+        for slot_index in range(max(1, capacity)):
+            slots.append(
+                AudioFrameEndpointSlot(
+                    slot_id=f"{kind}:{endpoint_index}:{slot_index}",
+                    api_base=api_base,
+                    kind=kind,
+                    speed=max(0.01, speed),
+                    max_chars=max(0, max_chars),
+                )
+            )
+    if slots:
+        return slots
+    return [AudioFrameEndpointSlot("gpu:0:0", str(runtime["api_base"]), "gpu", 1.0, 0)]
+
+
+def _audio_frame_manifest_endpoints(runtime: dict) -> list[dict]:
+    return [
+        {
+            "api_base": str(endpoint.get("api_base") or "").strip(),
+            "kind": str(endpoint.get("kind") or "gpu").strip().lower(),
+            "capacity": max(1, int(endpoint.get("capacity") or 1)),
+            "max_chars": max(0, int(endpoint.get("max_chars") or 0)),
+            "speed": float(endpoint.get("speed") or 1.0),
+        }
+        for endpoint in _audio_frame_runtime_endpoints(runtime)
+        if str(endpoint.get("api_base") or "").strip()
+    ]
+
+
+def _audio_frame_text_chars(value: object) -> int:
+    return len(_normalize_text(value))
+
+
+def _slot_estimated_seconds(slot: AudioFrameEndpointSlot, chars: int) -> float:
+    return max(1, chars) / max(0.01, slot.speed)
+
+
+def _assign_audio_frame_jobs(
+    jobs: list[AudioFrameSegmentJob],
+    slots: list[AudioFrameEndpointSlot],
+) -> dict[str, list[AudioFrameSegmentJob]]:
+    if not jobs:
+        return {}
+    gpu_slots = [slot for slot in slots if slot.kind != "cpu"] or list(slots)
+    cpu_slots = [slot for slot in slots if slot.kind == "cpu" and slot.max_chars > 0]
+    assignments: dict[str, list[AudioFrameSegmentJob]] = {slot.slot_id: [] for slot in slots}
+    slot_by_id = {slot.slot_id: slot for slot in slots}
+    job_slot: dict[tuple[int, int], str] = {}
+    gpu_loads = {slot.slot_id: 0.0 for slot in gpu_slots}
+
+    for job in sorted(jobs, key=lambda item: item.text_chars, reverse=True):
+        slot_id = min(gpu_loads, key=gpu_loads.get)
+        gpu_loads[slot_id] += _slot_estimated_seconds(slot_by_id[slot_id], job.text_chars)
+        assignments[slot_id].append(job)
+        job_slot[(job.payload_index, job.position)] = slot_id
+
+    gpu_baseline = max(gpu_loads.values(), default=0.0)
+    if not cpu_slots:
+        return {slot_id: items for slot_id, items in assignments.items() if items}
+
+    cpu_loads = {slot.slot_id: 0.0 for slot in cpu_slots}
+    for job in sorted(jobs, key=lambda item: item.text_chars):
+        eligible_cpu_slots = [slot for slot in cpu_slots if job.text_chars <= slot.max_chars]
+        if not eligible_cpu_slots:
+            continue
+        cpu_slot = min(eligible_cpu_slots, key=lambda slot: cpu_loads[slot.slot_id])
+        projected_cpu_load = cpu_loads[cpu_slot.slot_id] + _slot_estimated_seconds(cpu_slot, job.text_chars)
+        if projected_cpu_load > gpu_baseline:
+            continue
+        old_slot_id = job_slot[(job.payload_index, job.position)]
+        if old_slot_id == cpu_slot.slot_id:
+            continue
+        assignments[old_slot_id] = [
+            item for item in assignments[old_slot_id] if (item.payload_index, item.position) != (job.payload_index, job.position)
+        ]
+        assignments[cpu_slot.slot_id].append(job)
+        job_slot[(job.payload_index, job.position)] = cpu_slot.slot_id
+        cpu_loads[cpu_slot.slot_id] = projected_cpu_load
+
+    return {slot_id: items for slot_id, items in assignments.items() if items}
 
 
 def _wav_duration_seconds(path: Path) -> float:
@@ -1543,77 +1681,129 @@ def _combine_wav_files(paths: list[Path], output_path: Path, *, silence_ms: int 
             out_file.writeframes(chunk)
 
 
-def _run_audio_frame_service_parallel(
-    request_payload: dict,
+def _audio_frame_reference_api_bases(runtime: dict) -> list[str]:
+    bases = []
+    seen: set[str] = set()
+    for endpoint in _audio_frame_runtime_endpoints(runtime):
+        if str(endpoint.get("kind") or "gpu").strip().lower() == "cpu":
+            continue
+        base = str(endpoint.get("api_base") or "").strip()
+        if base and base not in seen:
+            bases.append(base)
+            seen.add(base)
+    return bases or _audio_frame_api_bases(runtime)
+
+
+def _run_audio_frame_reference_tasks(
+    request_payloads: list[dict],
     runtime: dict,
     progress_callback=None,
 ) -> None:
-    api_bases = _audio_frame_api_bases(runtime)
+    reference_api_bases = _audio_frame_reference_api_bases(runtime)
     timeout = int(runtime.get("timeout") or 0)
-    project_path = Path(request_payload["project_path"])
-    segments_dir = Path(request_payload["segments_dir"])
-    combined_audio_path = Path(request_payload["combined_audio_path"])
-    manifest_path = Path(request_payload["manifest_path"])
-    segments_dir.mkdir(parents=True, exist_ok=True)
-
-    voice_references = [dict(item) for item in request_payload.get("voice_references") or []]
-    reference_by_voice_id = {str(item.get("voice_id") or ""): item for item in voice_references}
-    reference_tasks = [dict(item) for item in request_payload.get("voice_reference_tasks") or []]
-
-    def synthesize_reference(position: int, task: dict) -> tuple[int, dict, bytes]:
-        api_base = api_bases[position % len(api_bases)]
-        response = AudioFrameClient(api_base).synthesize(
-            text=str(task.get("prompt_text") or ""),
-            control_instruction=str(task.get("control_instruction") or ""),
-            reference_audio="",
-            prompt_text="",
-            cfg_value=float(task.get("cfg_value") or request_payload["runtime"].get("cfg_value") or 2.0),
-            normalize=bool(request_payload["runtime"].get("normalize", True)),
-            denoise=False,
-            inference_timesteps=int(
-                task.get("inference_timesteps") or request_payload["runtime"].get("inference_timesteps") or 10
-            ),
-            timeout=timeout,
-        )
-        return position, task, base64.b64decode(str(response.get("audio_base64") or ""))
-
-    def save_reference_result(task: dict, audio_bytes: bytes) -> None:
-        reference_path = Path(str(task.get("reference_audio") or "")).resolve()
-        reference_path.parent.mkdir(parents=True, exist_ok=True)
-        reference_path.write_bytes(audio_bytes)
-        record = reference_by_voice_id.get(str(task.get("voice_id") or ""))
-        if record is not None:
-            record["generated"] = True
-            record["duration_seconds"] = round(_wav_duration_seconds(reference_path), 3)
-
-    if reference_tasks:
-        emit_progress(
-            progress_callback,
-            "audiobook_voice_reference",
-            f"Audio Frame preparing {len(reference_tasks)} reference voice task(s)",
-            current=0,
-            total=len(reference_tasks),
-        )
-        for completed, task in enumerate(reference_tasks, start=1):
-            _, task, audio_bytes = synthesize_reference(completed - 1, task)
-            save_reference_result(task, audio_bytes)
+    total = sum(len(payload.get("voice_reference_tasks") or []) for payload in request_payloads)
+    if total <= 0:
+        return
+    emit_progress(
+        progress_callback,
+        "audiobook_voice_reference",
+        f"Audio Frame preparing {total} reference voice task(s)",
+        current=0,
+        total=total,
+    )
+    completed = 0
+    for request_payload in request_payloads:
+        voice_references = request_payload.get("voice_references") or []
+        reference_by_voice_id = {str(item.get("voice_id") or ""): item for item in voice_references}
+        for task in request_payload.get("voice_reference_tasks") or []:
+            api_base = reference_api_bases[completed % len(reference_api_bases)]
+            response = AudioFrameClient(api_base).synthesize(
+                text=str(task.get("prompt_text") or ""),
+                control_instruction=str(task.get("control_instruction") or ""),
+                reference_audio="",
+                prompt_text="",
+                cfg_value=float(task.get("cfg_value") or request_payload["runtime"].get("cfg_value") or 2.0),
+                normalize=bool(request_payload["runtime"].get("normalize", True)),
+                denoise=False,
+                inference_timesteps=int(
+                    task.get("inference_timesteps") or request_payload["runtime"].get("inference_timesteps") or 10
+                ),
+                timeout=timeout,
+            )
+            reference_path = Path(str(task.get("reference_audio") or "")).resolve()
+            reference_path.parent.mkdir(parents=True, exist_ok=True)
+            reference_path.write_bytes(base64.b64decode(str(response.get("audio_base64") or "")))
+            record = reference_by_voice_id.get(str(task.get("voice_id") or ""))
+            if record is not None:
+                record["generated"] = True
+                record["duration_seconds"] = round(_wav_duration_seconds(reference_path), 3)
+            completed += 1
             emit_progress(
                 progress_callback,
                 "audiobook_voice_reference",
-                f"Audio Frame finished reference voice {completed}/{len(reference_tasks)}",
+                f"Audio Frame finished reference voice {completed}/{total}",
                 current=completed,
-                total=len(reference_tasks),
+                total=total,
             )
 
-    segments = [dict(item) for item in request_payload.get("segments") or []]
-    generated_paths: list[Path | None] = [None] * len(segments)
-    manifest_segments: list[dict | None] = [None] * len(segments)
 
-    def synthesize_segment(position: int, item: dict) -> tuple[int, dict, bytes]:
-        voice = item.get("voice") or {}
-        api_base = api_bases[position % len(api_bases)]
-        response = AudioFrameClient(api_base).synthesize(
-            text=str(item.get("text") or ""),
+def _run_audio_frame_batch_service(
+    request_payloads: list[dict],
+    runtime: dict,
+    progress_callback=None,
+) -> None:
+    request_payloads = [payload for payload in request_payloads if payload]
+    if not request_payloads:
+        return
+
+    _run_audio_frame_reference_tasks(request_payloads, runtime, progress_callback=progress_callback)
+
+    slots = _audio_frame_endpoint_slots(runtime)
+    slot_by_id = {slot.slot_id: slot for slot in slots}
+    timeout = int(runtime.get("timeout") or 0)
+    configured_api_bases = _audio_frame_api_bases(runtime)
+    configured_endpoints = _audio_frame_manifest_endpoints(runtime)
+    jobs: list[AudioFrameSegmentJob] = []
+    generated_paths: list[list[Path | None]] = []
+    manifest_segments: list[list[dict | None]] = []
+    chapter_completed = [0] * len(request_payloads)
+    used_slots: list[set[str]] = [set() for _ in request_payloads]
+
+    for payload_index, request_payload in enumerate(request_payloads):
+        project_path = Path(request_payload["project_path"])
+        segments_dir = Path(request_payload["segments_dir"])
+        segments_dir.mkdir(parents=True, exist_ok=True)
+        segments = [dict(item) for item in request_payload.get("segments") or []]
+        generated_paths.append([None] * len(segments))
+        manifest_segments.append([None] * len(segments))
+        for position, item in enumerate(segments):
+            jobs.append(
+                AudioFrameSegmentJob(
+                    payload_index=payload_index,
+                    position=position,
+                    item=item,
+                    text_chars=_audio_frame_text_chars(item.get("text")),
+                )
+            )
+
+    if jobs:
+        emit_progress(
+            progress_callback,
+            "audiobook_audio_frame",
+            f"Audio Frame queued {len(jobs)} segment task(s) across {len(slots)} endpoint slot(s)",
+            current=0,
+            total=len(jobs),
+        )
+
+    assignments = _assign_audio_frame_jobs(jobs, slots)
+    save_lock = Lock()
+    batch_completed = 0
+
+    def synthesize_segment(slot: AudioFrameEndpointSlot, job: AudioFrameSegmentJob) -> tuple[AudioFrameSegmentJob, bytes]:
+        request_payload = request_payloads[job.payload_index]
+        voice = job.item.get("voice") or {}
+        response = AudioFrameClient(slot.api_base).synthesize(
+            text=str(job.item.get("text") or ""),
             control_instruction=str(voice.get("control_instruction") or ""),
             reference_audio=str(voice.get("reference_audio") or ""),
             prompt_text=str(voice.get("prompt_text") or ""),
@@ -1625,216 +1815,100 @@ def _run_audio_frame_service_parallel(
             ),
             timeout=timeout,
         )
-        return position, item, base64.b64decode(str(response.get("audio_base64") or ""))
+        return job, base64.b64decode(str(response.get("audio_base64") or ""))
 
-    completed_segments = 0
-
-    def save_segment_result(position: int, item: dict, audio_bytes: bytes) -> None:
-        nonlocal completed_segments
-        local_path = segments_dir / f"{item.get('segment_id') or f'segment_{position + 1:04d}'}.wav"
+    def save_segment_result(slot: AudioFrameEndpointSlot, job: AudioFrameSegmentJob, audio_bytes: bytes) -> None:
+        nonlocal batch_completed
+        request_payload = request_payloads[job.payload_index]
+        project_path = Path(request_payload["project_path"])
+        segments_dir = Path(request_payload["segments_dir"])
+        local_path = segments_dir / f"{job.item.get('segment_id') or f'segment_{job.position + 1:04d}'}.wav"
         local_path.write_bytes(audio_bytes)
+        item = dict(job.item)
         item["audio_file"] = _relative_path(project_path, local_path)
         item["duration_seconds"] = round(_wav_duration_seconds(local_path), 3)
-        manifest_segments[position] = item
-        generated_paths[position] = local_path
-        completed_segments += 1
-        emit_progress(
-            progress_callback,
-            "audiobook_audio_frame",
-            f"Audio Frame finished segment {completed_segments}/{len(segments)}",
-            current=completed_segments,
-            total=len(segments),
-        )
-
-    if segments:
-        emit_progress(
-            progress_callback,
-            "audiobook_audio_frame",
-            f"Audio Frame queued {len(segments)} segment task(s) across {len(api_bases)} endpoint(s)",
-            current=0,
-            total=len(segments),
-        )
-        warmup_positions: list[int] = []
-        if len(api_bases) > 1 and _audio_frame_worker_count(runtime, len(segments)) > 1:
-            warmed_api_indexes: set[int] = set()
-            for position in range(len(segments)):
-                api_index = position % len(api_bases)
-                if api_index in warmed_api_indexes:
-                    continue
-                warmed_api_indexes.add(api_index)
-                warmup_positions.append(position)
-                if len(warmed_api_indexes) == len(api_bases):
-                    break
-
-        if warmup_positions:
+        item["audio_frame"] = {
+            "api_base": slot.api_base,
+            "kind": slot.kind,
+            "slot": slot.slot_id,
+            "text_chars": job.text_chars,
+        }
+        with save_lock:
+            generated_paths[job.payload_index][job.position] = local_path
+            manifest_segments[job.payload_index][job.position] = item
+            used_slots[job.payload_index].add(slot.slot_id)
+            chapter_completed[job.payload_index] += 1
+            batch_completed += 1
             emit_progress(
                 progress_callback,
                 "audiobook_audio_frame",
-                f"Audio Frame warming {len(warmup_positions)} endpoint(s) before parallel synthesis",
-                current=completed_segments,
-                total=len(segments),
+                (
+                    f"Audio Frame finished {request_payload['chapter_slug']} "
+                    f"segment {chapter_completed[job.payload_index]}/{len(generated_paths[job.payload_index])}"
+                ),
+                current=batch_completed,
+                total=len(jobs),
             )
-            for position in warmup_positions:
-                position, item, audio_bytes = synthesize_segment(position, segments[position])
-                save_segment_result(position, item, audio_bytes)
 
-        warmup_position_set = set(warmup_positions)
-        remaining_segments = [
-            (position, item) for position, item in enumerate(segments) if position not in warmup_position_set
-        ]
-        if remaining_segments:
-            with ThreadPoolExecutor(
-                max_workers=_audio_frame_worker_count(runtime, len(remaining_segments)),
-                thread_name_prefix="audio-frame-segment",
-            ) as executor:
-                futures = [
-                    executor.submit(synthesize_segment, position, item)
-                    for position, item in remaining_segments
-                ]
-                for future in as_completed(futures):
-                    position, item, audio_bytes = future.result()
-                    save_segment_result(position, item, audio_bytes)
+    def run_slot(slot_id: str, slot_jobs: list[AudioFrameSegmentJob]) -> None:
+        slot = slot_by_id[slot_id]
+        for job in slot_jobs:
+            completed_job, audio_bytes = synthesize_segment(slot, job)
+            save_segment_result(slot, completed_job, audio_bytes)
 
-    rendered_segments = [item for item in manifest_segments if item is not None]
-    _combine_wav_files(
-        [path for path in generated_paths if path is not None],
-        combined_audio_path,
-        silence_ms=int(request_payload["runtime"].get("silence_ms") or DEFAULT_AUDIOBOOK_RUNTIME["silence_ms"]),
-    )
-    save_json(
-        str(manifest_path),
-        {
-            "chapter_slug": request_payload["chapter_slug"],
-            "chapter_file": request_payload["chapter_file"],
-            "generated_at": utc_now(),
-            "status": "succeeded",
-            "combined_audio": _relative_path(project_path, combined_audio_path),
-            "segment_count": len(rendered_segments),
-            "segments": rendered_segments,
-            "narrator_id": request_payload.get("narrator_id", ""),
-            "generation_mode": request_payload.get("generation_mode", GENERATION_MODE_ADVANCED),
-            "voice_references": voice_references,
-            "split_config": request_payload.get("split_config", {}),
-            "audio_frame": {
-                "api_base": runtime["api_base"],
-                "api_bases": api_bases,
-                "workers": _audio_frame_worker_count(runtime, len(segments)),
+    if assignments:
+        with ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="audio-frame-slot") as executor:
+            futures = [executor.submit(run_slot, slot_id, slot_jobs) for slot_id, slot_jobs in assignments.items()]
+            for future in as_completed(futures):
+                future.result()
+
+    for payload_index, request_payload in enumerate(request_payloads):
+        project_path = Path(request_payload["project_path"])
+        combined_audio_path = Path(request_payload["combined_audio_path"])
+        manifest_path = Path(request_payload["manifest_path"])
+        paths = generated_paths[payload_index]
+        if any(path is None for path in paths):
+            raise RuntimeError(f"Audio Frame did not generate every segment for {request_payload['chapter_slug']}.")
+        _combine_wav_files(
+            [path for path in paths if path is not None],
+            combined_audio_path,
+            silence_ms=int(request_payload["runtime"].get("silence_ms") or DEFAULT_AUDIOBOOK_RUNTIME["silence_ms"]),
+        )
+        rendered_segments = [item for item in manifest_segments[payload_index] if item is not None]
+        save_json(
+            str(manifest_path),
+            {
+                "chapter_slug": request_payload["chapter_slug"],
+                "chapter_file": request_payload["chapter_file"],
+                "generated_at": utc_now(),
+                "status": "succeeded",
+                "combined_audio": _relative_path(project_path, combined_audio_path),
+                "segment_count": len(rendered_segments),
+                "segments": rendered_segments,
+                "narrator_id": request_payload.get("narrator_id", ""),
+                "generation_mode": request_payload.get("generation_mode", GENERATION_MODE_ADVANCED),
+                "voice_references": request_payload.get("voice_references") or [],
+                "split_config": request_payload.get("split_config", {}),
+                "audio_frame": {
+                    "api_base": runtime["api_base"],
+                    "api_bases": configured_api_bases,
+                    "workers": max(1, len(used_slots[payload_index])),
+                    "scheduler": "batch_global_weighted",
+                    "endpoints": configured_endpoints,
+                },
+                "voxcpm_runtime": {
+                    "clone_mode": request_payload["runtime"].get("clone_mode", CLONE_MODE_STYLE_CONTROL),
+                },
             },
-            "voxcpm_runtime": {
-                "clone_mode": request_payload["runtime"].get("clone_mode", CLONE_MODE_STYLE_CONTROL),
-            },
-        },
-    )
+        )
 
 
 def _run_audio_frame_service(request_payload: dict, runtime_overrides: dict | None, progress_callback=None) -> None:
     runtime = load_audio_frame_runtime(_audio_frame_overrides(runtime_overrides))
-    if int(runtime.get("workers") or 1) > 1 or len(_audio_frame_api_bases(runtime)) > 1:
-        _run_audio_frame_service_parallel(request_payload, runtime, progress_callback=progress_callback)
-        return
-    client = AudioFrameClient(runtime["api_base"])
-    project_path = Path(request_payload["project_path"])
-    segments_dir = Path(request_payload["segments_dir"])
-    combined_audio_path = Path(request_payload["combined_audio_path"])
-    manifest_path = Path(request_payload["manifest_path"])
-    segments_dir.mkdir(parents=True, exist_ok=True)
-
-    voice_references = [dict(item) for item in request_payload.get("voice_references") or []]
-    reference_by_voice_id = {str(item.get("voice_id") or ""): item for item in voice_references}
-    reference_tasks = request_payload.get("voice_reference_tasks") or []
-    for index, task in enumerate(reference_tasks, start=1):
-        emit_progress(
-            progress_callback,
-            "audiobook_voice_reference",
-            f"Audio Frame 正在生成参考音色 {index}/{len(reference_tasks)}",
-            current=index - 1,
-            total=len(reference_tasks),
-        )
-        response = client.synthesize(
-            text=str(task.get("prompt_text") or ""),
-            control_instruction=str(task.get("control_instruction") or ""),
-            reference_audio="",
-            prompt_text="",
-            cfg_value=float(task.get("cfg_value") or request_payload["runtime"].get("cfg_value") or 2.0),
-            normalize=bool(request_payload["runtime"].get("normalize", True)),
-            denoise=False,
-            inference_timesteps=int(
-                task.get("inference_timesteps") or request_payload["runtime"].get("inference_timesteps") or 10
-            ),
-            timeout=int(runtime.get("timeout") or 0),
-        )
-        reference_path = Path(str(task.get("reference_audio") or "")).resolve()
-        reference_path.parent.mkdir(parents=True, exist_ok=True)
-        reference_path.write_bytes(base64.b64decode(str(response.get("audio_base64") or "")))
-        record = reference_by_voice_id.get(str(task.get("voice_id") or ""))
-        if record is not None:
-            record["generated"] = True
-            record["duration_seconds"] = round(_wav_duration_seconds(reference_path), 3)
-
-    generated_paths: list[Path] = []
-    manifest_segments = []
-    segments = request_payload.get("segments") or []
-    for index, item in enumerate(segments, start=1):
-        voice = item.get("voice") or {}
-        emit_progress(
-            progress_callback,
-            "audiobook_audio_frame",
-            f"Audio Frame 正在合成 {index}/{len(segments)}",
-            current=index - 1,
-            total=len(segments),
-        )
-        response = client.synthesize(
-            text=str(item.get("text") or ""),
-            control_instruction=str(voice.get("control_instruction") or ""),
-            reference_audio=str(voice.get("reference_audio") or ""),
-            prompt_text=str(voice.get("prompt_text") or ""),
-            cfg_value=float(voice.get("cfg_value") or request_payload["runtime"].get("cfg_value") or 2.0),
-            normalize=bool(request_payload["runtime"].get("normalize", True)),
-            denoise=bool(request_payload["runtime"].get("denoise", False)),
-            inference_timesteps=int(
-                voice.get("inference_timesteps") or request_payload["runtime"].get("inference_timesteps") or 10
-            ),
-            timeout=int(runtime.get("timeout") or 0),
-        )
-        audio_bytes = base64.b64decode(str(response.get("audio_base64") or ""))
-        local_path = segments_dir / f"{item.get('segment_id', f'segment_{index:04d}')}.wav"
-        local_path.write_bytes(audio_bytes)
-        item = dict(item)
-        item["audio_file"] = _relative_path(project_path, local_path)
-        item["duration_seconds"] = round(_wav_duration_seconds(local_path), 3)
-        manifest_segments.append(item)
-        generated_paths.append(local_path)
-
-    _combine_wav_files(
-        generated_paths,
-        combined_audio_path,
-        silence_ms=int(request_payload["runtime"].get("silence_ms") or DEFAULT_AUDIOBOOK_RUNTIME["silence_ms"]),
-    )
-    save_json(
-        str(manifest_path),
-        {
-            "chapter_slug": request_payload["chapter_slug"],
-            "chapter_file": request_payload["chapter_file"],
-            "generated_at": utc_now(),
-            "status": "succeeded",
-            "combined_audio": _relative_path(project_path, combined_audio_path),
-            "segment_count": len(manifest_segments),
-            "segments": manifest_segments,
-            "narrator_id": request_payload.get("narrator_id", ""),
-            "generation_mode": request_payload.get("generation_mode", GENERATION_MODE_ADVANCED),
-            "voice_references": voice_references,
-            "split_config": request_payload.get("split_config", {}),
-            "audio_frame": {
-                "api_base": runtime["api_base"],
-            },
-            "voxcpm_runtime": {
-                "clone_mode": request_payload["runtime"].get("clone_mode", CLONE_MODE_STYLE_CONTROL),
-            },
-        },
-    )
+    _run_audio_frame_batch_service([request_payload], runtime, progress_callback=progress_callback)
 
 
-def generate_audiobook_chapter(
+def _prepare_audiobook_chapter(
     project_path: str | Path,
     chapter_ref: str | None = None,
     *,
@@ -1845,23 +1919,7 @@ def generate_audiobook_chapter(
     runtime_overrides: dict | None = None,
     split_config: dict | None = None,
     progress_callback=None,
-    lock_project: bool = True,
-) -> dict:
-    if lock_project:
-        with acquire_project_audio_lock(str(project_path), owner="generate_audiobook_chapter"):
-            return generate_audiobook_chapter(
-                project_path,
-                chapter_ref,
-                force=force,
-                narrator_preset=narrator_preset,
-                generation_mode=generation_mode,
-                llm_config=llm_config,
-                runtime_overrides=runtime_overrides,
-                split_config=split_config,
-                progress_callback=progress_callback,
-                lock_project=False,
-            )
-
+) -> PreparedAudiobookChapter:
     project_path = Path(project_path)
     chapter_file = _resolve_chapter_file(project_path, chapter_ref)
     chapter_slug = chapter_file.stem
@@ -1873,7 +1931,7 @@ def generate_audiobook_chapter(
         existing = _existing_record(project_path, chapter_slug)
         if existing:
             emit_progress(progress_callback, "audiobook_reused", f"{chapter_slug} 已复用已有音频")
-            return existing
+            return PreparedAudiobookChapter(project_path, chapter_slug, manifest_path, None, reused_manifest=existing)
 
     resolved_generation_mode = normalize_generation_mode(generation_mode)
     voice_config = update_selected_narrator(project_path, narrator_preset) if narrator_preset else ensure_voice_config(project_path)
@@ -1930,25 +1988,101 @@ def generate_audiobook_chapter(
     }
     request_path = record_dir / "request.json"
     save_json(str(request_path), request_payload)
+    return PreparedAudiobookChapter(project_path, chapter_slug, manifest_path, request_payload, voice_config=voice_config)
 
-    emit_progress(progress_callback, "audiobook_worker", f"正在调用 VoxCPM2 合成 {len(segments)} 个片段", current=0, total=len(segments))
+
+def _finish_prepared_audiobook_chapter(
+    prepared: PreparedAudiobookChapter,
+    result: subprocess.CompletedProcess,
+    *,
+    progress_callback=None,
+) -> dict:
+    if prepared.reused_manifest is not None:
+        return prepared.reused_manifest
+    if prepared.request_payload is None or prepared.voice_config is None:
+        raise RuntimeError(f"{prepared.chapter_slug} 缺少有声章节生成请求。")
+    if result.returncode != 0:
+        detail = "\n".join(item for item in (result.stdout.strip(), result.stderr.strip()) if item)
+        raise RuntimeError(f"VoxCPM2 有声章节生成失败，退出码 {result.returncode}。\n{detail}")
+    if not prepared.manifest_path.exists():
+        detail = "\n".join(item for item in (result.stdout.strip(), result.stderr.strip()) if item)
+        raise RuntimeError(f"VoxCPM2 worker 未生成 manifest.json。\n{detail}")
+
+    manifest = load_json(str(prepared.manifest_path))
+    _apply_voice_reference_records(
+        prepared.project_path,
+        prepared.voice_config,
+        manifest.get("voice_references") or [],
+    )
+    manifest["reused"] = False
+    segment_total = int(manifest.get("segment_count") or len(manifest.get("segments") or []))
+    emit_progress(
+        progress_callback,
+        "audiobook_done",
+        f"{prepared.chapter_slug} 的有声章节已完成",
+        current=segment_total,
+        total=segment_total,
+    )
+    return manifest
+
+
+def generate_audiobook_chapter(
+    project_path: str | Path,
+    chapter_ref: str | None = None,
+    *,
+    force: bool = False,
+    narrator_preset: str = "",
+    generation_mode: str = GENERATION_MODE_ADVANCED,
+    llm_config: dict | None = None,
+    runtime_overrides: dict | None = None,
+    split_config: dict | None = None,
+    progress_callback=None,
+    lock_project: bool = True,
+) -> dict:
+    if lock_project:
+        with acquire_project_audio_lock(str(project_path), owner="generate_audiobook_chapter"):
+            return generate_audiobook_chapter(
+                project_path,
+                chapter_ref,
+                force=force,
+                narrator_preset=narrator_preset,
+                generation_mode=generation_mode,
+                llm_config=llm_config,
+                runtime_overrides=runtime_overrides,
+                split_config=split_config,
+                progress_callback=progress_callback,
+                lock_project=False,
+            )
+
+    prepared = _prepare_audiobook_chapter(
+        project_path,
+        chapter_ref,
+        force=force,
+        narrator_preset=narrator_preset,
+        generation_mode=generation_mode,
+        llm_config=llm_config,
+        runtime_overrides=runtime_overrides,
+        split_config=split_config,
+        progress_callback=progress_callback,
+    )
+    if prepared.reused_manifest is not None:
+        return prepared.reused_manifest
+    request_payload = prepared.request_payload or {}
+    segments = request_payload.get("segments") or []
+    emit_progress(
+        progress_callback,
+        "audiobook_worker",
+        f"正在调用 VoxCPM2 合成 {len(segments)} 个片段",
+        current=0,
+        total=len(segments),
+    )
     if _audiobook_backend(runtime_overrides) == "audio_frame":
         _run_audio_frame_service(request_payload, runtime_overrides, progress_callback=progress_callback)
         result = subprocess.CompletedProcess(["audio_frame"], 0, stdout="ok", stderr="")
     else:
-        result = _run_worker(request_path, runtime)
-    if result.returncode != 0:
-        detail = "\n".join(item for item in (result.stdout.strip(), result.stderr.strip()) if item)
-        raise RuntimeError(f"VoxCPM2 有声章节生成失败，退出码 {result.returncode}。\n{detail}")
-    if not manifest_path.exists():
-        detail = "\n".join(item for item in (result.stdout.strip(), result.stderr.strip()) if item)
-        raise RuntimeError(f"VoxCPM2 worker 未生成 manifest.json。\n{detail}")
-
-    manifest = load_json(str(manifest_path))
-    voice_config = _apply_voice_reference_records(project_path, voice_config, manifest.get("voice_references") or [])
-    manifest["reused"] = False
-    emit_progress(progress_callback, "audiobook_done", f"{chapter_slug} 的有声章节已完成", current=len(segments), total=len(segments))
-    return manifest
+        request_path = Path(str(prepared.manifest_path.parent / "request.json"))
+        result = _run_worker(request_path, request_payload["runtime"])
+    return _finish_prepared_audiobook_chapter(prepared, result, progress_callback=progress_callback)
 
 
 def generate_audiobook_chapters(
@@ -1978,6 +2112,53 @@ def generate_audiobook_chapters(
             )
 
     refs = chapter_refs or ["latest"]
+    if _audiobook_backend(runtime_overrides) == "audio_frame":
+        prepared_items: list[tuple[int, PreparedAudiobookChapter]] = []
+        results: list[dict | None] = [None] * len(refs)
+        for index, chapter_ref in enumerate(refs):
+            emit_progress(
+                progress_callback,
+                "audiobook_batch",
+                f"正在准备第 {index + 1}/{len(refs)} 个有声章节",
+                current=index,
+                total=len(refs),
+            )
+            prepared = _prepare_audiobook_chapter(
+                project_path,
+                chapter_ref,
+                force=force,
+                narrator_preset=narrator_preset,
+                generation_mode=generation_mode,
+                llm_config=llm_config,
+                runtime_overrides=runtime_overrides,
+                progress_callback=progress_callback,
+            )
+            if prepared.reused_manifest is not None:
+                results[index] = prepared.reused_manifest
+            else:
+                prepared_items.append((index, prepared))
+
+        if prepared_items:
+            payloads = [prepared.request_payload for _, prepared in prepared_items if prepared.request_payload is not None]
+            segment_total = sum(len(payload.get("segments") or []) for payload in payloads)
+            emit_progress(
+                progress_callback,
+                "audiobook_worker",
+                f"正在调用 Audio Frame 全局调度合成 {len(prepared_items)} 章 / {segment_total} 个片段",
+                current=0,
+                total=segment_total,
+            )
+            runtime = load_audio_frame_runtime(_audio_frame_overrides(runtime_overrides))
+            _run_audio_frame_batch_service(payloads, runtime, progress_callback=progress_callback)
+            result = subprocess.CompletedProcess(["audio_frame"], 0, stdout="ok", stderr="")
+            for index, prepared in prepared_items:
+                results[index] = _finish_prepared_audiobook_chapter(
+                    prepared,
+                    result,
+                    progress_callback=progress_callback,
+                )
+        return [result for result in results if result is not None]
+
     results = []
     for index, chapter_ref in enumerate(refs):
         emit_progress(
