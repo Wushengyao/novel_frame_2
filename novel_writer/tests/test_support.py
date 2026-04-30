@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from project_manager import save_json
+from project_manager import ensure_reader_setup, save_json
 
 
 def read_json(path: Path) -> dict:
@@ -185,6 +185,7 @@ def create_test_project(
             ],
         },
     )
+    ensure_reader_setup(str(project_path))
     return project_path
 
 

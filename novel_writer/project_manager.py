@@ -93,6 +93,7 @@ PLANNING_MODES = {
 INIT_SECTION_KEYS = ("world", "characters", "plot_state", "style")
 STORY_SETUP_SECTION_KEYS = ("world", "characters")
 STORY_SETUP_FILENAME = "story_setup.json"
+READER_SETUP_FILENAME = "reader_setup.md"
 CHAPTER_TITLE_PATTERN = re.compile(
     r"^\s*(?:#{1,6}\s*)?第[0-9零一二三四五六七八九十百千万两〇]+[章节卷回部篇]\s*[：:.-]?\s*.+$"
 )
@@ -112,6 +113,7 @@ SNAPSHOT_DIR_NAME = "snapshots"
 SNAPSHOT_STATE_FILES = (
     "project.json",
     STORY_SETUP_FILENAME,
+    READER_SETUP_FILENAME,
     "world.json",
     "characters.json",
     "plot_state.json",
@@ -1005,6 +1007,269 @@ def _build_author_intent_from_project(project: dict, world: dict, style: dict, p
     )
 
 
+def _reader_trim_text(value: object, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 1)].rstrip() + "…"
+
+
+def _reader_string_list(value: object, *, max_items: int, max_chars: int = 120) -> list[str]:
+    items = value if isinstance(value, list) else [value]
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = _reader_trim_text(item, max_chars)
+        if not text:
+            continue
+        key = re.sub(r"\s+", "", text)
+        if key in seen:
+            continue
+        result.append(text)
+        seen.add(key)
+        if len(result) >= max_items:
+            break
+    return result
+
+
+def _reader_first_text(candidates: list[object], max_chars: int) -> str:
+    for candidate in candidates:
+        text = _reader_trim_text(candidate, max_chars)
+        if text and not _is_low_signal_project_description(text):
+            return text
+    for candidate in candidates:
+        text = _reader_trim_text(candidate, max_chars)
+        if text:
+            return text
+    return ""
+
+
+def _reader_pick_opening_background(world: dict, plot_state: dict, project: dict, *, max_items: int = 3) -> list[str]:
+    keywords = (
+        "开篇",
+        "当前",
+        "困境",
+        "危机",
+        "压力",
+        "处境",
+        "地点",
+        "时间",
+        "资源",
+        "限制",
+        "目标",
+        "冲突",
+        "生存",
+    )
+    raw_items = _reader_string_list(world.get("background"), max_items=12, max_chars=150)
+    scored: list[tuple[int, int, str]] = []
+    for index, item in enumerate(raw_items):
+        score = sum(1 for keyword in keywords if keyword in item)
+        scored.append((score, -index, item))
+    scored.sort(reverse=True)
+    selected = [item for score, _, item in scored if score > 0][:max_items]
+    if len(selected) < max_items:
+        for item in raw_items:
+            if item not in selected:
+                selected.append(item)
+            if len(selected) >= max_items:
+                break
+
+    anchors = []
+    location = _reader_trim_text(plot_state.get("current_location"), 80)
+    current_time = _reader_trim_text(plot_state.get("current_time"), 80)
+    current_arc = _reader_trim_text(plot_state.get("current_arc"), 100)
+    next_goal = _reader_trim_text(plot_state.get("next_chapter_goal"), 120)
+    if location or current_time:
+        anchors.append("开场锚点：" + "，".join(part for part in (location, current_time) if part))
+    if current_arc:
+        anchors.append(f"当前阶段：{current_arc}")
+    if next_goal:
+        anchors.append(f"眼前目标：{next_goal}")
+
+    result: list[str] = []
+    for item in anchors + selected:
+        if item and item not in result:
+            result.append(item)
+        if len(result) >= max_items:
+            break
+
+    if not result:
+        fallback = _reader_first_text(
+            [
+                project.get("description"),
+                project.get("story_request"),
+                world.get("setting"),
+                plot_state.get("main_plot"),
+            ],
+            140,
+        )
+        if fallback:
+            result.append(fallback)
+    return result
+
+
+def _reader_character_line(character: dict) -> str:
+    name = _reader_trim_text(character.get("name"), 32)
+    if not name:
+        return ""
+    role = _reader_trim_text(character.get("role"), 36)
+    description = _reader_trim_text(character.get("description"), 90)
+    if role and description:
+        return f"{name}｜{role}：{description}"
+    if role:
+        return f"{name}｜{role}"
+    if description:
+        return f"{name}：{description}"
+    return name
+
+
+def _reader_character_lines(characters: dict, plot_state: dict, *, max_items: int = 5) -> list[str]:
+    active_names = set(_normalize_name_list(plot_state.get("active_characters"), max_items=8))
+    entries: list[tuple[int, str]] = []
+    for group_index, group in enumerate(("protagonists", "supporting")):
+        for character in characters.get(group) or []:
+            if not isinstance(character, dict):
+                continue
+            name = str(character.get("name", "") or "").strip()
+            line = _reader_character_line(character)
+            if not line:
+                continue
+            priority = 0 if name in active_names else 1 + group_index
+            entries.append((priority, line))
+    entries.sort(key=lambda item: item[0])
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for _, line in entries:
+        if line in seen:
+            continue
+        lines.append(line)
+        seen.add(line)
+        if len(lines) >= max_items:
+            break
+    return lines
+
+
+def build_reader_setup_text(project_data: dict) -> str:
+    """Build a short, reader-facing, non-spoiler opening guide."""
+
+    project = project_data.get("project") if isinstance(project_data.get("project"), dict) else project_data
+    world = project_data.get("world") if isinstance(project_data.get("world"), dict) else {}
+    characters = _normalize_characters(project_data.get("characters") if isinstance(project_data.get("characters"), dict) else {})
+    plot_state = project_data.get("plot_state") if isinstance(project_data.get("plot_state"), dict) else {}
+    style = project_data.get("style") if isinstance(project_data.get("style"), dict) else {}
+    author_intent = _normalize_author_intent(
+        project_data.get("author_intent") if isinstance(project_data.get("author_intent"), dict) else {}
+    )
+
+    title = _reader_first_text([world.get("title"), project.get("name")], 48) or "未命名故事"
+    genre = _reader_trim_text(world.get("genre"), 40)
+    premise = _reader_first_text(
+        [
+            author_intent.get("premise"),
+            world.get("setting"),
+            plot_state.get("main_plot"),
+            project.get("story_request"),
+            project.get("description"),
+        ],
+        180,
+    )
+    opening_items = _reader_pick_opening_background(world, plot_state, project, max_items=4)
+    character_lines = _reader_character_lines(characters, plot_state, max_items=5)
+    rules = _reader_string_list(world.get("rules"), max_items=4, max_chars=110)
+    tone_parts = [
+        _reader_trim_text(style.get("tone"), 80),
+        _reader_trim_text(style.get("pov"), 60),
+    ]
+    tone_line = " / ".join(part for part in tone_parts if part)
+    promises = _reader_string_list(author_intent.get("scene_promises") or author_intent.get("must_haves"), max_items=3, max_chars=90)
+
+    lines = [
+        "# 读者开卷导语",
+        "",
+        "## 这是什么故事",
+    ]
+    story_line = f"《{title}》"
+    if genre:
+        story_line += f"是一部{genre}小说"
+    else:
+        story_line += "是一部连载小说"
+    if premise:
+        story_line += f"。{premise}"
+    lines.append(story_line.rstrip("。") + "。")
+
+    lines.extend(["", "## 开篇处境"])
+    if opening_items:
+        lines.extend(f"- {item}" for item in opening_items)
+    else:
+        lines.append("- 正文会从第一章的当下处境开始，让人物、地点与压力逐步显现。")
+
+    lines.extend(["", "## 主要人物"])
+    if character_lines:
+        lines.extend(f"- {item}" for item in character_lines)
+    else:
+        lines.append("- 核心人物会在第一章正文中登场。")
+
+    lines.extend(["", "## 阅读前只需知道"])
+    if rules:
+        lines.extend(f"- {item}" for item in rules)
+    else:
+        lines.append("- 硬设定与限制会在正文行动、对话和选择中逐步呈现。")
+
+    lines.extend(["", "## 叙事口味"])
+    if tone_line:
+        lines.append(f"- 基调与视角：{tone_line}")
+    if promises:
+        lines.extend(f"- 阅读承诺：{item}" for item in promises)
+    if not tone_line and not promises:
+        lines.append("- 以人物选择、场景压力和连续推进为主。")
+
+    lines.extend(
+        [
+            "",
+            "这份导语只提供开卷入口，不替代第一章正文；第一章仍会在场景里交代必要信息。",
+        ]
+    )
+    return "\n".join(lines).strip() + "\n"
+
+
+def _save_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=f".{path.stem}_",
+        suffix=path.suffix or ".txt",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        Path(temp_path).unlink(missing_ok=True)
+        raise
+
+
+def load_reader_setup_text(project_path: str) -> str:
+    path = Path(project_path) / READER_SETUP_FILENAME
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def ensure_reader_setup(project_path: str, project_data: dict | None = None, *, overwrite: bool = False) -> str:
+    path = Path(project_path) / READER_SETUP_FILENAME
+    if path.exists() and not overwrite:
+        return path.read_text(encoding="utf-8").strip()
+    data = project_data if isinstance(project_data, dict) else load_project(project_path)
+    text = build_reader_setup_text(data)
+    _save_text_atomic(path, text)
+    return text.strip()
+
+
 def _build_seed_story_data(config: dict) -> dict:
     use_empty_defaults = config.get("init_with_llm", False)
     world_default = EMPTY_WORLD if use_empty_defaults else DEFAULT_WORLD
@@ -1381,6 +1646,17 @@ def init_project(config_path: str, progress_callback=None) -> str:
     save_json(str(project_path / "plot_state.json"), plot_state)
     save_json(str(project_path / "style.json"), style)
     save_json(str(project_path / "author_intent.json"), author_intent)
+    ensure_reader_setup(
+        str(project_path),
+        {
+            "project": project_data,
+            "world": world,
+            "characters": characters,
+            "plot_state": plot_state,
+            "style": style,
+            "author_intent": author_intent,
+        },
+    )
     log_success("init_project: project files written")
 
     from outline_manager import regenerate_chapter_outline, regenerate_volume_outline
@@ -1439,6 +1715,7 @@ def load_project(project_path: str) -> dict:
         "plot_state": plot_state,
         "style": style,
         "author_intent": author_intent,
+        "reader_setup": load_reader_setup_text(str(base)),
         "outlines": load_json(str(outlines_path)) if outlines_path.exists() else {"meta": {}, "volumes": []},
         "chapters_path": str(base / "chapters"),
         "summaries_path": str(base / "summaries"),

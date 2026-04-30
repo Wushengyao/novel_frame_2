@@ -12,6 +12,7 @@ from project_manager import (
     EMPTY_AUTHOR_INTENT,
     EMPTY_PLOT_STATE,
     ensure_author_intent,
+    ensure_reader_setup,
     load_json,
     normalize_planning_mode,
     save_json,
@@ -22,6 +23,7 @@ WRITER_SECTION_LIMITS = {
     "author_intent": 760,
     "creative_contract": 760,
     "opening_contract": 720,
+    "reader_setup": 760,
     "chapter_task": 460,
     "live_state": 1000,
     "retrieved_memory": 520,
@@ -1238,6 +1240,32 @@ def _build_opening_contract_block(project_data: dict, task_card: dict, *, max_ch
     return _trim_text("\n".join(lines), max_chars)
 
 
+def _build_reader_setup_block(
+    project_path: str,
+    project_data: dict,
+    task_card: dict,
+    *,
+    max_chars: int,
+) -> str:
+    chapter_number = max(1, safe_int(task_card.get("chapter_number"), 1))
+    if not _is_first_chapter_target(project_data, chapter_number):
+        return ""
+
+    text = str(project_data.get("reader_setup") or "").strip()
+    if not text:
+        text = ensure_reader_setup(project_path, project_data).strip()
+        project_data["reader_setup"] = text
+    if not text:
+        return ""
+
+    return _trim_text(
+        "以下是项目提供给读者的非剧透开卷导语。它可以帮助读者先看到设定入口，"
+        "但第一章正文仍必须自洽，不能假设读者一定读过，也不能把它原样复述成设定说明书。\n"
+        + text,
+        max_chars,
+    )
+
+
 def _build_recent_scene_block(project_path: str, chapter_count: int, recent_text: str, *, max_chars: int) -> str:
     excerpt = select_recent_scene_window(recent_text, min_chars=1200, max_chars=max(700, max_chars))
     if excerpt:
@@ -1496,6 +1524,12 @@ def build_writer_context(
             task_card,
             max_chars=WRITER_SECTION_LIMITS["opening_contract"],
         ),
+        "reader_setup": _build_reader_setup_block(
+            project_path,
+            project_data,
+            task_card,
+            max_chars=WRITER_SECTION_LIMITS["reader_setup"],
+        ),
         "chapter_task": _build_chapter_task_block(task_card, max_chars=WRITER_SECTION_LIMITS["chapter_task"]),
         "live_state": _build_live_state_block(
             plot_state,
@@ -1632,6 +1666,7 @@ def build_progression_context(
         "author_intent": _build_author_intent_block(author_intent, max_chars=780),
         "creative_contract": _build_creative_contract_block(author_intent, max_chars=760),
         "opening_contract": _build_opening_contract_block(project_data, effective_task, max_chars=760),
+        "reader_setup": _build_reader_setup_block(project_path, project_data, effective_task, max_chars=760),
         "chapter_task": _build_chapter_task_block(effective_task, max_chars=480),
         "live_state": _build_live_state_block(plot_state, max_chars=860, include_next_goal=False),
         "static_world": _compact_world_block(project_data.get("world") or {}, task_text, max_chars=500),

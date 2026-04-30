@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from project_manager import (
     PROJECT_EXPORT_MANIFEST_FILENAME,
+    READER_SETUP_FILENAME,
     ProjectWriteLockError,
     _build_persisted_llm_config,
     _build_author_intent_from_project,
@@ -16,6 +17,7 @@ from project_manager import (
     _prune_initial_supporting_characters,
     acquire_project_audio_lock,
     acquire_project_write_lock,
+    ensure_reader_setup,
     export_project_archive,
     import_project_archive,
     project_audio_lock_is_active,
@@ -29,6 +31,21 @@ from tests.test_support import create_test_project, read_json
 
 
 class ProjectManagerTests(unittest.TestCase):
+    def test_reader_setup_is_generated_as_reader_facing_opening_guide(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="reader_setup")
+            setup_path = project_path / READER_SETUP_FILENAME
+            setup_path.unlink()
+
+            text = ensure_reader_setup(str(project_path))
+
+            self.assertTrue(setup_path.exists())
+            self.assertIn("读者开卷导语", text)
+            self.assertIn("开篇处境", text)
+            self.assertIn("空间站隔离区", text)
+            self.assertIn("林宇", text)
+            self.assertNotIn('"protagonists"', text)
+
     def test_author_intent_premise_prefers_story_request_over_meta_description(self) -> None:
         intent = _build_author_intent_from_project(
             {
@@ -225,6 +242,7 @@ class ProjectManagerTests(unittest.TestCase):
             self.assertEqual(manifest["format_version"], 1)
             self.assertTrue(manifest["complete_project"])
             self.assertIn(f"{root}/project.json", names)
+            self.assertIn(f"{root}/{READER_SETUP_FILENAME}", names)
             self.assertIn(f"{root}/chapters/chapter_0001.md", names)
             self.assertIn(f"{root}/illustrations/chapter_0001/image_0001.png", names)
             self.assertIn(f"{root}/llm_logs/llm_interactions.jsonl", names)

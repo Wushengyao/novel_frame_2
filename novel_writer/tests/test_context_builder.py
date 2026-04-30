@@ -253,13 +253,17 @@ class ContextBuilderTests(unittest.TestCase):
 
             self.assertIn("当前将要写的是第一章", prompt)
             self.assertIn("首章读者入口约束", prompt)
+            self.assertIn("读者开卷导语（读者可见）", prompt)
             self.assertIn("读者没有看过设定文件", prompt)
+            self.assertIn("正文仍必须独立可读", prompt)
             self.assertIn("前 600-1000 字必须把读者入口做成可读场景", prompt)
             self.assertIn("核心人物为何同场或彼此认识", prompt)
             self.assertIn("为什么现在必须行动", prompt)
             self.assertIn("先用动作间隙、感官、内心和对白完成开场桥", prompt)
             self.assertIn("opening_contract", context["sections"])
+            self.assertIn("reader_setup", context["sections"])
             self.assertIn("读者还不知道设定文件里的前情", context["sections"]["opening_contract"])
+            self.assertIn("读者开卷导语", context["sections"]["reader_setup"])
             self.assertIn("读者入口", task_card["plan_steps"][0])
 
     def test_first_chapter_progression_prompt_requires_reader_entry_plan_step(self) -> None:
@@ -303,8 +307,11 @@ class ContextBuilderTests(unittest.TestCase):
             )
 
             self.assertIn("首章读者入口约束", prompt)
+            self.assertIn("读者开卷导语（读者可见）", prompt)
             self.assertIn("plan_steps` 第一项必须先设计“读者入口/开场桥”", prompt)
+            self.assertIn("不要把导语当成正文已经完成的交代", prompt)
             self.assertIn("开篇困境", context["sections"]["static_world"])
+            self.assertIn("reader_setup", context["sections"])
             self.assertIn("读者入口", context["task_card"]["plan_steps"][0])
 
     def test_first_chapter_selected_progression_task_card_prepends_reader_entry(self) -> None:
@@ -513,7 +520,9 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertEqual(progression_context["task_card"]["source"], "progression_selected")
             self.assertEqual(progression_context["task_card"]["goal"], "完成一次谨慎的外出试探")
             self.assertNotIn("下一目标", writer_context["sections"]["live_state"])
-            self.assertNotIn("建立临时安全区", prompt)
+            prompt_without_reader_setup = prompt.replace(writer_context["sections"].get("reader_setup", ""), "")
+            self.assertNotIn("建立临时安全区", prompt_without_reader_setup)
+            self.assertIn("建立临时安全区", writer_context["sections"]["reader_setup"])
             self.assertIn("完成一次谨慎的外出试探", prompt)
             self.assertIn("新的可验证变化", prompt)
 

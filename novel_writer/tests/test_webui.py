@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import webui
-from project_manager import PROJECT_EXPORT_MANIFEST_FILENAME, export_project_archive, load_json, save_json
+from project_manager import PROJECT_EXPORT_MANIFEST_FILENAME, READER_SETUP_FILENAME, export_project_archive, load_json, save_json
 from web_auth import WebAuthSettings
 from webui import NovelWriterHandler, ThreadingHTTPServer
 from progression_manager import CUSTOM_PROGRESSION_OPTION_ID
@@ -321,6 +321,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             manifest = json.loads(archive.read(PROJECT_EXPORT_MANIFEST_FILENAME).decode("utf-8"))
         self.assertEqual(manifest["project_id"], "web")
         self.assertIn("novel_project_web/project.json", names)
+        self.assertIn(f"novel_project_web/{READER_SETUP_FILENAME}", names)
         self.assertIn("novel_project_web/chapters/chapter_0001.md", names)
 
     def test_project_export_endpoint_rejects_active_blocking_job(self) -> None:
@@ -1918,6 +1919,27 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             'id="continue-advanced-options" data-continue-advanced-panel hidden',
             page.body,
         )
+        self.assertIn("读者开卷导语", page.body)
+        self.assertIn("空间站隔离区", page.body)
+
+    def test_first_chapter_page_shows_reader_setup_before_chapter_text(self) -> None:
+        (self.project_path / "chapters" / "chapter_0001.md").write_text(
+            "林宇推上储物箱。\n\n苏浅检查控制板。",
+            encoding="utf-8",
+        )
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 1
+        save_json(str(self.project_path / "project.json"), project)
+
+        page = self._get("/project/web/chapter/chapter_0001")
+
+        self.assertEqual(page.status, 200)
+        setup_pos = page.body.find("读者开卷导语")
+        chapter_pos = page.body.find("<h2>chapter_0001.md</h2>")
+        self.assertGreater(setup_pos, -1)
+        self.assertGreater(chapter_pos, -1)
+        self.assertLess(setup_pos, chapter_pos)
+        self.assertIn("这是读者可见的开卷导语", page.body)
 
     # ── Settings navigation link ───────────────────────────────────
 

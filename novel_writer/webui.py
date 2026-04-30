@@ -62,6 +62,7 @@ from project_manager import (
     PLANNING_MODE_CHAPTER,
     PLANNING_MODE_NONE,
     PLANNING_MODE_VOLUME,
+    ensure_reader_setup,
     get_latest_state_snapshot_chapter,
     delete_project,
     export_project_archive,
@@ -1269,6 +1270,20 @@ def _render_token_cost_panel(stats: dict | None) -> str:
                 </thead>
                 <tbody>{''.join(model_rows)}</tbody>
               </table>
+            </section>
+    """
+
+
+def _render_reader_setup_panel(reader_setup_text: str, *, intro: str = "") -> str:
+    text = str(reader_setup_text or "").strip()
+    if not text:
+        return ""
+    intro_html = f'<p class="muted">{escape(intro)}</p>' if intro else ""
+    return f"""
+            <section class="panel">
+              <h2>读者开卷导语</h2>
+              {intro_html}
+              <div class="chapter-view">{escape(text)}</div>
             </section>
     """
 
@@ -5007,6 +5022,12 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         chapters = _read_chapters(project_path)
         chapter_text = chapter_file.read_text(encoding="utf-8")
         chapter_number = _chapter_number_from_slug(chapter_slug)
+        reader_setup_panel_html = ""
+        if chapter_number == 1:
+            reader_setup_panel_html = _render_reader_setup_panel(
+                ensure_reader_setup(str(project_path)),
+                intro="这是读者可见的开卷导语，放在第一章前作为非剧透入口。",
+            )
         quality_artifacts = (
             list_quality_artifacts(str(project_path), chapter_number)
             if chapter_number is not None
@@ -5088,6 +5109,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
 
         body = f"""
         <div class="stack">
+          {reader_setup_panel_html}
           <section class="panel">
             <a href="/project/{escape(project_id)}">返回项目</a>
             <h2>{escape(chapter_file.name)}</h2>
@@ -5816,6 +5838,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         authenticated = self._is_authenticated(auth_settings)
 
         data = load_project(str(project_path))
+        reader_setup_text = ensure_reader_setup(str(project_path), data)
+        data["reader_setup"] = reader_setup_text
         project = data["project"]
         project_name = _repair_display_text(project.get("name", project_id))
         plot_state = data["plot_state"]
@@ -5837,6 +5861,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         active_jobs = JOB_REGISTRY.list_jobs(project_id=project_id, active_only=True, limit=8)
         active_jobs_html = _render_job_cards(active_jobs, "当前没有运行中的后台任务。")
         external_service_panel_html = _render_external_service_panel()
+        reader_setup_panel_html = _render_reader_setup_panel(
+            reader_setup_text,
+            intro="这份内容面向读者，提供非剧透的开卷入口；第一章仍会在正文里自然交代必要信息。",
+        )
         blocking_jobs = [job for job in active_jobs if job.get("blocks_project", True)]
         progression_jobs = [job for job in active_jobs if job.get("kind") in PROGRESSION_JOB_KINDS]
         project_busy = bool(blocking_jobs)
@@ -6165,6 +6193,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             </section>
           </aside>
           <main class="stack project-main">
+            {reader_setup_panel_html}
             <section class="panel">
               <h2>最近一章</h2>
               <div class="chapter-view">{latest_chapter_text}</div>
