@@ -304,7 +304,10 @@ def generate_auto_chapter_objective(
     )
     recent_text = get_last_chapter_text(project_path)
     if not recent_text:
-        recent_text = "这是开篇前状态。请围绕第一章如何自然开场来提炼 objective。"
+        recent_text = (
+            "这是开篇前状态。读者尚未看到任何设定、人物关系或前情；"
+            "请围绕第一章如何先建立读者入口、再完成本章核心变化来提炼 objective。"
+        )
     base_task = resolve_effective_chapter_task(
         project_path,
         project_data,
@@ -406,7 +409,10 @@ def generate_progression_options(
     )
     recent_text = get_last_chapter_text(project_path)
     if not recent_text:
-        recent_text = "这是开篇前状态。请围绕第一章如何自然开场来给出推进选项。"
+        recent_text = (
+            "这是开篇前状态。读者尚未看到任何设定、人物关系或前情；"
+            "推进选项必须先设计读者入口/开场桥，再安排本章任务事件。"
+        )
     base_task = resolve_effective_chapter_task(
         project_path,
         project_data,

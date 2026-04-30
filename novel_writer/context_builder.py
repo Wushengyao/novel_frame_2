@@ -21,6 +21,7 @@ from project_manager import (
 WRITER_SECTION_LIMITS = {
     "author_intent": 760,
     "creative_contract": 760,
+    "opening_contract": 720,
     "chapter_task": 460,
     "live_state": 1000,
     "retrieved_memory": 520,
@@ -100,6 +101,11 @@ TASK_CARD_PRIORITY = {
     "freeform": 0,
 }
 
+FIRST_CHAPTER_READER_ENTRY_STEP = (
+    "先建立读者入口：用具体场景交代地点/时间/危机、核心人物身份与同场原因、"
+    "当前行动理由，再推进本章任务事件。"
+)
+
 
 def _trim_text(text: str, max_chars: int) -> str:
     content = str(text or "").strip()
@@ -145,6 +151,34 @@ def _normalize_string_list(value: object, *, max_items: int) -> list[str]:
     return normalized
 
 
+def _is_first_chapter_target(project_data: dict, chapter_number: int) -> bool:
+    chapter_count = safe_int(project_data.get("project", {}).get("chapter_count"), 0)
+    return chapter_count == 0 and max(1, safe_int(chapter_number, 1)) == 1
+
+
+def _with_first_chapter_reader_entry(
+    task_card: dict,
+    project_data: dict,
+    *,
+    chapter_number: int,
+) -> dict:
+    if not _is_first_chapter_target(project_data, chapter_number):
+        return task_card
+
+    updated = deepcopy(task_card)
+    steps = _normalize_string_list(updated.get("plan_steps") or updated.get("key_events"), max_items=5)
+    has_reader_entry = any(
+        "读者入口" in item
+        or ("读者" in item and ("设定" in item or "开篇" in item or "交代" in item))
+        for item in steps
+    )
+    if not has_reader_entry:
+        steps = [FIRST_CHAPTER_READER_ENTRY_STEP] + steps
+    updated["plan_steps"] = steps[:5]
+    updated["key_events"] = updated["plan_steps"]
+    return updated
+
+
 def _synthesize_task_summary(
     *,
     title: str,
@@ -152,7 +186,11 @@ def _synthesize_task_summary(
     key_events: list[str],
     source: str,
 ) -> str:
-    events = _normalize_string_list(key_events, max_items=3)
+    events = [
+        event
+        for event in _normalize_string_list(key_events, max_items=5)
+        if "读者入口" not in event and not event.startswith("承接上一章")
+    ][:3]
     if events:
         candidate = "；".join(events[:2]).strip()
         if candidate and candidate != goal:
@@ -834,6 +872,11 @@ def _build_baseline_task_card(
             "plan_guidance": f"以“{goal}”为本章核心任务，允许自由选择更有活力的推进方式。" if goal else "",
         }
 
+    task_card = _with_first_chapter_reader_entry(
+        task_card,
+        project_data,
+        chapter_number=chapter_number,
+    )
     return _normalize_task_card_payload(
         task_card,
         chapter_number=chapter_number,
@@ -949,7 +992,7 @@ def build_progression_selected_task_card(
         guidance_parts.append(f"用户补充细化：{feedback}")
         guidance_parts.append("这些补充只能作为已选 plan 的细化与微调，不能推翻本章 objective。")
 
-    task_card = _normalize_task_card_payload(
+    raw_task_card = _with_first_chapter_reader_entry(
         {
             "chapter_number": chapter_number,
             "planning_mode": planning_mode,
@@ -972,6 +1015,11 @@ def build_progression_selected_task_card(
                 "baseline_source": str(baseline_source or "").strip(),
             },
         },
+        project_data,
+        chapter_number=chapter_number,
+    )
+    task_card = _normalize_task_card_payload(
+        raw_task_card,
         chapter_number=chapter_number,
         planning_mode=planning_mode,
         volume=volume,
@@ -1039,7 +1087,7 @@ def build_custom_progression_task_card(
             "结尾保留下一章可自然承接的变化或悬念。",
         ]
 
-    task_card = _normalize_task_card_payload(
+    raw_task_card = _with_first_chapter_reader_entry(
         {
             "chapter_number": chapter_number,
             "planning_mode": planning_mode,
@@ -1064,6 +1112,11 @@ def build_custom_progression_task_card(
                 "baseline_source": str(baseline_source or "").strip(),
             },
         },
+        project_data,
+        chapter_number=chapter_number,
+    )
+    task_card = _normalize_task_card_payload(
+        raw_task_card,
         chapter_number=chapter_number,
         planning_mode=planning_mode,
         volume=volume,
@@ -1150,6 +1203,38 @@ def _build_live_state_block(plot_state: dict, *, max_chars: int, include_next_go
             continue
         lines.append(block)
 
+    return _trim_text("\n".join(lines), max_chars)
+
+
+def _build_opening_contract_block(project_data: dict, task_card: dict, *, max_chars: int) -> str:
+    chapter_number = max(1, safe_int(task_card.get("chapter_number"), 1))
+    if not _is_first_chapter_target(project_data, chapter_number):
+        return ""
+
+    plot_state = normalize_live_plot_state(project_data.get("plot_state"))
+    anchors = []
+    for label, key in (
+        ("地点", "current_location"),
+        ("时间", "current_time"),
+        ("弧线", "current_arc"),
+    ):
+        value = str(plot_state.get(key, "") or "").strip()
+        if value:
+            anchors.append(f"{label}={_trim_text(value, 72)}")
+
+    active_names = _normalize_string_list(plot_state.get("active_characters"), max_items=4)
+    if not active_names:
+        active_names = _active_character_names(plot_state, project_data.get("characters") or {})[:4]
+    if active_names:
+        anchors.append("出场人物=" + "、".join(active_names))
+
+    lines = [
+        "这是正文第一章，读者还不知道设定文件里的前情；任务卡里的事件不能按续写模式直接起跳。",
+        "开章可以有强钩子，但必须先把设定转化为读者可感知的场景：当下处境、核心人物身份、彼此为何同场、当前压力、行动理由。",
+        "不要默认读者知道人物关系、世界冲突或上一段未写出的前情；避免一开场就喊名、执行计划清单或跳到结果。",
+    ]
+    if anchors:
+        lines.append("可用首章锚点：" + "；".join(anchors[:5]))
     return _trim_text("\n".join(lines), max_chars)
 
 
@@ -1406,6 +1491,11 @@ def build_writer_context(
             author_intent,
             max_chars=WRITER_SECTION_LIMITS["creative_contract"],
         ),
+        "opening_contract": _build_opening_contract_block(
+            project_data,
+            task_card,
+            max_chars=WRITER_SECTION_LIMITS["opening_contract"],
+        ),
         "chapter_task": _build_chapter_task_block(task_card, max_chars=WRITER_SECTION_LIMITS["chapter_task"]),
         "live_state": _build_live_state_block(
             plot_state,
@@ -1528,12 +1618,23 @@ def build_progression_context(
         planning_mode=planning_mode,
         persist=False,
     )
+    task_text = " ".join(
+        part
+        for part in (
+            effective_task.get("summary", ""),
+            effective_task.get("goal", ""),
+            effective_task.get("writer_guidance", ""),
+            user_request,
+        )
+        if part
+    )
     sections = {
         "author_intent": _build_author_intent_block(author_intent, max_chars=780),
         "creative_contract": _build_creative_contract_block(author_intent, max_chars=760),
+        "opening_contract": _build_opening_contract_block(project_data, effective_task, max_chars=760),
         "chapter_task": _build_chapter_task_block(effective_task, max_chars=480),
         "live_state": _build_live_state_block(plot_state, max_chars=860, include_next_goal=False),
-        "static_world": _compact_world_block(project_data.get("world") or {}, user_request, max_chars=500),
+        "static_world": _compact_world_block(project_data.get("world") or {}, task_text, max_chars=500),
         "static_characters": _compact_characters_block(project_data.get("characters") or {}, plot_state, max_chars=700),
         "recent_scene": _build_recent_scene_block(project_path, chapter_count, recent_text, max_chars=1700),
         "style_contract": _build_style_contract_block(project_data.get("style") or {}, author_intent, max_chars=360),

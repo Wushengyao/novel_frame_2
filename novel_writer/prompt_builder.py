@@ -620,6 +620,7 @@ def build_auto_objective_prompt(
             "你是长篇连载小说的章节规划助手。请只为下一章提炼一个清晰的 objective。",
             _section_block("作者意图", sections.get("author_intent", "")),
             _section_block("创作风味契约", sections.get("creative_contract", "")),
+            _section_block("首章读者入口约束", sections.get("opening_contract", "")),
             _section_block("当前任务卡基线", sections.get("chapter_task", "")),
             _section_block("世界观速览", sections.get("static_world", "")),
             _section_block("角色速览", sections.get("static_characters", "")),
@@ -639,7 +640,8 @@ def build_auto_objective_prompt(
 4. objective 要尊重当前 live state、最近场景、相关记忆和基线任务卡；若用户有额外意图，请自然吸收进本章任务
 5. objective 必须包含可验证的场景压力、人物选择、关系推进或生存建设变化之一，避免只写普通任务句
 6. objective 应当具体、可执行、可验证，长度尽量控制在 1 句话内
-7. 不要输出解释，不要输出 Markdown
+7. 如果提供了“首章读者入口约束”，objective 只能定义首章必须完成的核心变化，不能把读者还不知道的设定前情当作已写事实
+8. 不要输出解释，不要输出 Markdown
 
 输出 JSON：
 {{"objective":""}}
@@ -671,7 +673,8 @@ def build_auto_objective_prompt(
 3. objective 必须是本章要完成的叙事任务，不要写成执行 plan、情绪要求或文风要求
 4. objective 要尊重当前状态和最近正文；若用户有额外意图，请自然吸收进本章任务
 5. objective 应当具体、可执行、可验证，长度尽量控制在 1 句话内
-6. 不要输出解释，不要输出 Markdown
+6. 如果这是第一章，不要把读者尚未看见的设定前情当作已写事实；objective 需要允许正文先自然建立读者入口
+7. 不要输出解释，不要输出 Markdown
 
 输出 JSON：
 {{
@@ -718,6 +721,7 @@ def build_progression_options_prompt(
             opening,
             _section_block("作者意图", sections.get("author_intent", "")),
             _section_block("创作风味契约", sections.get("creative_contract", "")),
+            _section_block("首章读者入口约束", sections.get("opening_contract", "")),
             _section_block("下一章任务卡", sections.get("chapter_task", "")),
             _section_block("世界观速览", sections.get("static_world", "")),
             _section_block("角色速览", sections.get("static_characters", "")),
@@ -737,11 +741,12 @@ def build_progression_options_prompt(
 4. {recommendation_rule}
 5. {objective_rule}
 6. {scope_rule}
-7. 每个方案都必须体现本章的钩子、压力、互动火花和至少一项新变化；多选项时彼此要有清晰戏剧重心差异
-8. 每个选项都必须包含 `option_id`、`title`、`plan_summary`、`plan_steps`、`plan_guidance`、`recommended`
-9. `plan_steps` 给 2 到 5 个条目，写本章真正会发生的推进节点
-10. `plan_summary` 要描述这一章会怎么推进；`plan_guidance` 只补充写法与强调点，不要偷偷改写章节主目标
-11. 不要输出解释，不要输出 Markdown
+7. 如果提供了“首章读者入口约束”，每个方案的 `plan_steps` 第一项必须先设计“读者入口/开场桥”：交代当下处境、人物身份/关系、同场原因和行动压力，再进入任务事件
+8. 每个方案都必须体现本章的钩子、压力、互动火花和至少一项新变化；多选项时彼此要有清晰戏剧重心差异
+9. 每个选项都必须包含 `option_id`、`title`、`plan_summary`、`plan_steps`、`plan_guidance`、`recommended`
+10. `plan_steps` 给 2 到 5 个条目，写本章真正会发生的推进节点
+11. `plan_summary` 要描述这一章会怎么推进；`plan_guidance` 只补充写法与强调点，不要偷偷改写章节主目标
+12. 不要输出解释，不要输出 Markdown
 
 输出 JSON 骨架：
 {{"recommended_option_id":"option_1","options":[{{"option_id":"option_1","title":"","plan_summary":"","plan_steps":["",""],"plan_guidance":"","recommended":true}}]}}
@@ -796,17 +801,18 @@ def build_progression_options_prompt(
 3. {count_rule}
 4. {objective_rule}
 5. {scope_rule}
-6. 每个选项都必须包含：
+6. 如果这是第一章，每个选项的 `plan_steps` 第一项必须先设计读者入口/开场桥，不能直接跳到任务事件
+7. 每个选项都必须包含：
    - `option_id`
    - `title`
    - `plan_summary`
    - `plan_steps`
    - `plan_guidance`
    - `recommended`
-7. `plan_summary` 描述本章会怎么推进；`plan_guidance` 只补充写法、氛围和强调点，不要改写章节主目标
-8. `plan_steps` 要给出 2 到 5 个条目，写本章会实际发生的关键推进
-9. {recommendation_rule}
-10. 不要输出解释，不要输出 Markdown
+8. `plan_summary` 描述本章会怎么推进；`plan_guidance` 只补充写法、氛围和强调点，不要改写章节主目标
+9. `plan_steps` 要给出 2 到 5 个条目，写本章会实际发生的关键推进
+10. {recommendation_rule}
+11. 不要输出解释，不要输出 Markdown
 
 输出 JSON：
 {{
@@ -831,6 +837,7 @@ def build_craft_brief_prompt(data: dict) -> str:
         "你是一名长篇小说创作总监。请在正式写正文前，为下一章设计一份短小但可执行的创作蓝图。",
         _section_block("作者意图", sections.get("author_intent", "")),
         _section_block("创作风味契约", sections.get("creative_contract", "")),
+        _section_block("首章读者入口约束", sections.get("opening_contract", "")),
         _section_block("下一章任务卡", sections.get("chapter_task", "")),
         _section_block("当前 live state", sections.get("live_state", "")),
         _section_block("世界", sections.get("static_world", "")),
@@ -848,11 +855,12 @@ def build_craft_brief_prompt(data: dict) -> str:
 3. 蓝图要帮助正文更吸引人：开章钩子、戏剧问题、压力来源、人物选择、情绪转折都要具体
 4. `context_bridge` 写清本章开场需要补给读者的处境、人物入口或连续性锚点
 5. `action_reasoning` 写清人物采取关键行动的直接原因、压力与选择依据
-6. 蓝图必须显式照顾创作风味契约：开章钩子、关系火花、生存细节、感官描写、核心人物身心反应、幽默或温情破局、平淡规避
-7. `forbidden_repeats` 必须列出需要避开的上一章表层动作、姿态、句式或结尾套路
-8. `fresh_interaction_patterns` 要给出新的互动方式，不要只写“更细腻”“更紧张”这类抽象要求
-9. `success_criteria` 给出 2 到 5 条本章必须兑现的可检查目标，用于写后质检
-10. 不要输出解释，不要输出 Markdown
+6. 如果提供了“首章读者入口约束”，`context_bridge` 必须具体说明前 600-1000 字如何让读者理解人物、地点、前情和行动理由，不能只写“承接上一章”
+7. 蓝图必须显式照顾创作风味契约：开章钩子、关系火花、生存细节、感官描写、核心人物身心反应、幽默或温情破局、平淡规避
+8. `forbidden_repeats` 必须列出需要避开的上一章表层动作、姿态、句式或结尾套路
+9. `fresh_interaction_patterns` 要给出新的互动方式，不要只写“更细腻”“更紧张”这类抽象要求
+10. `success_criteria` 给出 2 到 5 条本章必须兑现的可检查目标，用于写后质检
+11. 不要输出解释，不要输出 Markdown
 
 输出 JSON 骨架：
 {{"chapter_hook":"","context_bridge":"","dramatic_question":"","conflict_pressure":"","action_reasoning":"","emotional_turn":"","scene_movement":[],"sensory_palette":[],"fresh_interaction_patterns":[],"forbidden_repeats":[],"success_criteria":[],"focus_notes":""}}
@@ -870,10 +878,12 @@ def build_writer_prompt(
         sections = data["sections"]
         chapter_count = int(data.get("chapter_count", 0) or 0)
         opening_note = (
-            "当前将要写的是第一章。开章可以有钩子，但必须在前 800-1200 字内自然交代读者入口："
-            "故事发生的基本处境、地点/时间/关键世界规则、至少核心人物的姓名/关系/当前状态，"
-            "以及他们为什么现在必须行动。背景和人物要嵌入观察、对话和选择，不要直接跳到任务事件，"
-            "也不要写成设定说明书；不要把后续章节才会发生的大事件提前写出。"
+            "当前将要写的是第一章。读者没有看过设定文件，不能按续写章节默认前情已知。"
+            "开章可以有强钩子，但前 600-1000 字必须把读者入口做成可读场景："
+            "当下地点/时间/危机、叙述者或核心人物身份、核心人物为何同场或彼此认识、"
+            "他们为什么现在必须行动。若任务卡第一步已经是爆炸、逃亡、喊名或战斗，"
+            "先用动作间隙、感官、内心和对白完成开场桥，再推进任务事件；"
+            "背景和人物要嵌入观察、对话和选择，不要写成设定说明书，也不要预支后续章节大事件。"
             if chapter_count == 0
             else "这不是第一章，请延续已有状态、记忆与场景动势。"
         )
@@ -881,6 +891,7 @@ def build_writer_prompt(
             "你是一名长篇小说写作助手。请续写下一章。",
             _section_block("作者意图", sections.get("author_intent", "")),
             _section_block("创作风味契约", sections.get("creative_contract", "")),
+            _section_block("首章读者入口约束", sections.get("opening_contract", "")),
             _section_block("下一章任务卡", sections.get("chapter_task", "")),
             _section_block("当前 live state", sections.get("live_state", "")),
             _section_block("世界", sections.get("static_world", "")),
@@ -921,9 +932,10 @@ def build_writer_prompt(
     chapter_count = int(data.get("project", {}).get("chapter_count", 0) or 0)
     first_chapter_note = (
         "当前将要写的是第一章。因为正文尚未开始，recent_events、open_threads、foreshadowing、character_updates 此时应为空，"
-        "不要把后续章节才会出现的事件总结提前写进当前状态。开章可以有钩子，但必须在前 800-1200 字内自然交代读者入口："
-        "故事发生的基本处境、地点/时间/关键世界规则、至少核心人物的姓名/关系/当前状态，以及他们为什么现在必须行动。"
-        "背景和人物要嵌入观察、对话和选择，不要直接跳到任务事件，也不要写成设定说明书。"
+        "不要把后续章节才会出现的事件总结提前写进当前状态。读者没有看过设定文件，不能按续写章节默认前情已知。"
+        "开章可以有强钩子，但前 600-1000 字必须把读者入口做成可读场景：故事发生的基本处境、"
+        "地点/时间/关键世界规则、至少核心人物的姓名/关系/当前状态，以及他们为什么现在必须行动。"
+        "如果任务事件依赖设定前情，先用动作间隙、感官、内心和对白搭桥；背景和人物要嵌入观察、对话和选择，不要直接跳到任务事件，也不要写成设定说明书。"
         if chapter_count == 0
         else ""
     )
@@ -984,6 +996,7 @@ def build_quality_review_prompt(data: dict, draft_text: str, *, strict: bool = F
         _section_block("审稿模式", threshold_note),
         _section_block("作者意图", sections.get("author_intent", "")),
         _section_block("创作风味契约", sections.get("creative_contract", "")),
+        _section_block("首章读者入口约束", sections.get("opening_contract", "")),
         _section_block("下一章任务卡", sections.get("chapter_task", "")),
         _section_block("当前 live state", sections.get("live_state", "")),
         _section_block("近期写法避让", sections.get("recent_craft_memory", "")),
@@ -1000,14 +1013,15 @@ def build_quality_review_prompt(data: dict, draft_text: str, *, strict: bool = F
 4. `motivation_causality` 检查关键行动是否有明确动因、压力、选择和结果
 5. 重点检查“本章创作蓝图”里的验收标准是否兑现；未兑现的必须写入 `blocking_issues` 或 `issues`
 6. 单独检查“平淡度”：开章钩子弱、角色声音泛、场景新鲜度低、互动火花不足、概括性叙述过多，都要压低对应分项并写入 `issues` 或 `nice_to_have`
-7. `passed` 表示是否可以作为最终章节保存；有 `severity="blocker"` 的问题时必须为 false
-8. `score_reasons` 为低分或关键分项给出一句具体理由
-9. `blocking_issues` 只放会阻止保存的硬伤，每项包含 `category`、`severity`、`issue`、`evidence`、`fix`
-10. `nice_to_have` 放不阻止保存但值得优化的问题
-11. `rewrite_plan` 给出可直接交给改稿模型执行的 2 到 6 步修订方案
-12. `revision_guidance` 必须具体指出需要如何改，不要泛泛而谈
-13. `review_unavailable` 正常审稿时必须为 false
-14. 不要输出解释，不要输出 Markdown
+7. 如果提供了“首章读者入口约束”，必须检查草稿是否把工程设定转成读者可理解的开场；若直接跳到任务事件、默认人物关系已知或缺少行动理由，要压低 `reader_hook` 与 `motivation_causality`，严重时列为 blocker
+8. `passed` 表示是否可以作为最终章节保存；有 `severity="blocker"` 的问题时必须为 false
+9. `score_reasons` 为低分或关键分项给出一句具体理由
+10. `blocking_issues` 只放会阻止保存的硬伤，每项包含 `category`、`severity`、`issue`、`evidence`、`fix`
+11. `nice_to_have` 放不阻止保存但值得优化的问题
+12. `rewrite_plan` 给出可直接交给改稿模型执行的 2 到 6 步修订方案
+13. `revision_guidance` 必须具体指出需要如何改，不要泛泛而谈
+14. `review_unavailable` 正常审稿时必须为 false
+15. 不要输出解释，不要输出 Markdown
 
 输出 JSON 骨架：
 {{"schema_version":2,"scores":{{"task_completion":0,"reader_hook":0,"scene_freshness":0,"character_specificity":0,"motivation_causality":0,"repetition_risk":0,"continuity":0}},"score_reasons":{{"task_completion":"","reader_hook":"","scene_freshness":"","character_specificity":"","motivation_causality":"","repetition_risk":"","continuity":""}},"passed":false,"review_unavailable":false,"strengths":[],"issues":[],"blocking_issues":[{{"category":"","severity":"blocker","issue":"","evidence":"","fix":""}}],"nice_to_have":[],"revision_guidance":"","rewrite_plan":[],"repeat_examples":[]}}
@@ -1021,6 +1035,7 @@ def build_rewrite_prompt(data: dict, draft_text: str, review_report: dict) -> st
         "你是一名长篇小说改稿助手。请根据审稿意见重写当前章节，并只输出重写后的完整正文。",
         _section_block("作者意图", sections.get("author_intent", "")),
         _section_block("创作风味契约", sections.get("creative_contract", "")),
+        _section_block("首章读者入口约束", sections.get("opening_contract", "")),
         _section_block("下一章任务卡", sections.get("chapter_task", "")),
         _section_block("当前 live state", sections.get("live_state", "")),
         _section_block("近期写法避让", sections.get("recent_craft_memory", "")),
@@ -1035,8 +1050,9 @@ def build_rewrite_prompt(data: dict, draft_text: str, review_report: dict) -> st
 1. 保留已经正确完成的剧情目标和连续性
 2. 优先修复审稿报告中的 `blocking_issues`、低分项和 `rewrite_plan`
 3. 尤其注意重复动作、弱钩子、场景空转、人物反应泛化、关键行动缺少原因
-4. 不要写改稿说明，不要输出 JSON，不要输出 Markdown 标题
-5. 输出纯正文，字数建议仍在 3000 字以上、5000 字以下
+4. 如果提供了“首章读者入口约束”，重写时必须补足读者入口，再推进任务卡事件；不要默认读者知道设定文件里的前情
+5. 不要写改稿说明，不要输出 JSON，不要输出 Markdown 标题
+6. 输出纯正文，字数建议仍在 3000 字以上、5000 字以下
 """
 
 

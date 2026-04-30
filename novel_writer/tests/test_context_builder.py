@@ -11,6 +11,7 @@ from context_builder import (
     _apply_writer_total_budget,
     build_batch_plan_context,
     build_chapter_outline_context,
+    build_progression_selected_task_card,
     build_chapter_task_card,
     build_progression_context,
     build_summary_context,
@@ -248,12 +249,101 @@ class ContextBuilderTests(unittest.TestCase):
                 planning_mode="chapter",
             )
             prompt = build_writer_prompt(context)
+            task_card = context["task_card"]
 
             self.assertIn("当前将要写的是第一章", prompt)
-            self.assertIn("前 800-1200 字内自然交代读者入口", prompt)
-            self.assertIn("核心人物的姓名/关系/当前状态", prompt)
+            self.assertIn("首章读者入口约束", prompt)
+            self.assertIn("读者没有看过设定文件", prompt)
+            self.assertIn("前 600-1000 字必须把读者入口做成可读场景", prompt)
+            self.assertIn("核心人物为何同场或彼此认识", prompt)
             self.assertIn("为什么现在必须行动", prompt)
-            self.assertIn("不要直接跳到任务事件", prompt)
+            self.assertIn("先用动作间隙、感官、内心和对白完成开场桥", prompt)
+            self.assertIn("opening_contract", context["sections"])
+            self.assertIn("读者还不知道设定文件里的前情", context["sections"]["opening_contract"])
+            self.assertIn("读者入口", task_card["plan_steps"][0])
+
+    def test_first_chapter_progression_prompt_requires_reader_entry_plan_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="first_chapter_progression", planning_mode="none")
+            save_json(
+                str(project_path / "world.json"),
+                {
+                    "title": "逃兵之旅",
+                    "genre": "奇幻冒险",
+                    "setting": "灰烬平原前线",
+                    "background": [
+                        "战争起因：双方因领土争端开战。",
+                        "开篇困境：两名主角被督战队识破假打，被押上处刑台，即将处决时炮击来临。",
+                        "追捕压力：督战队会立刻追杀逃兵。",
+                    ],
+                    "rules": [],
+                },
+            )
+            project_data = load_project(str(project_path))
+            next_context = {
+                "volume": {},
+                "chapter": {"chapter_number": 1, "title": "第一章任务"},
+            }
+            context = build_progression_context(
+                str(project_path),
+                project_data,
+                next_context,
+                "",
+                user_request="",
+                option_count=4,
+                planning_mode="none",
+            )
+            prompt = build_progression_options_prompt(
+                context,
+                "",
+                next_context,
+                user_request="",
+                option_count=4,
+                planning_mode="none",
+            )
+
+            self.assertIn("首章读者入口约束", prompt)
+            self.assertIn("plan_steps` 第一项必须先设计“读者入口/开场桥”", prompt)
+            self.assertIn("开篇困境", context["sections"]["static_world"])
+            self.assertIn("读者入口", context["task_card"]["plan_steps"][0])
+
+    def test_first_chapter_selected_progression_task_card_prepends_reader_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="first_chapter_selected", planning_mode="none")
+            project_data = load_project(str(project_path))
+            next_context = {
+                "volume": {},
+                "chapter": {"chapter_number": 1, "title": "第一章任务"},
+            }
+            baseline = {
+                "chapter_number": 1,
+                "planning_mode": "none",
+                "source": "plot_state",
+                "title": "逃出营地",
+                "objective": "从炮击混乱中逃离处刑现场。",
+                "plan_summary": "趁炮击逃离。",
+                "plan_steps": ["炮击砸断栅栏", "两人冲向荒野"],
+            }
+            task_card = build_progression_selected_task_card(
+                str(project_path),
+                project_data,
+                next_context,
+                {
+                    "title": "混乱中联手",
+                    "plan_summary": "爆炸后两人立刻逃离。",
+                    "plan_steps": ["炮击砸断栅栏", "两人冲向荒野"],
+                    "plan_guidance": "写出混乱。",
+                },
+                baseline,
+                session_id="session",
+                option_id="option_1",
+                planning_mode="none",
+                baseline_source="plot_state",
+                persist=False,
+            )
+
+            self.assertIn("读者入口", task_card["plan_steps"][0])
+            self.assertIn("炮击砸断栅栏", task_card["plan_steps"][1])
 
     def test_update_plot_state_refreshes_live_state_and_generates_arc_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
