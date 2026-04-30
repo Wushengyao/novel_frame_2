@@ -198,6 +198,35 @@ class QualityManagerTests(unittest.TestCase):
         self.assertEqual(text, "重写后的正文。")
         self.assertEqual(mocked_generate.call_count, 2)
 
+    def test_rewrite_retries_when_model_response_is_truncated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="rewrite_truncated_retry")
+            config = load_json(str(project_path / "project.json"))["llm_config"]
+            prompt_context = {
+                "task_card": {"chapter_number": 1},
+                "sections": {},
+                "section_chars": {},
+            }
+
+            with patch(
+                "quality_manager.generate_text_with_metadata",
+                side_effect=[
+                    ("半截重写正文", {"usage": {"total_tokens": 4000}, "finish_reason": "length", "truncated": True}),
+                    ("完整重写正文。", {"usage": {"total_tokens": 80}, "finish_reason": "stop", "truncated": False}),
+                ],
+            ) as mocked_generate:
+                text = rewrite_chapter_draft(
+                    str(project_path),
+                    prompt_context,
+                    "原草稿。",
+                    {"rewrite_plan": ["补强动因"]},
+                    config,
+                    log_context={"phase": "writer"},
+                )
+
+        self.assertEqual(text, "完整重写正文。")
+        self.assertEqual(mocked_generate.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

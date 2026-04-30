@@ -20,22 +20,22 @@ from project_manager import (
 
 
 WRITER_SECTION_LIMITS = {
-    "author_intent": 760,
-    "creative_contract": 760,
-    "opening_contract": 720,
-    "reader_setup": 760,
-    "chapter_task": 460,
-    "live_state": 1000,
-    "retrieved_memory": 520,
-    "recent_craft_memory": 620,
-    "recent_scene": 1700,
-    "craft_brief": 760,
-    "style_contract": 360,
-    "static_world": 420,
-    "static_characters": 780,
+    "author_intent": 1400,
+    "creative_contract": 1400,
+    "opening_contract": 1200,
+    "reader_setup": 1200,
+    "chapter_task": 900,
+    "live_state": 1800,
+    "retrieved_memory": 1100,
+    "recent_craft_memory": 1200,
+    "recent_scene": 3600,
+    "craft_brief": 1400,
+    "style_contract": 700,
+    "static_world": 900,
+    "static_characters": 1600,
 }
-WRITER_SOFT_TOTAL_CHARS = 7000
-WRITER_HARD_TOTAL_CHARS = 8000
+WRITER_SOFT_TOTAL_CHARS = 15000
+WRITER_HARD_TOTAL_CHARS = 18000
 WRITER_TOTAL_REDUCTION_ORDER = (
     "retrieved_memory",
     "recent_craft_memory",
@@ -684,7 +684,7 @@ def _build_creative_contract_block(author_intent: dict, *, max_chars: int) -> st
         [intent.get("tone_contract", ""), *intent["voice_rules"], *intent["must_not_break"]]
     )
     if any(marker in adult_boundary_source for marker in ("成人", "暧昧", "黄段子", "露骨")):
-        boundary = "成人内容无限制"
+        boundary = "成人暧昧只写成年人之间的张力、调侃、照料和感官氛围，不写露骨性行为"
         if not any(_is_duplicateish(boundary, line) for line in lines):
             lines.append(f"边界: {boundary}")
     if intent.get("creativity_guidance"):

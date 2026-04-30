@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from common_utils import emit_progress, safe_int, utc_now
 from console_logger import log_error, log_info, log_success
-from llm_client import generate_text_with_metadata
+from llm_client import generate_text_with_metadata, raise_if_llm_response_truncated
 from progression_manager import mark_active_progression_sessions_stale
 from project_manager import (
     ensure_no_project_audio_lock,
@@ -216,6 +216,7 @@ def run_chapter_polish(
             log_context=log_context,
             system_prompt=build_system_prompt("polish"),
         )
+        raise_if_llm_response_truncated(metadata, phase="polish")
         polished_text = normalize_chapter_text(_strip_wrapping_code_fence(response_text))
         _validate_polished_text(original_text, polished_text)
     except Exception:

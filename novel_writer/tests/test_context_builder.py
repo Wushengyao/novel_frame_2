@@ -52,12 +52,12 @@ class ContextBuilderTests(unittest.TestCase):
         sections = {
             "author_intent": "A" * 600,
             "chapter_task": "B" * 500,
-            "live_state": "C" * 2000,
-            "retrieved_memory": "D" * 2200,
-            "recent_scene": "E" * 3600,
+            "live_state": "C" * 5000,
+            "retrieved_memory": "D" * 5200,
+            "recent_scene": "E" * 7200,
             "style_contract": "F" * 400,
-            "static_world": "G" * 700,
-            "static_characters": "H" * 900,
+            "static_world": "G" * 2200,
+            "static_characters": "H" * 2600,
         }
 
         trimmed = _apply_writer_total_budget(sections)

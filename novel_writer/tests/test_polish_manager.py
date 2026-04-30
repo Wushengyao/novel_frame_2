@@ -111,6 +111,24 @@ class PolishManagerTests(unittest.TestCase):
         backup_root = self.project_path / "polish_backups" / "chapter_0001"
         self.assertFalse(backup_root.exists())
 
+    def test_run_chapter_polish_keeps_original_when_response_is_truncated(self) -> None:
+        with patch(
+            "polish_manager.generate_text_with_metadata",
+            return_value=("半截润色正文", {"usage": {"total_tokens": 4000}, "finish_reason": "length", "truncated": True}),
+        ):
+            with self.assertRaises(RuntimeError):
+                run_chapter_polish(
+                    str(self.project_path),
+                    runtime_config("chapter"),
+                    "chapter_0001",
+                    preset_ids=[],
+                    custom_request="",
+                )
+
+        self.assertEqual(self.chapter_path.read_text(encoding="utf-8").strip(), self.original_text)
+        backup_root = self.project_path / "polish_backups" / "chapter_0001"
+        self.assertFalse(backup_root.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

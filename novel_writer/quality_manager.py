@@ -8,7 +8,7 @@ from typing import Any
 
 from common_utils import emit_progress, extract_json_object, save_failed_llm_output
 from console_logger import log_info, log_success, log_warning
-from llm_client import generate_text_with_metadata
+from llm_client import generate_text_with_metadata, raise_if_llm_response_truncated
 from project_manager import load_json, record_context_telemetry, save_json, update_project_stats
 from prompt_builder import (
     build_craft_brief_prompt,
@@ -633,6 +633,7 @@ def rewrite_chapter_draft(
                 log_context=request_log_context,
                 system_prompt=build_system_prompt("rewrite"),
             )
+            raise_if_llm_response_truncated(metadata, phase="rewrite")
         except Exception as exc:
             update_project_stats(project_path, phase="rewrite", success=False, usage=None)
             last_error = str(exc)

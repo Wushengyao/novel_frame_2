@@ -17,6 +17,7 @@ from project_manager import (
     _prune_initial_supporting_characters,
     acquire_project_audio_lock,
     acquire_project_write_lock,
+    build_reader_setup_text,
     ensure_reader_setup,
     export_project_archive,
     import_project_archive,
@@ -63,6 +64,56 @@ class ProjectManagerTests(unittest.TestCase):
         self.assertTrue(intent["voice_rules"])
         self.assertTrue(intent["scene_promises"])
         self.assertTrue(intent["anti_flat_rules"])
+
+    def test_author_intent_trims_fragments_at_readable_boundaries(self) -> None:
+        long_tone = (
+            "轻松幽默中带着生存的紧张感，以格罗姆的第一人称口吻自嘲和吐槽，"
+            "大量内心戏展现种族差异带来的尴尬、好奇和温暖。"
+            "成人元素通过身体接触、感官反应和直白叙述自然融入，不矫饰。"
+        )
+        intent = _build_author_intent_from_project(
+            {
+                "story_request": (
+                    "人物概述：男主角是巨大兽人，在故事中以第一人称出现，精力旺盛；"
+                    "女主角是高等白精灵法师，容貌出众，身体敏感柔软。\n"
+                    "故事发展脉络：他们首先要躲避追兵，然后建设隐蔽基地，生存生活并与敌人周旋。"
+                ),
+                "description": "",
+            },
+            {"setting": ""},
+            {"tone": long_tone, "pov": "第一人称", "requirements": []},
+            {"main_plot": ""},
+        )
+
+        combined = intent["voice_rules"] + intent["scene_promises"] + intent["must_haves"]
+        self.assertFalse(any(item.endswith(("不", "小腹")) for item in combined))
+
+    def test_reader_setup_prefers_complete_reader_promises(self) -> None:
+        text = build_reader_setup_text(
+            {
+                "project": {"name": "边境逃亡"},
+                "world": {"title": "边境逃亡", "genre": "奇幻", "background": [], "rules": []},
+                "characters": {"protagonists": [], "supporting": []},
+                "plot_state": {},
+                "style": {
+                    "tone": (
+                        "轻松幽默中带着生存的紧张感，以第一人称口吻自嘲和吐槽，"
+                        "大量内心戏展现种族差异。成人元素通过身体接触自然融入，不矫饰。"
+                    ),
+                    "pov": "第一人称",
+                    "requirements": ["每章至少有一处因种族体型差异引发的幽默事件"],
+                },
+                "author_intent": {
+                    "premise": "两个逃兵在荒野中合作求生。",
+                    "scene_promises": ["成人元素通过身体接触、感官反应和直白叙述自然融入，不"],
+                    "must_haves": [],
+                },
+            }
+        )
+
+        self.assertIn("每章至少有一处因种族体型差异引发的幽默事件", text)
+        self.assertNotIn("阅读承诺：成人元素通过身体接触、感官反应和直白叙述自然融入，不", text)
+        self.assertFalse(any(line.endswith("不") for line in text.splitlines()))
 
     def test_author_intent_uses_valid_description_only_when_story_request_missing(self) -> None:
         intent = _build_author_intent_from_project(

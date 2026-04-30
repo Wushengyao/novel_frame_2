@@ -240,6 +240,57 @@ class LLMClientTests(unittest.TestCase):
             self.assertEqual(request_body["messages"], [{"role": "user", "content": "请写一段正文。"}])
             self.assertFalse((project_path / "llm_logs").exists())
 
+    def test_openai_finish_reason_length_marks_response_truncated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project"
+            project_path.mkdir()
+            config = {
+                "project_path": str(project_path.resolve()),
+                "model_provider": "openai_compatible",
+                "model": "llama3.2",
+                "api_base": "https://example.local/v1",
+                "max_tokens": 4000,
+            }
+            response_payload = {
+                "choices": [{"message": {"content": "半截正文"}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 4000, "total_tokens": 4009},
+            }
+
+            with patch("llm_client._request_json", return_value=(response_payload, 1)):
+                text, metadata = generate_text_with_metadata("请写一段正文。", config)
+
+            self.assertEqual(text, "半截正文")
+            self.assertEqual(metadata["finish_reason"], "length")
+            self.assertTrue(metadata["truncated"])
+
+    def test_gemini_finish_reason_max_tokens_marks_response_truncated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project"
+            project_path.mkdir()
+            config = {
+                "project_path": str(project_path.resolve()),
+                "model_provider": "gemini",
+                "model": "gemini-test",
+                "api_key": "secret-key",
+                "max_tokens": 4000,
+            }
+            response_payload = {
+                "candidates": [
+                    {
+                        "content": {"parts": [{"text": "半截正文"}]},
+                        "finishReason": "MAX_TOKENS",
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 9, "candidatesTokenCount": 4000, "totalTokenCount": 4009},
+            }
+
+            with patch("llm_client._request_json", return_value=(response_payload, 1)):
+                text, metadata = generate_text_with_metadata("请写一段正文。", config)
+
+            self.assertEqual(text, "半截正文")
+            self.assertEqual(metadata["finish_reason"], "MAX_TOKENS")
+            self.assertTrue(metadata["truncated"])
+
     def test_generate_text_with_metadata_logs_failed_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = Path(tmp) / "project"

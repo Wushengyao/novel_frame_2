@@ -420,6 +420,40 @@ def _extract_openai_usage(payload: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _extract_openai_finish_reason(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices") or []
+    if not choices:
+        return ""
+    return str(choices[0].get("finish_reason", "") or "").strip()
+
+
+def _is_truncated_finish_reason(provider: str, finish_reason: object) -> bool:
+    normalized = str(finish_reason or "").strip().lower()
+    if not normalized:
+        return False
+    if provider == "gemini":
+        return normalized in {"max_tokens", "max_output_tokens", "length"}
+    return normalized in {"length", "max_tokens", "max_output_tokens"}
+
+
+def llm_response_was_truncated(metadata: dict[str, Any] | None) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    if bool(metadata.get("truncated")):
+        return True
+    return _is_truncated_finish_reason(
+        str(metadata.get("provider", "") or ""),
+        metadata.get("finish_reason"),
+    )
+
+
+def raise_if_llm_response_truncated(metadata: dict[str, Any] | None, *, phase: str) -> None:
+    if not llm_response_was_truncated(metadata):
+        return
+    finish_reason = str((metadata or {}).get("finish_reason", "") or "").strip() or "unknown"
+    raise RuntimeError(f"{phase} response was truncated by the model output token limit (finish_reason={finish_reason}).")
+
+
 def _extract_gemini_text(payload: dict[str, Any]) -> str:
     candidates = payload.get("candidates") or []
     if not candidates:
@@ -446,6 +480,13 @@ def _extract_gemini_text(payload: dict[str, Any]) -> str:
     if text:
         return text
     raise RuntimeError(f"Gemini response missing text parts: {payload}")
+
+
+def _extract_gemini_finish_reason(payload: dict[str, Any]) -> str:
+    candidates = payload.get("candidates") or []
+    if not candidates:
+        return ""
+    return str(candidates[0].get("finishReason", "") or "").strip()
 
 
 def _extract_gemini_usage(payload: dict[str, Any]) -> dict[str, int]:
@@ -921,6 +962,8 @@ def generate_text_with_metadata(
         metadata = {
             "provider": provider,
             "model": model,
+            "finish_reason": _extract_openai_finish_reason(payload or {}),
+            "truncated": _is_truncated_finish_reason(provider, _extract_openai_finish_reason(payload or {})),
             "usage": _extract_openai_usage(payload),
         }
         if should_log:
@@ -1022,6 +1065,8 @@ def generate_text_with_metadata(
         metadata = {
             "provider": provider,
             "model": model,
+            "finish_reason": _extract_gemini_finish_reason(payload or {}),
+            "truncated": _is_truncated_finish_reason(provider, _extract_gemini_finish_reason(payload or {})),
             "usage": _extract_gemini_usage(payload),
         }
         if should_log:

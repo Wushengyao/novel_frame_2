@@ -277,6 +277,29 @@ class GuidedFlowTests(unittest.TestCase):
             self.assertEqual(list((project_path / "craft_briefs").glob("*.json")), [])
             self.assertEqual(list((project_path / "quality_reviews").glob("*.json")), [])
 
+    def test_writer_retries_truncated_response_before_saving(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="writer_truncated_retry")
+
+            with patch(
+                "app.generate_text_with_metadata",
+                side_effect=[
+                    ("半截正文", {"usage": {"total_tokens": 4000}, "finish_reason": "length", "truncated": True}),
+                    ("完整正文", {"usage": {"total_tokens": 80}, "finish_reason": "stop", "truncated": False}),
+                ],
+            ) as mocked_writer_generate, patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ):
+                chapter_path = run_next_chapter(
+                    str(project_path),
+                    runtime_config("chapter", writing_quality_mode="light"),
+                )
+
+            self.assertEqual(mocked_writer_generate.call_count, 2)
+            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "完整正文")
+            self.assertNotIn("半截正文", Path(chapter_path).read_text(encoding="utf-8"))
+
     def test_expert_mode_reviews_after_summary_without_changing_chapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(

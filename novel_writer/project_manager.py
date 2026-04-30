@@ -863,7 +863,7 @@ def _extract_story_constraints(text: str, max_items: int = 5) -> list[str]:
     unique = []
     seen = set()
     for fragment in fragments:
-        compact = fragment[:80].strip()
+        compact = _trim_to_readable_boundary(fragment, 80)
         if not compact or compact in seen:
             continue
         unique.append(compact)
@@ -895,17 +895,42 @@ def _is_low_signal_project_description(text: str) -> bool:
 
 def _first_text(candidates: list[str], max_chars: int) -> str:
     for candidate in candidates:
-        text = str(candidate or "").strip()
+        text = _trim_to_readable_boundary(candidate, max_chars)
         if text:
-            return text[:max_chars].strip()
+            return text
     return ""
+
+
+def _trim_to_readable_boundary(value: object, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+
+    window = text[:max_chars].rstrip()
+    min_boundary = max(12, int(max_chars * 0.45))
+    hard_boundary = max(window.rfind(mark) for mark in "。！？!?；;")
+    if hard_boundary >= min_boundary:
+        return window[: hard_boundary + 1].strip()
+
+    soft_boundary = max(window.rfind(mark) for mark in "，,、：:")
+    if soft_boundary >= min_boundary:
+        window = window[:soft_boundary].rstrip()
+    else:
+        window = window[: max(0, max_chars - 1)].rstrip()
+
+    window = window.rstrip(" ，,、；;：:的地得了着过不和与及或并而但却则")
+    if not window:
+        return ""
+    return window.rstrip("…") + "…"
 
 
 def _select_story_fragments(text: str, keywords: tuple[str, ...], *, max_items: int, max_chars: int = 90) -> list[str]:
     selected: list[str] = []
     seen: set[str] = set()
     for fragment in _extract_story_constraints(text, max_items=24):
-        compact = fragment[:max_chars].strip()
+        compact = _trim_to_readable_boundary(fragment, max_chars)
         if not compact:
             continue
         if not any(keyword in compact for keyword in keywords):
@@ -931,7 +956,7 @@ def _build_author_intent_from_project(project: dict, world: dict, style: dict, p
     premise = _first_text([story_request, world_setting, main_plot, description_candidate], 240)
     long_arc = (
         main_plot
-        or story_request[:240]
+        or _trim_to_readable_boundary(story_request, 240)
         or world_setting
         or description_candidate
     )
@@ -955,7 +980,7 @@ def _build_author_intent_from_project(project: dict, world: dict, style: dict, p
     voice_rules = []
     for item in (pov, tone):
         if item and item not in voice_rules:
-            voice_rules.append(item[:90])
+            voice_rules.append(_trim_to_readable_boundary(item, 90))
     voice_rules.extend(
         _select_story_fragments(
             combined_creative_source,
@@ -992,11 +1017,11 @@ def _build_author_intent_from_project(project: dict, world: dict, style: dict, p
     ]
     return _normalize_author_intent(
         {
-            "premise": premise[:240],
-            "long_arc": long_arc[:240],
-            "tone_contract": tone_contract[:180],
+            "premise": _trim_to_readable_boundary(premise, 240),
+            "long_arc": _trim_to_readable_boundary(long_arc, 240),
+            "tone_contract": _trim_to_readable_boundary(tone_contract, 180),
             "narrative_engine": _first_text([main_plot, story_request, world_setting], 220),
-            "relationship_engine": "；".join(relationship_fragments)[:220],
+            "relationship_engine": _trim_to_readable_boundary("；".join(relationship_fragments), 220),
             "voice_rules": voice_rules[:6],
             "scene_promises": scene_promises[:6],
             "anti_flat_rules": anti_flat_rules[:6],
@@ -1008,12 +1033,16 @@ def _build_author_intent_from_project(project: dict, world: dict, style: dict, p
 
 
 def _reader_trim_text(value: object, max_chars: int) -> str:
-    text = re.sub(r"\s+", " ", str(value or "").strip())
-    if max_chars <= 0:
-        return ""
-    if len(text) <= max_chars:
-        return text
-    return text[: max(0, max_chars - 1)].rstrip() + "…"
+    return _trim_to_readable_boundary(value, max_chars)
+
+
+def _reader_looks_incomplete_fragment(text: str) -> bool:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return False
+    if stripped.endswith(("，", ",", "、", "；", ";", "：", ":")):
+        return True
+    return stripped[-1] in "不把被将与和及或并而但却则"
 
 
 def _reader_string_list(value: object, *, max_items: int, max_chars: int = 120) -> list[str]:
@@ -1022,7 +1051,7 @@ def _reader_string_list(value: object, *, max_items: int, max_chars: int = 120) 
     seen: set[str] = set()
     for item in items:
         text = _reader_trim_text(item, max_chars)
-        if not text:
+        if not text or _reader_looks_incomplete_fragment(text):
             continue
         key = re.sub(r"\s+", "", text)
         if key in seen:
@@ -1032,6 +1061,17 @@ def _reader_string_list(value: object, *, max_items: int, max_chars: int = 120) 
         if len(result) >= max_items:
             break
     return result
+
+
+def _reader_promise_sources(author_intent: dict, style: dict) -> list[object]:
+    requirements = style.get("requirements") or []
+    if not isinstance(requirements, list):
+        requirements = [requirements]
+    return [
+        *requirements,
+        *(author_intent.get("must_haves") or []),
+        *(author_intent.get("scene_promises") or []),
+    ]
 
 
 def _reader_first_text(candidates: list[object], max_chars: int) -> str:
@@ -1044,6 +1084,11 @@ def _reader_first_text(candidates: list[object], max_chars: int) -> str:
         if text:
             return text
     return ""
+
+
+def _reader_join_parts(parts: tuple[str, ...], delimiter: str = "，") -> str:
+    cleaned = [str(part or "").strip().rstrip("。！？!?；;，,、") for part in parts]
+    return delimiter.join(part for part in cleaned if part)
 
 
 def _reader_pick_opening_background(world: dict, plot_state: dict, project: dict, *, max_items: int = 3) -> list[str]:
@@ -1082,7 +1127,7 @@ def _reader_pick_opening_background(world: dict, plot_state: dict, project: dict
     current_arc = _reader_trim_text(plot_state.get("current_arc"), 100)
     next_goal = _reader_trim_text(plot_state.get("next_chapter_goal"), 120)
     if location or current_time:
-        anchors.append("开场锚点：" + "，".join(part for part in (location, current_time) if part))
+        anchors.append("开场锚点：" + _reader_join_parts((location, current_time)))
     if current_arc:
         anchors.append(f"当前阶段：{current_arc}")
     if next_goal:
@@ -1184,7 +1229,7 @@ def build_reader_setup_text(project_data: dict) -> str:
         _reader_trim_text(style.get("pov"), 60),
     ]
     tone_line = " / ".join(part for part in tone_parts if part)
-    promises = _reader_string_list(author_intent.get("scene_promises") or author_intent.get("must_haves"), max_items=3, max_chars=90)
+    promises = _reader_string_list(_reader_promise_sources(author_intent, style), max_items=3, max_chars=90)
 
     lines = [
         "# 读者开卷导语",

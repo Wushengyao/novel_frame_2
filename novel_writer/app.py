@@ -17,7 +17,12 @@ if str(SCRIPT_DIR) not in sys.path:
 from chapter_context import get_next_context_for_mode, peek_next_context_for_mode
 from common_utils import emit_progress, utc_now
 from console_logger import log_error, log_info, log_success, log_warning
-from context_builder import build_writer_context, resolve_effective_chapter_task
+from context_builder import (
+    WRITER_HARD_TOTAL_CHARS,
+    WRITER_SOFT_TOTAL_CHARS,
+    build_writer_context,
+    resolve_effective_chapter_task,
+)
 from expert_review_manager import run_expert_review_for_chapter
 from audiobook_manager import (
     GENERATION_MODE_ADVANCED,
@@ -26,7 +31,7 @@ from audiobook_manager import (
     generate_audiobook_chapters,
 )
 from illustration_manager import illustrate_chapters, illustrate_project_assets
-from llm_client import generate_text_with_metadata
+from llm_client import generate_text_with_metadata, raise_if_llm_response_truncated
 from outline_manager import (
     find_next_chapter_context,
     get_outline_status,
@@ -416,8 +421,8 @@ def run_next_chapter(
         planning_mode=effective_mode,
         extra={
             "target_chapter_number": prompt_context.get("task_card", {}).get("chapter_number"),
-            "prompt_soft_budget": 7000,
-            "prompt_hard_budget": 8000,
+            "prompt_soft_budget": WRITER_SOFT_TOTAL_CHARS,
+            "prompt_hard_budget": WRITER_HARD_TOTAL_CHARS,
             "writing_quality_mode": writing_quality_mode,
             "review_mode": review_mode,
         },
@@ -443,8 +448,10 @@ def run_next_chapter(
             )
             if not str(response_text or "").strip():
                 raise RuntimeError("writer response is empty")
+            raise_if_llm_response_truncated(metadata, phase="writer")
             break
         except Exception as exc:
+            response_text = ""
             update_project_stats(project_path, phase="writer", success=False, usage=None)
             last_writer_error = exc
             log_warning(f"next_chapter: writer request failed attempt={request_attempt}, reason={exc}")
