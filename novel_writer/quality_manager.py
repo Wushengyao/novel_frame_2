@@ -6,7 +6,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from common_utils import emit_progress, extract_json_object
+from common_utils import emit_progress, extract_json_object, save_failed_llm_output
 from console_logger import log_info, log_success, log_warning
 from llm_client import generate_text_with_metadata
 from project_manager import load_json, record_context_telemetry, save_json, update_project_stats
@@ -52,6 +52,13 @@ REVIEW_SCORE_KEYS = (
 )
 REVIEW_PASS_AVERAGE = 7.0
 REVIEW_PASS_MINIMUM = 5.0
+REVIEW_FLATNESS_REWRITE_MINIMUM = 7.0
+FLATNESS_SCORE_KEYS = (
+    "reader_hook",
+    "scene_freshness",
+    "character_specificity",
+    "repetition_risk",
+)
 QUALITY_REVIEW_SCHEMA_VERSION = 2
 
 
@@ -149,6 +156,14 @@ def _has_blocker(review: dict) -> bool:
     return False
 
 
+def _flatness_low_scores(scores: dict[str, float]) -> list[str]:
+    return [
+        key
+        for key in FLATNESS_SCORE_KEYS
+        if _coerce_score(scores.get(key)) < REVIEW_FLATNESS_REWRITE_MINIMUM
+    ]
+
+
 def normalize_craft_brief(payload: dict | None, fallback: dict | None = None) -> dict:
     source = payload if isinstance(payload, dict) else {}
     fallback_source = fallback if isinstance(fallback, dict) else {}
@@ -225,6 +240,7 @@ def normalize_quality_review(payload: dict | None, *, fallback_passed: bool = Fa
         }
     average = sum(scores.values()) / len(REVIEW_SCORE_KEYS)
     blocking_issues = _normalize_issue_objects(source.get("blocking_issues"), max_items=8, default_severity="blocker")
+    flatness_issues = _flatness_low_scores(scores)
     computed_passed = (
         average >= REVIEW_PASS_AVERAGE
         and min(scores.values()) >= REVIEW_PASS_MINIMUM
@@ -233,21 +249,50 @@ def normalize_quality_review(payload: dict | None, *, fallback_passed: bool = Fa
     )
     explicit_passed = _coerce_bool(source.get("passed"), default=computed_passed) if "passed" in source else computed_passed
     passed = (explicit_passed and computed_passed) if source else (fallback_passed and not unavailable)
+    issues = _normalize_string_list(source.get("issues"), max_items=8)
+    nice_to_have = _normalize_string_list(source.get("nice_to_have"), max_items=8)
+    rewrite_plan = _normalize_string_list(source.get("rewrite_plan"), max_items=8)
+    revision_guidance = str(source.get("revision_guidance", "") or "").strip()
+    if flatness_issues and source:
+        labels = "、".join(flatness_issues)
+        flatness_note = f"平淡度风险：{labels} 低于 {REVIEW_FLATNESS_REWRITE_MINIMUM:g}，需要增强钩子、角色声音、互动火花或场景新变化。"
+        if flatness_note not in issues:
+            issues.append(flatness_note)
+        if not rewrite_plan:
+            rewrite_plan = [
+                "重写开章钩子，让场景压力更早出现。",
+                "补强角色专属口吻、动作反应和互动火花。",
+                "把概括性推进改成可见的动作、感官、心理和对话交替。",
+                "在结尾兑现新的信息、代价、关系变化或生存成果。",
+            ]
+        if not revision_guidance:
+            revision_guidance = "围绕低分平淡项轻量改写，保留已完成的剧情目标，重点增强钩子、角色声音、场景新鲜度和互动火花。"
+    explicit_needs_rewrite = _coerce_bool(source.get("needs_rewrite"), default=False) if source else False
+    needs_rewrite = bool(flatness_issues and source and not unavailable) or explicit_needs_rewrite
     return {
         "schema_version": QUALITY_REVIEW_SCHEMA_VERSION,
         "scores": scores,
         "average_score": round(average, 2),
         "passed": passed,
         "review_unavailable": unavailable,
+        "needs_rewrite": needs_rewrite,
+        "flatness_issues": flatness_issues,
         "score_reasons": _normalize_score_reasons(source.get("score_reasons")),
         "strengths": _normalize_string_list(source.get("strengths"), max_items=8),
-        "issues": _normalize_string_list(source.get("issues"), max_items=8),
+        "issues": issues[:8],
         "blocking_issues": blocking_issues,
-        "nice_to_have": _normalize_string_list(source.get("nice_to_have"), max_items=8),
-        "revision_guidance": str(source.get("revision_guidance", "") or "").strip(),
-        "rewrite_plan": _normalize_string_list(source.get("rewrite_plan"), max_items=8),
+        "nice_to_have": nice_to_have[:8],
+        "revision_guidance": revision_guidance,
+        "rewrite_plan": rewrite_plan[:8],
         "repeat_examples": _normalize_string_list(source.get("repeat_examples"), max_items=8),
     }
+
+
+def _extract_quality_review_payload(response_text: str) -> dict:
+    payload = extract_json_object(response_text, "Could not parse JSON from quality review response.")
+    if not isinstance(payload.get("scores"), dict):
+        raise ValueError("quality review response missing scores object")
+    return payload
 
 
 def quality_review_passed(review: dict) -> bool:
@@ -268,6 +313,17 @@ def quality_review_passed(review: dict) -> bool:
 
 def quality_review_available(review: dict) -> bool:
     return isinstance(review, dict) and not bool(review.get("review_unavailable", False))
+
+
+def quality_review_needs_rewrite(review: dict, mode: object) -> bool:
+    if not quality_review_available(review):
+        return False
+    normalized_mode = normalize_writing_quality_mode(mode)
+    if normalized_mode not in {WRITING_QUALITY_BALANCED, WRITING_QUALITY_HIGH}:
+        return False
+    if not quality_review_passed(review):
+        return True
+    return bool(review.get("needs_rewrite"))
 
 
 def _strip_single_fenced_block(text: str) -> str:
@@ -454,6 +510,13 @@ def generate_craft_brief(
         try:
             brief = normalize_craft_brief(extract_json_object(response_text, "Could not parse JSON from craft brief response."), fallback)
         except Exception as exc:  # pragma: no cover - malformed model output fallback
+            save_failed_llm_output(
+                project_path,
+                "craft_brief",
+                response_text,
+                error=str(exc),
+                context=request_log_context,
+            )
             log_warning(f"craft_brief: using fallback brief, reason: {exc}")
             brief = deepcopy(fallback)
             brief["fallback_reason"] = str(exc)
@@ -511,9 +574,16 @@ def review_chapter_draft(
             continue
 
         try:
-            review = normalize_quality_review(extract_json_object(response_text, "Could not parse JSON from quality review response."))
+            review = normalize_quality_review(_extract_quality_review_payload(response_text))
             break
         except Exception as exc:  # pragma: no cover - malformed model output fallback
+            save_failed_llm_output(
+                project_path,
+                "quality_review",
+                response_text,
+                error=str(exc),
+                context=request_log_context,
+            )
             last_error = str(exc)
             log_warning(f"quality_review: response parse failed attempt={attempt} request_attempt={request_attempt}, reason: {exc}")
 
@@ -593,7 +663,7 @@ def quality_mode_uses_review(mode: object) -> bool:
 
 def quality_mode_allows_rewrite(mode: object, review_mode: object) -> bool:
     return (
-        normalize_writing_quality_mode(mode) == WRITING_QUALITY_HIGH
+        normalize_writing_quality_mode(mode) in {WRITING_QUALITY_BALANCED, WRITING_QUALITY_HIGH}
         and normalize_review_mode(review_mode) == REVIEW_MODE_AUTO
     )
 
@@ -620,6 +690,7 @@ __all__ = [
     "quality_mode_uses_craft_brief",
     "quality_mode_uses_review",
     "quality_review_available",
+    "quality_review_needs_rewrite",
     "quality_review_passed",
     "quality_review_path",
     "list_quality_artifacts",

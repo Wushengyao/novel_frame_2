@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from chapter_context import get_next_context_for_mode, peek_next_context_for_mode, resolve_planning_mode
-from common_utils import emit_progress, extract_json_object, safe_int, utc_now
+from common_utils import emit_progress, extract_json_object, safe_int, save_failed_llm_output, utc_now
 from console_logger import log_success
 from context_builder import (
     build_custom_progression_task_card,
@@ -107,8 +107,24 @@ def _non_custom_options(options: list[dict]) -> list[dict]:
     return [option for option in options if not option.get("custom")]
 
 
+def _unwrap_progression_payload(data: dict) -> dict:
+    if not isinstance(data, dict):
+        return {}
+    if isinstance(data.get("options"), list):
+        return data
+    for key in ("data", "result", "response", "payload"):
+        nested = data.get(key)
+        if isinstance(nested, dict) and isinstance(nested.get("options"), list):
+            merged = dict(nested)
+            if not str(merged.get("recommended_option_id") or "").strip() and data.get("recommended_option_id"):
+                merged["recommended_option_id"] = data.get("recommended_option_id")
+            return merged
+    return data
+
+
 def normalize_progression_options_response(data: dict, option_count: int) -> dict:
     count = validate_option_count(option_count)
+    data = _unwrap_progression_payload(data)
     raw_options = data.get("options")
     if not isinstance(raw_options, list):
         raise ValueError("progression response missing options list")
@@ -337,6 +353,7 @@ def generate_auto_chapter_objective(
     if request_context:
         log_context["user_request"] = request_context[:280]
 
+    response_text = ""
     try:
         response_text, metadata = generate_text_with_metadata(
             prompt,
@@ -458,11 +475,16 @@ def generate_progression_options(
             usage=metadata.get("usage"),
             metadata=metadata,
         )
-        normalized = normalize_progression_options_response(
-            extract_json_object(response_text, "Could not parse JSON from progression options response."),
-            count,
+        parsed_payload = extract_json_object(response_text, "Could not parse JSON from progression options response.")
+        normalized = normalize_progression_options_response(parsed_payload, count)
+    except Exception as exc:
+        save_failed_llm_output(
+            project_path,
+            "progression_options",
+            response_text,
+            error=str(exc),
+            context=log_context,
         )
-    except Exception:
         update_project_stats(project_path, phase="outline", success=False, usage=None)
         raise
 

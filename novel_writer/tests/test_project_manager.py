@@ -10,8 +10,9 @@ from unittest.mock import patch
 from project_manager import (
     PROJECT_EXPORT_MANIFEST_FILENAME,
     ProjectWriteLockError,
-    _generate_initial_story_data,
     _build_persisted_llm_config,
+    _build_author_intent_from_project,
+    _generate_initial_story_data,
     _prune_initial_supporting_characters,
     acquire_project_audio_lock,
     acquire_project_write_lock,
@@ -28,6 +29,37 @@ from tests.test_support import create_test_project, read_json
 
 
 class ProjectManagerTests(unittest.TestCase):
+    def test_author_intent_premise_prefers_story_request_over_meta_description(self) -> None:
+        intent = _build_author_intent_from_project(
+            {
+                "story_request": "故事发生在一座设施齐全的超级摩天楼中，主角被困后合作生存。",
+                "description": "用于分析 novel_frame_2 无大纲模式创建项目到首次续写的提示词链路。",
+            },
+            {"setting": "备用设定"},
+            {"tone": "微恐、温馨", "pov": "第一人称", "requirements": ["注重生存细节"]},
+            {"main_plot": "摩天楼停电后，主角们建立避难所并揭开怪物来源。"},
+        )
+
+        self.assertIn("超级摩天楼", intent["premise"])
+        self.assertNotIn("提示词链路", intent["premise"])
+        self.assertIn("注重生存细节", intent["must_haves"])
+        self.assertTrue(intent["voice_rules"])
+        self.assertTrue(intent["scene_promises"])
+        self.assertTrue(intent["anti_flat_rules"])
+
+    def test_author_intent_uses_valid_description_only_when_story_request_missing(self) -> None:
+        intent = _build_author_intent_from_project(
+            {
+                "story_request": "",
+                "description": "封闭地铁城里的长期求生与派系博弈。",
+            },
+            {"setting": ""},
+            {"tone": "", "pov": "", "requirements": []},
+            {"main_plot": ""},
+        )
+
+        self.assertIn("封闭地铁城", intent["premise"])
+
     def test_persisted_llm_config_keeps_quality_model_but_clears_api_key(self) -> None:
         persisted = _build_persisted_llm_config(
             {

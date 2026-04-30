@@ -1,0 +1,3 @@
+Generated chapters: 2
+- /home/wsy/novel_frame_2/prompt_workflow_regression_20260430_deepseek_none_fix/projects/novel_project_regression_fix_deepseek_none_20260430/chapters/chapter_0001.md
+- /home/wsy/novel_frame_2/prompt_workflow_regression_20260430_deepseek_none_fix/projects/novel_project_regression_fix_deepseek_none_20260430/chapters/chapter_0002.md

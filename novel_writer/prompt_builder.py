@@ -619,6 +619,7 @@ def build_auto_objective_prompt(
         prompt_body = _join_blocks(
             "你是长篇连载小说的章节规划助手。请只为下一章提炼一个清晰的 objective。",
             _section_block("作者意图", sections.get("author_intent", "")),
+            _section_block("创作风味契约", sections.get("creative_contract", "")),
             _section_block("当前任务卡基线", sections.get("chapter_task", "")),
             _section_block("世界观速览", sections.get("static_world", "")),
             _section_block("角色速览", sections.get("static_characters", "")),
@@ -636,8 +637,9 @@ def build_auto_objective_prompt(
 2. 只生成“下一章”的 objective，不要把两三章后的目标提前写进来
 3. objective 必须是本章要完成的叙事任务，不要写成执行 plan、情绪要求或文风要求
 4. objective 要尊重当前 live state、最近场景、相关记忆和基线任务卡；若用户有额外意图，请自然吸收进本章任务
-5. objective 应当具体、可执行、可验证，长度尽量控制在 1 句话内
-6. 不要输出解释，不要输出 Markdown
+5. objective 必须包含可验证的场景压力、人物选择、关系推进或生存建设变化之一，避免只写普通任务句
+6. objective 应当具体、可执行、可验证，长度尽量控制在 1 句话内
+7. 不要输出解释，不要输出 Markdown
 
 输出 JSON：
 {{"objective":""}}
@@ -715,6 +717,7 @@ def build_progression_options_prompt(
         prompt_body = _join_blocks(
             opening,
             _section_block("作者意图", sections.get("author_intent", "")),
+            _section_block("创作风味契约", sections.get("creative_contract", "")),
             _section_block("下一章任务卡", sections.get("chapter_task", "")),
             _section_block("世界观速览", sections.get("static_world", "")),
             _section_block("角色速览", sections.get("static_characters", "")),
@@ -734,10 +737,11 @@ def build_progression_options_prompt(
 4. {recommendation_rule}
 5. {objective_rule}
 6. {scope_rule}
-7. 每个选项都必须包含 `option_id`、`title`、`plan_summary`、`plan_steps`、`plan_guidance`、`recommended`
-8. `plan_steps` 给 2 到 5 个条目，写本章真正会发生的推进节点
-9. `plan_summary` 要描述这一章会怎么推进；`plan_guidance` 只补充写法与强调点，不要偷偷改写章节主目标
-10. 不要输出解释，不要输出 Markdown
+7. 每个方案都必须体现本章的钩子、压力、互动火花和至少一项新变化；多选项时彼此要有清晰戏剧重心差异
+8. 每个选项都必须包含 `option_id`、`title`、`plan_summary`、`plan_steps`、`plan_guidance`、`recommended`
+9. `plan_steps` 给 2 到 5 个条目，写本章真正会发生的推进节点
+10. `plan_summary` 要描述这一章会怎么推进；`plan_guidance` 只补充写法与强调点，不要偷偷改写章节主目标
+11. 不要输出解释，不要输出 Markdown
 
 输出 JSON 骨架：
 {{"recommended_option_id":"option_1","options":[{{"option_id":"option_1","title":"","plan_summary":"","plan_steps":["",""],"plan_guidance":"","recommended":true}}]}}
@@ -826,6 +830,7 @@ def build_craft_brief_prompt(data: dict) -> str:
     prompt_body = _join_blocks(
         "你是一名长篇小说创作总监。请在正式写正文前，为下一章设计一份短小但可执行的创作蓝图。",
         _section_block("作者意图", sections.get("author_intent", "")),
+        _section_block("创作风味契约", sections.get("creative_contract", "")),
         _section_block("下一章任务卡", sections.get("chapter_task", "")),
         _section_block("当前 live state", sections.get("live_state", "")),
         _section_block("世界", sections.get("static_world", "")),
@@ -843,10 +848,11 @@ def build_craft_brief_prompt(data: dict) -> str:
 3. 蓝图要帮助正文更吸引人：开章钩子、戏剧问题、压力来源、人物选择、情绪转折都要具体
 4. `context_bridge` 写清本章开场需要补给读者的处境、人物入口或连续性锚点
 5. `action_reasoning` 写清人物采取关键行动的直接原因、压力与选择依据
-6. `forbidden_repeats` 必须列出需要避开的上一章表层动作、姿态、句式或结尾套路
-7. `fresh_interaction_patterns` 要给出新的互动方式，不要只写“更细腻”“更紧张”这类抽象要求
-8. `success_criteria` 给出 2 到 5 条本章必须兑现的可检查目标，用于写后质检
-9. 不要输出解释，不要输出 Markdown
+6. 蓝图必须显式照顾创作风味契约：开章钩子、关系火花、生存细节、感官描写、核心人物身心反应、幽默或温情破局、平淡规避
+7. `forbidden_repeats` 必须列出需要避开的上一章表层动作、姿态、句式或结尾套路
+8. `fresh_interaction_patterns` 要给出新的互动方式，不要只写“更细腻”“更紧张”这类抽象要求
+9. `success_criteria` 给出 2 到 5 条本章必须兑现的可检查目标，用于写后质检
+10. 不要输出解释，不要输出 Markdown
 
 输出 JSON 骨架：
 {{"chapter_hook":"","context_bridge":"","dramatic_question":"","conflict_pressure":"","action_reasoning":"","emotional_turn":"","scene_movement":[],"sensory_palette":[],"fresh_interaction_patterns":[],"forbidden_repeats":[],"success_criteria":[],"focus_notes":""}}
@@ -874,6 +880,7 @@ def build_writer_prompt(
         prompt_body = _join_blocks(
             "你是一名长篇小说写作助手。请续写下一章。",
             _section_block("作者意图", sections.get("author_intent", "")),
+            _section_block("创作风味契约", sections.get("creative_contract", "")),
             _section_block("下一章任务卡", sections.get("chapter_task", "")),
             _section_block("当前 live state", sections.get("live_state", "")),
             _section_block("世界", sections.get("static_world", "")),
@@ -894,9 +901,11 @@ def build_writer_prompt(
 4. 严格只写当前这一章。任务卡是当前章节任务的最高优先级来源，不要提前完成下一章或后续章节的大事件
 5. 如果提供了“近期写法避让”和“本章创作蓝图”，必须避开其中列出的表层重复；同类动作只有在产生新功能、新代价或新关系变化时才能使用
 6. 开章要尽快给读者一个具体钩子；场景推进要有压力、选择、结果，不要只在同一种姿态和情绪里反复停留
-7. 结尾可留下明确悬念或过渡，但不要把后续章核心情节直接写完
-8. 输出纯正文，不要章标题、序号、小标题、Markdown 标题
-9. 字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读
+7. 关键场景不能只概括推进，必须让动作、感官、心理和对话交替出现；每章至少产生一项地点、资源、关系或怪物认知的新变化
+8. 成人暧昧只写成年人之间的张力、调侃、照料和感官氛围，不写露骨性行为
+9. 结尾可留下明确悬念或过渡，但不要把后续章核心情节直接写完
+10. 输出纯正文，不要章标题、序号、小标题、Markdown 标题
+11. 字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读
 """
 
     world = _to_block(data.get("world", {}))
@@ -974,6 +983,7 @@ def build_quality_review_prompt(data: dict, draft_text: str, *, strict: bool = F
         "你是一名长篇小说责任编辑。请审阅这章草稿是否完成任务、是否吸引人、是否重复上一章写法。",
         _section_block("审稿模式", threshold_note),
         _section_block("作者意图", sections.get("author_intent", "")),
+        _section_block("创作风味契约", sections.get("creative_contract", "")),
         _section_block("下一章任务卡", sections.get("chapter_task", "")),
         _section_block("当前 live state", sections.get("live_state", "")),
         _section_block("近期写法避让", sections.get("recent_craft_memory", "")),
@@ -989,14 +999,15 @@ def build_quality_review_prompt(data: dict, draft_text: str, *, strict: bool = F
 3. `repetition_risk` 的高分代表重复风险低、写法新鲜；低分代表动作/句式/场景结构复用明显
 4. `motivation_causality` 检查关键行动是否有明确动因、压力、选择和结果
 5. 重点检查“本章创作蓝图”里的验收标准是否兑现；未兑现的必须写入 `blocking_issues` 或 `issues`
-6. `passed` 表示是否可以作为最终章节保存；有 `severity="blocker"` 的问题时必须为 false
-7. `score_reasons` 为低分或关键分项给出一句具体理由
-8. `blocking_issues` 只放会阻止保存的硬伤，每项包含 `category`、`severity`、`issue`、`evidence`、`fix`
-9. `nice_to_have` 放不阻止保存但值得优化的问题
-10. `rewrite_plan` 给出可直接交给改稿模型执行的 2 到 6 步修订方案
-11. `revision_guidance` 必须具体指出需要如何改，不要泛泛而谈
-12. `review_unavailable` 正常审稿时必须为 false
-13. 不要输出解释，不要输出 Markdown
+6. 单独检查“平淡度”：开章钩子弱、角色声音泛、场景新鲜度低、互动火花不足、概括性叙述过多，都要压低对应分项并写入 `issues` 或 `nice_to_have`
+7. `passed` 表示是否可以作为最终章节保存；有 `severity="blocker"` 的问题时必须为 false
+8. `score_reasons` 为低分或关键分项给出一句具体理由
+9. `blocking_issues` 只放会阻止保存的硬伤，每项包含 `category`、`severity`、`issue`、`evidence`、`fix`
+10. `nice_to_have` 放不阻止保存但值得优化的问题
+11. `rewrite_plan` 给出可直接交给改稿模型执行的 2 到 6 步修订方案
+12. `revision_guidance` 必须具体指出需要如何改，不要泛泛而谈
+13. `review_unavailable` 正常审稿时必须为 false
+14. 不要输出解释，不要输出 Markdown
 
 输出 JSON 骨架：
 {{"schema_version":2,"scores":{{"task_completion":0,"reader_hook":0,"scene_freshness":0,"character_specificity":0,"motivation_causality":0,"repetition_risk":0,"continuity":0}},"score_reasons":{{"task_completion":"","reader_hook":"","scene_freshness":"","character_specificity":"","motivation_causality":"","repetition_risk":"","continuity":""}},"passed":false,"review_unavailable":false,"strengths":[],"issues":[],"blocking_issues":[{{"category":"","severity":"blocker","issue":"","evidence":"","fix":""}}],"nice_to_have":[],"revision_guidance":"","rewrite_plan":[],"repeat_examples":[]}}
@@ -1009,6 +1020,7 @@ def build_rewrite_prompt(data: dict, draft_text: str, review_report: dict) -> st
     prompt_body = _join_blocks(
         "你是一名长篇小说改稿助手。请根据审稿意见重写当前章节，并只输出重写后的完整正文。",
         _section_block("作者意图", sections.get("author_intent", "")),
+        _section_block("创作风味契约", sections.get("creative_contract", "")),
         _section_block("下一章任务卡", sections.get("chapter_task", "")),
         _section_block("当前 live state", sections.get("live_state", "")),
         _section_block("近期写法避让", sections.get("recent_craft_memory", "")),

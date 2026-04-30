@@ -1,0 +1,838 @@
+{
+  "project_id": "regression_fix_deepseek_none_20260430",
+  "name": "无大纲提示词修复回归-摩天楼生存-deepseek",
+  "description": "用于分析 novel_frame_2 无大纲模式创建项目到首次续写的提示词链路。",
+  "project_path": "/home/wsy/novel_frame_2/prompt_workflow_regression_20260430_deepseek_none_fix/projects/novel_project_regression_fix_deepseek_none_20260430",
+  "story_request": "故事发生在一座设施齐全的超级摩天楼中，男主以第一人称出现，宅男，幽默，好色，爱讲黄段子；女主是成年全民偶像明星，容貌倾国倾城，身材娇小纤细，软玉温香。故事的开始是大楼突然全面停电，并变得危机四伏，他们被困在大楼中。小说故事聚焦于他们基于摩天楼的合作生存，躲避怪物，建设避难所，囤积物资，改善生活的情节上。故事基调微恐、温馨、香艳、成人。注重女主的心理、感官反应、情绪变化与生存压力下的依赖感描写；亲密描写以成年人之间的暧昧张力、调侃和互相照料为主，不写露骨性行为。",
+  "planning_mode": "none",
+  "created_at": "2026-04-30T02:02:58+00:00",
+  "updated_at": "2026-04-30T02:29:28+00:00",
+  "chapter_count": 2,
+  "init": {
+    "used_story_setup_llm": true,
+    "llm_story_setup_error": "",
+    "used_llm": true,
+    "llm_init_error": "",
+    "stats": {
+      "total": {
+        "requests": 2,
+        "successes": 2,
+        "failures": 0,
+        "prompt_tokens": 3199,
+        "completion_tokens": 3740,
+        "total_tokens": 6939,
+        "cached_tokens": 0,
+        "reasoning_tokens": 577,
+        "thought_tokens": 0
+      },
+      "by_phase": {
+        "init": {
+          "requests": 2,
+          "successes": 2,
+          "failures": 0,
+          "prompt_tokens": 3199,
+          "completion_tokens": 3740,
+          "total_tokens": 6939,
+          "cached_tokens": 0,
+          "reasoning_tokens": 577,
+          "thought_tokens": 0
+        },
+        "outline": {
+          "requests": 0,
+          "successes": 0,
+          "failures": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "total_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "thought_tokens": 0
+        },
+        "craft_brief": {
+          "requests": 0,
+          "successes": 0,
+          "failures": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "total_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "thought_tokens": 0
+        },
+        "writer": {
+          "requests": 0,
+          "successes": 0,
+          "failures": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "total_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "thought_tokens": 0
+        },
+        "quality_review": {
+          "requests": 0,
+          "successes": 0,
+          "failures": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "total_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "thought_tokens": 0
+        },
+        "rewrite": {
+          "requests": 0,
+          "successes": 0,
+          "failures": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "total_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "thought_tokens": 0
+        },
+        "summary": {
+          "requests": 0,
+          "successes": 0,
+          "failures": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "total_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "thought_tokens": 0
+        },
+        "expert_review": {
+          "requests": 0,
+          "successes": 0,
+          "failures": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "total_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "thought_tokens": 0
+        },
+        "polish": {
+          "requests": 0,
+          "successes": 0,
+          "failures": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "total_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "thought_tokens": 0
+        },
+        "audiobook": {
+          "requests": 0,
+          "successes": 0,
+          "failures": 0,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "total_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "thought_tokens": 0
+        }
+      },
+      "cost": {
+        "currency": "USD",
+        "estimated_total_usd": 0.004645365,
+        "priced_tokens": 6939,
+        "unpriced_tokens": 0,
+        "by_phase": {
+          "init": {
+            "requests": 2,
+            "estimated_usd": 0.004645365,
+            "priced_tokens": 6939,
+            "unpriced_tokens": 0,
+            "prompt_tokens": 3199,
+            "completion_tokens": 3740,
+            "total_tokens": 6939,
+            "cached_tokens": 0,
+            "reasoning_tokens": 577,
+            "thought_tokens": 0
+          }
+        },
+        "by_model": {
+          "deepseek:deepseek-v4-pro": {
+            "provider": "deepseek",
+            "model": "deepseek-v4-pro",
+            "pricing_status": "priced",
+            "source": {
+              "name": "DeepSeek Models & Pricing",
+              "url": "https://api-docs.deepseek.com/quick_start/pricing",
+              "last_reviewed": "2026-04-26"
+            },
+            "reason": "Limited-time DeepSeek discount applied.",
+            "requests": 2,
+            "estimated_usd": 0.004645365,
+            "priced_tokens": 6939,
+            "unpriced_tokens": 0,
+            "prompt_tokens": 3199,
+            "completion_tokens": 3740,
+            "total_tokens": 6939,
+            "cached_tokens": 0,
+            "reasoning_tokens": 577,
+            "thought_tokens": 0
+          }
+        },
+        "started_at": "2026-04-30T02:02:02+00:00"
+      },
+      "context_telemetry": {
+        "recent_runs": [],
+        "last_by_phase": {}
+      }
+    }
+  },
+  "stats": {
+    "total": {
+      "requests": 16,
+      "successes": 16,
+      "failures": 0,
+      "prompt_tokens": 69317,
+      "completion_tokens": 52415,
+      "total_tokens": 121732,
+      "cached_tokens": 384,
+      "reasoning_tokens": 24327,
+      "thought_tokens": 0
+    },
+    "by_phase": {
+      "init": {
+        "requests": 2,
+        "successes": 2,
+        "failures": 0,
+        "prompt_tokens": 3199,
+        "completion_tokens": 3740,
+        "total_tokens": 6939,
+        "cached_tokens": 0,
+        "reasoning_tokens": 577,
+        "thought_tokens": 0
+      },
+      "outline": {
+        "requests": 4,
+        "successes": 4,
+        "failures": 0,
+        "prompt_tokens": 9915,
+        "completion_tokens": 5093,
+        "total_tokens": 15008,
+        "cached_tokens": 0,
+        "reasoning_tokens": 2051,
+        "thought_tokens": 0
+      },
+      "craft_brief": {
+        "requests": 2,
+        "successes": 2,
+        "failures": 0,
+        "prompt_tokens": 5499,
+        "completion_tokens": 5837,
+        "total_tokens": 11336,
+        "cached_tokens": 0,
+        "reasoning_tokens": 2073,
+        "thought_tokens": 0
+      },
+      "writer": {
+        "requests": 2,
+        "successes": 2,
+        "failures": 0,
+        "prompt_tokens": 6499,
+        "completion_tokens": 11045,
+        "total_tokens": 17544,
+        "cached_tokens": 0,
+        "reasoning_tokens": 1368,
+        "thought_tokens": 0
+      },
+      "quality_review": {
+        "requests": 3,
+        "successes": 3,
+        "failures": 0,
+        "prompt_tokens": 23952,
+        "completion_tokens": 15284,
+        "total_tokens": 39236,
+        "cached_tokens": 384,
+        "reasoning_tokens": 13855,
+        "thought_tokens": 0
+      },
+      "rewrite": {
+        "requests": 1,
+        "successes": 1,
+        "failures": 0,
+        "prompt_tokens": 8990,
+        "completion_tokens": 4645,
+        "total_tokens": 13635,
+        "cached_tokens": 0,
+        "reasoning_tokens": 456,
+        "thought_tokens": 0
+      },
+      "summary": {
+        "requests": 2,
+        "successes": 2,
+        "failures": 0,
+        "prompt_tokens": 11263,
+        "completion_tokens": 6771,
+        "total_tokens": 18034,
+        "cached_tokens": 0,
+        "reasoning_tokens": 3947,
+        "thought_tokens": 0
+      },
+      "expert_review": {
+        "requests": 0,
+        "successes": 0,
+        "failures": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "thought_tokens": 0
+      },
+      "polish": {
+        "requests": 0,
+        "successes": 0,
+        "failures": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "thought_tokens": 0
+      },
+      "audiobook": {
+        "requests": 0,
+        "successes": 0,
+        "failures": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "thought_tokens": 0
+      }
+    },
+    "cost": {
+      "currency": "USD",
+      "estimated_total_usd": 0.07560082500000001,
+      "priced_tokens": 121732,
+      "unpriced_tokens": 0,
+      "by_phase": {
+        "init": {
+          "requests": 2,
+          "estimated_usd": 0.004645365,
+          "priced_tokens": 6939,
+          "unpriced_tokens": 0,
+          "prompt_tokens": 3199,
+          "completion_tokens": 3740,
+          "total_tokens": 6939,
+          "cached_tokens": 0,
+          "reasoning_tokens": 577,
+          "thought_tokens": 0
+        },
+        "outline": {
+          "requests": 4,
+          "estimated_usd": 0.008743935,
+          "priced_tokens": 15008,
+          "unpriced_tokens": 0,
+          "prompt_tokens": 9915,
+          "completion_tokens": 5093,
+          "total_tokens": 15008,
+          "cached_tokens": 0,
+          "reasoning_tokens": 2051,
+          "thought_tokens": 0
+        },
+        "craft_brief": {
+          "requests": 2,
+          "estimated_usd": 0.007470255,
+          "priced_tokens": 11336,
+          "unpriced_tokens": 0,
+          "prompt_tokens": 5499,
+          "completion_tokens": 5837,
+          "total_tokens": 11336,
+          "cached_tokens": 0,
+          "reasoning_tokens": 2073,
+          "thought_tokens": 0
+        },
+        "writer": {
+          "requests": 2,
+          "estimated_usd": 0.012436215,
+          "priced_tokens": 17544,
+          "unpriced_tokens": 0,
+          "prompt_tokens": 6499,
+          "completion_tokens": 11045,
+          "total_tokens": 17544,
+          "cached_tokens": 0,
+          "reasoning_tokens": 1368,
+          "thought_tokens": 0
+        },
+        "quality_review": {
+          "requests": 3,
+          "estimated_usd": 0.02356308,
+          "priced_tokens": 39236,
+          "unpriced_tokens": 0,
+          "prompt_tokens": 23952,
+          "completion_tokens": 15284,
+          "total_tokens": 39236,
+          "cached_tokens": 384,
+          "reasoning_tokens": 13855,
+          "thought_tokens": 0
+        },
+        "summary": {
+          "requests": 2,
+          "estimated_usd": 0.010790175,
+          "priced_tokens": 18034,
+          "unpriced_tokens": 0,
+          "prompt_tokens": 11263,
+          "completion_tokens": 6771,
+          "total_tokens": 18034,
+          "cached_tokens": 0,
+          "reasoning_tokens": 3947,
+          "thought_tokens": 0
+        },
+        "rewrite": {
+          "requests": 1,
+          "estimated_usd": 0.0079518,
+          "priced_tokens": 13635,
+          "unpriced_tokens": 0,
+          "prompt_tokens": 8990,
+          "completion_tokens": 4645,
+          "total_tokens": 13635,
+          "cached_tokens": 0,
+          "reasoning_tokens": 456,
+          "thought_tokens": 0
+        }
+      },
+      "by_model": {
+        "deepseek:deepseek-v4-pro": {
+          "provider": "deepseek",
+          "model": "deepseek-v4-pro",
+          "pricing_status": "priced",
+          "source": {
+            "name": "DeepSeek Models & Pricing",
+            "url": "https://api-docs.deepseek.com/quick_start/pricing",
+            "last_reviewed": "2026-04-26"
+          },
+          "reason": "Limited-time DeepSeek discount applied.",
+          "requests": 16,
+          "estimated_usd": 0.07560082500000001,
+          "priced_tokens": 121732,
+          "unpriced_tokens": 0,
+          "prompt_tokens": 69317,
+          "completion_tokens": 52415,
+          "total_tokens": 121732,
+          "cached_tokens": 384,
+          "reasoning_tokens": 24327,
+          "thought_tokens": 0
+        }
+      },
+      "started_at": "2026-04-30T02:02:02+00:00"
+    },
+    "context_telemetry": {
+      "recent_runs": [
+        {
+          "created_at": "2026-04-30T02:02:58+00:00",
+          "phase": "outline",
+          "planning_mode": "none",
+          "prompt_chars": 2597,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 151,
+            "live_state": 128,
+            "static_world": 452,
+            "static_characters": 197,
+            "recent_scene": 34,
+            "style_contract": 60,
+            "planning_mode": 4,
+            "user_request": 24
+          },
+          "prompt_type": "auto_objective",
+          "target_chapter_number": 1
+        },
+        {
+          "created_at": "2026-04-30T02:03:07+00:00",
+          "phase": "outline",
+          "planning_mode": "none",
+          "prompt_chars": 3119,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 299,
+            "live_state": 128,
+            "static_world": 452,
+            "static_characters": 197,
+            "recent_scene": 28,
+            "style_contract": 60,
+            "planning_mode": 4,
+            "user_request": 24
+          },
+          "prompt_type": "progression_options",
+          "target_chapter_number": 1
+        },
+        {
+          "created_at": "2026-04-30T02:04:18+00:00",
+          "phase": "craft_brief",
+          "planning_mode": "none",
+          "prompt_chars": 3059,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 402,
+            "live_state": 128,
+            "style_contract": 60,
+            "static_world": 384,
+            "static_characters": 197
+          },
+          "target_chapter_number": 1,
+          "uses_quality_model": false
+        },
+        {
+          "created_at": "2026-04-30T02:05:38+00:00",
+          "phase": "writer",
+          "planning_mode": "none",
+          "prompt_chars": 3640,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 402,
+            "live_state": 128,
+            "style_contract": 60,
+            "static_world": 384,
+            "static_characters": 197,
+            "craft_brief": 590
+          },
+          "target_chapter_number": 1,
+          "prompt_soft_budget": 7000,
+          "prompt_hard_budget": 8000,
+          "writing_quality_mode": "balanced",
+          "review_mode": "auto"
+        },
+        {
+          "created_at": "2026-04-30T02:08:35+00:00",
+          "phase": "quality_review",
+          "planning_mode": "none",
+          "prompt_chars": 10906,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 402,
+            "live_state": 128,
+            "style_contract": 60,
+            "static_world": 384,
+            "static_characters": 197,
+            "craft_brief": 590
+          },
+          "target_chapter_number": 1,
+          "attempt": 1,
+          "strict": false,
+          "uses_quality_model": false
+        },
+        {
+          "created_at": "2026-04-30T02:10:22+00:00",
+          "phase": "summary",
+          "planning_mode": "none",
+          "prompt_chars": 9185,
+          "section_chars": {
+            "live_state": 163,
+            "static_characters": 197,
+            "chapter_text": 7322,
+            "completed_task": 402
+          },
+          "target_chapter_number": 1
+        },
+        {
+          "created_at": "2026-04-30T02:11:51+00:00",
+          "phase": "outline",
+          "planning_mode": "none",
+          "prompt_chars": 4494,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 227,
+            "live_state": 775,
+            "static_world": 452,
+            "static_characters": 197,
+            "recent_scene": 1208,
+            "style_contract": 60,
+            "planning_mode": 4,
+            "user_request": 24
+          },
+          "prompt_type": "auto_objective",
+          "target_chapter_number": 2
+        },
+        {
+          "created_at": "2026-04-30T02:12:19+00:00",
+          "phase": "outline",
+          "planning_mode": "none",
+          "prompt_chars": 5099,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 452,
+            "live_state": 775,
+            "static_world": 452,
+            "static_characters": 197,
+            "recent_scene": 1208,
+            "style_contract": 60,
+            "planning_mode": 4,
+            "user_request": 24
+          },
+          "prompt_type": "progression_options",
+          "target_chapter_number": 2
+        },
+        {
+          "created_at": "2026-04-30T02:13:21+00:00",
+          "phase": "craft_brief",
+          "planning_mode": "none",
+          "prompt_chars": 5403,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 412,
+            "live_state": 977,
+            "style_contract": 60,
+            "static_world": 352,
+            "static_characters": 197,
+            "recent_craft_memory": 289,
+            "recent_scene": 1208
+          },
+          "target_chapter_number": 2,
+          "uses_quality_model": false
+        },
+        {
+          "created_at": "2026-04-30T02:15:02+00:00",
+          "phase": "writer",
+          "planning_mode": "none",
+          "prompt_chars": 6015,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 412,
+            "live_state": 977,
+            "style_contract": 60,
+            "static_world": 352,
+            "static_characters": 197,
+            "recent_craft_memory": 289,
+            "craft_brief": 757,
+            "recent_scene": 1208
+          },
+          "target_chapter_number": 2,
+          "prompt_soft_budget": 7000,
+          "prompt_hard_budget": 8000,
+          "writing_quality_mode": "balanced",
+          "review_mode": "auto"
+        },
+        {
+          "created_at": "2026-04-30T02:18:27+00:00",
+          "phase": "quality_review",
+          "planning_mode": "none",
+          "prompt_chars": 14694,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 412,
+            "live_state": 977,
+            "style_contract": 60,
+            "static_world": 352,
+            "static_characters": 197,
+            "recent_craft_memory": 289,
+            "craft_brief": 757,
+            "recent_scene": 1208
+          },
+          "target_chapter_number": 2,
+          "attempt": 1,
+          "strict": false,
+          "uses_quality_model": false
+        },
+        {
+          "created_at": "2026-04-30T02:21:42+00:00",
+          "phase": "rewrite",
+          "planning_mode": "none",
+          "prompt_chars": 14510,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 412,
+            "live_state": 977,
+            "style_contract": 60,
+            "static_world": 352,
+            "static_characters": 197,
+            "recent_craft_memory": 289,
+            "craft_brief": 757,
+            "recent_scene": 1208
+          },
+          "target_chapter_number": 2,
+          "uses_quality_model": false
+        },
+        {
+          "created_at": "2026-04-30T02:24:24+00:00",
+          "phase": "quality_review",
+          "planning_mode": "none",
+          "prompt_chars": 12817,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 412,
+            "live_state": 977,
+            "style_contract": 60,
+            "static_world": 352,
+            "static_characters": 197,
+            "recent_craft_memory": 289,
+            "craft_brief": 757,
+            "recent_scene": 1208
+          },
+          "target_chapter_number": 2,
+          "attempt": 2,
+          "strict": true,
+          "uses_quality_model": false
+        },
+        {
+          "created_at": "2026-04-30T02:27:39+00:00",
+          "phase": "summary",
+          "planning_mode": "none",
+          "prompt_chars": 9273,
+          "section_chars": {
+            "live_state": 889,
+            "static_characters": 197,
+            "chapter_text": 6674,
+            "completed_task": 412
+          },
+          "target_chapter_number": 2
+        }
+      ],
+      "last_by_phase": {
+        "outline": {
+          "created_at": "2026-04-30T02:12:19+00:00",
+          "phase": "outline",
+          "planning_mode": "none",
+          "prompt_chars": 5099,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 452,
+            "live_state": 775,
+            "static_world": 452,
+            "static_characters": 197,
+            "recent_scene": 1208,
+            "style_contract": 60,
+            "planning_mode": 4,
+            "user_request": 24
+          },
+          "prompt_type": "progression_options",
+          "target_chapter_number": 2
+        },
+        "craft_brief": {
+          "created_at": "2026-04-30T02:13:21+00:00",
+          "phase": "craft_brief",
+          "planning_mode": "none",
+          "prompt_chars": 5403,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 412,
+            "live_state": 977,
+            "style_contract": 60,
+            "static_world": 352,
+            "static_characters": 197,
+            "recent_craft_memory": 289,
+            "recent_scene": 1208
+          },
+          "target_chapter_number": 2,
+          "uses_quality_model": false
+        },
+        "writer": {
+          "created_at": "2026-04-30T02:15:02+00:00",
+          "phase": "writer",
+          "planning_mode": "none",
+          "prompt_chars": 6015,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 412,
+            "live_state": 977,
+            "style_contract": 60,
+            "static_world": 352,
+            "static_characters": 197,
+            "recent_craft_memory": 289,
+            "craft_brief": 757,
+            "recent_scene": 1208
+          },
+          "target_chapter_number": 2,
+          "prompt_soft_budget": 7000,
+          "prompt_hard_budget": 8000,
+          "writing_quality_mode": "balanced",
+          "review_mode": "auto"
+        },
+        "quality_review": {
+          "created_at": "2026-04-30T02:24:24+00:00",
+          "phase": "quality_review",
+          "planning_mode": "none",
+          "prompt_chars": 12817,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 412,
+            "live_state": 977,
+            "style_contract": 60,
+            "static_world": 352,
+            "static_characters": 197,
+            "recent_craft_memory": 289,
+            "craft_brief": 757,
+            "recent_scene": 1208
+          },
+          "target_chapter_number": 2,
+          "attempt": 2,
+          "strict": true,
+          "uses_quality_model": false
+        },
+        "summary": {
+          "created_at": "2026-04-30T02:27:39+00:00",
+          "phase": "summary",
+          "planning_mode": "none",
+          "prompt_chars": 9273,
+          "section_chars": {
+            "live_state": 889,
+            "static_characters": 197,
+            "chapter_text": 6674,
+            "completed_task": 412
+          },
+          "target_chapter_number": 2
+        },
+        "rewrite": {
+          "created_at": "2026-04-30T02:21:42+00:00",
+          "phase": "rewrite",
+          "planning_mode": "none",
+          "prompt_chars": 14510,
+          "section_chars": {
+            "author_intent": 301,
+            "creative_contract": 760,
+            "chapter_task": 412,
+            "live_state": 977,
+            "style_contract": 60,
+            "static_world": 352,
+            "static_characters": 197,
+            "recent_craft_memory": 289,
+            "craft_brief": 757,
+            "recent_scene": 1208
+          },
+          "target_chapter_number": 2,
+          "uses_quality_model": false
+        }
+      }
+    }
+  },
+  "llm_config": {
+    "model_provider": "deepseek",
+    "model": "deepseek-v4-pro",
+    "model_name": "deepseek-v4-pro",
+    "api_base": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "temperature": 0.8,
+    "max_tokens": 6000,
+    "timeout": 900,
+    "planning_mode": "none",
+    "writing_quality_mode": "balanced",
+    "review_mode": "auto",
+    "log_llm_payload": true
+  }
+}

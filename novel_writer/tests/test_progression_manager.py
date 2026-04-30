@@ -12,6 +12,7 @@ from progression_manager import (
     SELECTION_MODE_SINGLE,
     auto_select_progression_option,
     ensure_fresh_progression_session,
+    generate_progression_options,
     normalize_progression_options_response,
     resolve_progression_selection,
     save_progression_session,
@@ -19,7 +20,7 @@ from progression_manager import (
     validate_option_count,
 )
 
-from tests.test_support import create_test_project, read_json
+from tests.test_support import create_test_project, read_json, runtime_config
 
 
 class ProgressionManagerTests(unittest.TestCase):
@@ -85,6 +86,49 @@ class ProgressionManagerTests(unittest.TestCase):
 
         self.assertEqual(normalized["recommended_option_id"], "option_1")
         self.assertTrue(normalized["options"][0]["recommended"])
+
+    def test_normalize_progression_options_accepts_data_wrapper(self) -> None:
+        payload = {
+            "data": {
+                "recommended_option_id": "option_1",
+                "options": [
+                    {
+                        "option_id": "option_1",
+                        "title": "短程试探",
+                        "plan_summary": "谨慎离开隔离区进行一次短程侦查。",
+                        "plan_steps": ["规划路线", "短程侦查"],
+                        "plan_guidance": "保持紧张感并推进外部风险认知。",
+                        "recommended": True,
+                    }
+                ],
+            }
+        }
+
+        normalized = normalize_progression_options_response(payload, 1)
+
+        self.assertEqual(normalized["recommended_option_id"], "option_1")
+        self.assertEqual(normalized["options"][0]["title"], "短程试探")
+
+    def test_progression_parse_failure_saves_raw_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="progression_raw")
+
+            with patch(
+                "progression_manager.generate_text_with_metadata",
+                return_value=(json.dumps({"unexpected": "shape"}, ensure_ascii=False), {"usage": {}}),
+            ):
+                with self.assertRaises(ValueError):
+                    generate_progression_options(
+                        str(project_path),
+                        runtime_config("chapter"),
+                        option_count=4,
+                    )
+
+            failed_files = list((project_path / "failed_llm_outputs").glob("*_progression_options.json"))
+            self.assertEqual(len(failed_files), 1)
+            saved = read_json(failed_files[0])
+            self.assertIn("unexpected", saved["response_text"])
+            self.assertNotIn("api_key", json.dumps(saved, ensure_ascii=False).lower())
 
     def test_normalize_progression_options_requires_exactly_one_recommended(self) -> None:
         payload = {

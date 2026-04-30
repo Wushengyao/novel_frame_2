@@ -19,16 +19,17 @@ from project_manager import (
 
 
 WRITER_SECTION_LIMITS = {
-    "author_intent": 520,
+    "author_intent": 760,
+    "creative_contract": 760,
     "chapter_task": 460,
     "live_state": 1000,
     "retrieved_memory": 520,
     "recent_craft_memory": 620,
     "recent_scene": 1700,
     "craft_brief": 760,
-    "style_contract": 220,
+    "style_contract": 360,
     "static_world": 420,
-    "static_characters": 620,
+    "static_characters": 780,
 }
 WRITER_SOFT_TOTAL_CHARS = 7000
 WRITER_HARD_TOTAL_CHARS = 8000
@@ -200,8 +201,13 @@ def normalize_author_intent(author_intent: dict | None) -> dict:
     normalized["premise"] = str(normalized.get("premise", "") or "").strip()
     normalized["long_arc"] = str(normalized.get("long_arc", "") or "").strip()
     normalized["tone_contract"] = str(normalized.get("tone_contract", "") or "").strip()
+    normalized["narrative_engine"] = str(normalized.get("narrative_engine", "") or "").strip()
+    normalized["relationship_engine"] = str(normalized.get("relationship_engine", "") or "").strip()
     normalized["creativity_guidance"] = str(normalized.get("creativity_guidance", "") or "").strip()
-    normalized["must_haves"] = _normalize_string_list(normalized.get("must_haves"), max_items=6)
+    normalized["voice_rules"] = _normalize_string_list(normalized.get("voice_rules"), max_items=6)
+    normalized["scene_promises"] = _normalize_string_list(normalized.get("scene_promises"), max_items=8)
+    normalized["anti_flat_rules"] = _normalize_string_list(normalized.get("anti_flat_rules"), max_items=8)
+    normalized["must_haves"] = _normalize_string_list(normalized.get("must_haves"), max_items=8)
     normalized["must_not_break"] = _normalize_string_list(normalized.get("must_not_break"), max_items=6)
     return normalized
 
@@ -522,6 +528,10 @@ def _is_low_signal_author_premise(text: str) -> bool:
         "structuredmemorynovelwritingproject",
         "testproject",
         "测试项目",
+        "用于分析链路",
+        "用于分析",
+        "提示词链路",
+        "workflowprobe",
     )
     return any(marker in normalized for marker in generic_markers)
 
@@ -598,22 +608,40 @@ def _compact_characters_block(characters: dict, plot_state: dict, *, max_chars: 
 def _build_author_intent_block(author_intent: dict, *, max_chars: int) -> str:
     intent = normalize_author_intent(author_intent)
     lines = []
-    premise_summary = _summarize_author_premise(intent, max_chars=min(180, max_chars))
+    premise_summary = _summarize_author_premise(intent, max_chars=min(240, max_chars))
     if premise_summary:
         lines.append(f"写作核心: {premise_summary}")
+    if intent.get("narrative_engine") and not _is_duplicateish(intent["narrative_engine"], premise_summary):
+        lines.append(f"叙事引擎: {_trim_text(intent['narrative_engine'], 150)}")
 
     emphasis_items = []
     for item in intent["must_haves"]:
-        compact = _trim_text(item, 48)
+        compact = _trim_text(item, 72)
         if any(_is_duplicateish(compact, existing) for existing in emphasis_items):
             continue
         if premise_summary and _is_duplicateish(compact, premise_summary):
             continue
         emphasis_items.append(compact)
-        if len(emphasis_items) >= 2:
+        if len(emphasis_items) >= 4:
             break
     if emphasis_items:
         lines.append(f"优先强调: {'；'.join(emphasis_items)}")
+    return _trim_text("\n".join(lines), max_chars)
+
+
+def _build_creative_contract_block(author_intent: dict, *, max_chars: int) -> str:
+    intent = normalize_author_intent(author_intent)
+    lines: list[str] = []
+    if intent.get("relationship_engine"):
+        lines.append(f"关系引擎: {_trim_text(intent['relationship_engine'], 180)}")
+    if intent["voice_rules"]:
+        lines.append(f"叙述声音: {'；'.join(_trim_text(item, 64) for item in intent['voice_rules'][:4])}")
+    if intent["scene_promises"]:
+        lines.append(f"场景承诺: {'；'.join(_trim_text(item, 64) for item in intent['scene_promises'][:5])}")
+    if intent["anti_flat_rules"]:
+        lines.append(f"平淡规避: {'；'.join(_trim_text(item, 64) for item in intent['anti_flat_rules'][:4])}")
+    if intent.get("creativity_guidance"):
+        lines.append(f"创作弹性: {_trim_text(intent['creativity_guidance'], 100)}")
     return _trim_text("\n".join(lines), max_chars)
 
 
@@ -1374,6 +1402,10 @@ def build_writer_context(
 
     sections = {
         "author_intent": _build_author_intent_block(author_intent, max_chars=WRITER_SECTION_LIMITS["author_intent"]),
+        "creative_contract": _build_creative_contract_block(
+            author_intent,
+            max_chars=WRITER_SECTION_LIMITS["creative_contract"],
+        ),
         "chapter_task": _build_chapter_task_block(task_card, max_chars=WRITER_SECTION_LIMITS["chapter_task"]),
         "live_state": _build_live_state_block(
             plot_state,
@@ -1459,12 +1491,13 @@ def build_batch_plan_context(project_path: str, project_data: dict, upcoming_cha
     last_chapter_path = Path(project_path) / "chapters" / f"chapter_{chapter_count:04d}.md"
     recent_text = last_chapter_path.read_text(encoding="utf-8") if last_chapter_path.exists() else ""
     sections = {
-        "author_intent": _build_author_intent_block(author_intent, max_chars=700),
+        "author_intent": _build_author_intent_block(author_intent, max_chars=780),
+        "creative_contract": _build_creative_contract_block(author_intent, max_chars=760),
         "live_state": _build_live_state_block(plot_state, max_chars=1200),
         "static_world": _compact_world_block(project_data.get("world") or {}, user_request, max_chars=500),
         "static_characters": _compact_characters_block(project_data.get("characters") or {}, plot_state, max_chars=700),
         "recent_scene": _build_recent_scene_block(project_path, chapter_count, recent_text, max_chars=1800),
-        "style_contract": _build_style_contract_block(project_data.get("style") or {}, author_intent, max_chars=400),
+        "style_contract": _build_style_contract_block(project_data.get("style") or {}, author_intent, max_chars=460),
         "upcoming_chapters": _json_block(upcoming_chapters),
         "user_request": str(user_request or "").strip(),
     }
@@ -1496,13 +1529,14 @@ def build_progression_context(
         persist=False,
     )
     sections = {
-        "author_intent": _build_author_intent_block(author_intent, max_chars=560),
+        "author_intent": _build_author_intent_block(author_intent, max_chars=780),
+        "creative_contract": _build_creative_contract_block(author_intent, max_chars=760),
         "chapter_task": _build_chapter_task_block(effective_task, max_chars=480),
         "live_state": _build_live_state_block(plot_state, max_chars=860, include_next_goal=False),
         "static_world": _compact_world_block(project_data.get("world") or {}, user_request, max_chars=500),
         "static_characters": _compact_characters_block(project_data.get("characters") or {}, plot_state, max_chars=700),
         "recent_scene": _build_recent_scene_block(project_path, chapter_count, recent_text, max_chars=1700),
-        "style_contract": _build_style_contract_block(project_data.get("style") or {}, author_intent, max_chars=200),
+        "style_contract": _build_style_contract_block(project_data.get("style") or {}, author_intent, max_chars=360),
         "planning_mode": normalize_planning_mode(planning_mode),
         "user_request": str(user_request or "").strip() or "无额外要求。请仅基于当前状态给出下一章推进选项。",
         "option_count": max(1, int(option_count or 4)),

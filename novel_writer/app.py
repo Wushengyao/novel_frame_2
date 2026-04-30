@@ -53,7 +53,7 @@ from quality_manager import (
     quality_mode_uses_craft_brief,
     quality_mode_uses_review,
     quality_review_available,
-    quality_review_passed,
+    quality_review_needs_rewrite,
     review_chapter_draft,
     rewrite_chapter_draft,
     save_pre_rewrite_draft,
@@ -476,7 +476,7 @@ def run_next_chapter(
         )
         if (
             quality_mode_allows_rewrite(writing_quality_mode, review_mode)
-            and not quality_review_passed(review)
+            and quality_review_needs_rewrite(review, writing_quality_mode)
             and quality_review_available(review)
         ):
             pre_rewrite_path = None
@@ -976,6 +976,7 @@ def main() -> None:
                 parser.error("--user-request cannot be combined with guided progression selection")
 
         config = extract_llm_config(args.config) if args.config else load_runtime_config(args.project)
+        config["project_path"] = str(Path(args.project).resolve())
         if args.planning_mode:
             config["planning_mode"] = args.planning_mode
         if args.writing_quality_mode:

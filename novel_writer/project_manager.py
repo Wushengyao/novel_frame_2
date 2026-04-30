@@ -66,6 +66,11 @@ EMPTY_AUTHOR_INTENT = {
     "premise": "",
     "long_arc": "",
     "tone_contract": "",
+    "narrative_engine": "",
+    "relationship_engine": "",
+    "voice_rules": [],
+    "scene_promises": [],
+    "anti_flat_rules": [],
     "must_haves": [],
     "must_not_break": [],
     "creativity_guidance": "",
@@ -823,9 +828,11 @@ def _normalize_author_intent(author_intent: dict | None) -> dict:
         "premise": str(normalized.get("premise", "") or "").strip(),
         "long_arc": str(normalized.get("long_arc", "") or "").strip(),
         "tone_contract": str(normalized.get("tone_contract", "") or "").strip(),
+        "narrative_engine": str(normalized.get("narrative_engine", "") or "").strip(),
+        "relationship_engine": str(normalized.get("relationship_engine", "") or "").strip(),
         "creativity_guidance": str(normalized.get("creativity_guidance", "") or "").strip(),
     }
-    for key in ("must_haves", "must_not_break"):
+    for key in ("voice_rules", "scene_promises", "anti_flat_rules", "must_haves", "must_not_break"):
         value = normalized.get(key) or []
         if not isinstance(value, list):
             value = [value]
@@ -864,21 +871,112 @@ def _extract_story_constraints(text: str, max_items: int = 5) -> list[str]:
     return unique
 
 
+def _is_low_signal_project_description(text: str) -> bool:
+    normalized = str(text or "").strip().lower()
+    if not normalized:
+        return True
+    strong_markers = (
+        "测试",
+        "分析",
+        "链路",
+        "实验",
+        "示例",
+        "demo",
+        "probe",
+        "workflow",
+    )
+    if any(marker in normalized for marker in strong_markers):
+        return True
+    generic_markers = ("项目", "工程")
+    return len(normalized) <= 20 and any(marker in normalized for marker in generic_markers)
+
+
+def _first_text(candidates: list[str], max_chars: int) -> str:
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text[:max_chars].strip()
+    return ""
+
+
+def _select_story_fragments(text: str, keywords: tuple[str, ...], *, max_items: int, max_chars: int = 90) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for fragment in _extract_story_constraints(text, max_items=24):
+        compact = fragment[:max_chars].strip()
+        if not compact:
+            continue
+        if not any(keyword in compact for keyword in keywords):
+            continue
+        dedupe_key = re.sub(r"\s+", "", compact)
+        if dedupe_key in seen:
+            continue
+        selected.append(compact)
+        seen.add(dedupe_key)
+        if len(selected) >= max_items:
+            break
+    return selected
+
+
 def _build_author_intent_from_project(project: dict, world: dict, style: dict, plot_state: dict) -> dict:
     story_request = str(project.get("story_request", "") or "").strip()
     project_description = str(project.get("description", "") or "").strip()
     tone = str(style.get("tone", "") or "").strip()
     pov = str(style.get("pov", "") or "").strip()
-    premise = project_description or story_request[:240] or str(world.get("setting", "") or "").strip()
+    world_setting = str(world.get("setting", "") or "").strip()
+    main_plot = str(plot_state.get("main_plot", "") or "").strip()
+    description_candidate = "" if _is_low_signal_project_description(project_description) else project_description
+    premise = _first_text([story_request, world_setting, main_plot, description_candidate], 240)
     long_arc = (
-        str(plot_state.get("main_plot", "") or "").strip()
+        main_plot
         or story_request[:240]
-        or project_description
+        or world_setting
+        or description_candidate
     )
     tone_contract = " / ".join(part for part in (tone, pov) if part).strip()
     style_requirements = style.get("requirements") or []
     if not isinstance(style_requirements, list):
         style_requirements = [style_requirements]
+    style_text = "\n".join(str(item).strip() for item in style_requirements if str(item).strip())
+    combined_creative_source = "\n".join(
+        part
+        for part in (
+            story_request,
+            world_setting,
+            main_plot,
+            tone,
+            pov,
+            style_text,
+        )
+        if part
+    )
+    voice_rules = []
+    for item in (pov, tone):
+        if item and item not in voice_rules:
+            voice_rules.append(item[:90])
+    voice_rules.extend(
+        _select_story_fragments(
+            combined_creative_source,
+            ("第一人称", "视角", "幽默", "吐槽", "黄段子", "调侃", "口吻", "宅男"),
+            max_items=4,
+        )
+    )
+    relationship_fragments = _select_story_fragments(
+        combined_creative_source,
+        ("男主", "女主", "合作", "关系", "暧昧", "温馨", "身心", "照料", "成人", "香艳"),
+        max_items=4,
+    )
+    scene_promises = _select_story_fragments(
+        combined_creative_source,
+        ("摩天楼", "怪物", "生存", "避难所", "物资", "囤积", "建设", "微恐", "停电", "危机"),
+        max_items=6,
+    )
+    anti_flat_rules = [
+        "每章必须有具体场景压力、人物选择和可见结果，避免只概括推进。",
+        "关键互动要用动作、感官、心理和对话交替呈现，避免平铺直叙。",
+        "若延续同一地点或目标，必须写出新的信息、代价、关系变化或生存改造成果。",
+        "成人暧昧只写成年人之间的张力、调侃、照料和感官氛围，不写露骨性行为。",
+    ]
     must_haves = [
         str(item).strip()
         for item in style_requirements
@@ -895,7 +993,12 @@ def _build_author_intent_from_project(project: dict, world: dict, style: dict, p
             "premise": premise[:240],
             "long_arc": long_arc[:240],
             "tone_contract": tone_contract[:180],
-            "must_haves": must_haves[:6],
+            "narrative_engine": _first_text([main_plot, story_request, world_setting], 220),
+            "relationship_engine": "；".join(relationship_fragments)[:220],
+            "voice_rules": voice_rules[:6],
+            "scene_promises": scene_promises[:6],
+            "anti_flat_rules": anti_flat_rules[:6],
+            "must_haves": must_haves[:8],
             "must_not_break": must_not_break,
             "creativity_guidance": "在不破坏设定与记忆的前提下，优先写出有新鲜感的场景调度、互动细节与推进方式。",
         }

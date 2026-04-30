@@ -1,0 +1,37 @@
+{
+  "schema_version": 2,
+  "scores": {
+    "task_completion": 0.0,
+    "reader_hook": 0.0,
+    "scene_freshness": 0.0,
+    "character_specificity": 0.0,
+    "motivation_causality": 0.0,
+    "repetition_risk": 0.0,
+    "continuity": 0.0
+  },
+  "average_score": 0.0,
+  "passed": false,
+  "review_unavailable": false,
+  "needs_rewrite": true,
+  "flatness_issues": [
+    "reader_hook",
+    "scene_freshness",
+    "character_specificity",
+    "repetition_risk"
+  ],
+  "score_reasons": {},
+  "strengths": [],
+  "issues": [
+    "平淡度风险：reader_hook、scene_freshness、character_specificity、repetition_risk 低于 7，需要增强钩子、角色声音、互动火花或场景新变化。"
+  ],
+  "blocking_issues": [],
+  "nice_to_have": [],
+  "revision_guidance": "围绕低分平淡项轻量改写，保留已完成的剧情目标，重点增强钩子、角色声音、场景新鲜度和互动火花。",
+  "rewrite_plan": [
+    "重写开章钩子，让场景压力更早出现。",
+    "补强角色专属口吻、动作反应和互动火花。",
+    "把概括性推进改成可见的动作、感官、心理和对话交替。",
+    "在结尾兑现新的信息、代价、关系变化或生存成果。"
+  ],
+  "repeat_examples": []
+}

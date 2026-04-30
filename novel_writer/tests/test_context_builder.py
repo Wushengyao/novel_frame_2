@@ -139,6 +139,48 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertIn("不用推门观察完成异常确认", prompt)
             self.assertLessEqual(sum(len(value) for value in context["sections"].values()), WRITER_HARD_TOTAL_CHARS)
 
+    def test_writer_context_exposes_creative_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="creative_contract")
+            save_json(
+                str(project_path / "author_intent.json"),
+                {
+                    "premise": "故事发生在一座全面停电的超级摩天楼中，男女主被困后合作生存。",
+                    "long_arc": "从临时避难到长期建设据点，并逐步揭开怪物来源。",
+                    "tone_contract": "第一人称宅男幽默 / 微恐、温馨、成人暧昧",
+                    "narrative_engine": "封闭摩天楼内的合作生存、资源搜集、避难所建设和怪物试探。",
+                    "relationship_engine": "男主用吐槽和黄段子缓解恐惧，女主从戒备到信任，在照料和并肩求生中升温。",
+                    "voice_rules": ["第一人称宅男视角", "幽默吐槽", "黄段子只能成年人调侃"],
+                    "scene_promises": ["摩天楼停电危机", "躲避怪物", "囤积物资", "改善避难所"],
+                    "anti_flat_rules": ["不能只概括推进", "关键场景要有动作、感官、心理和对话交替"],
+                    "must_haves": ["注重女主身心反应"],
+                    "must_not_break": ["不能写露骨性行为"],
+                    "creativity_guidance": "优先写出新鲜的场景调度和互动细节。",
+                },
+            )
+            project_data = load_project(str(project_path))
+            next_context = {
+                "volume": project_data["outlines"]["volumes"][0],
+                "chapter": project_data["outlines"]["volumes"][0]["chapters"][0],
+            }
+
+            context = build_writer_context(
+                str(project_path),
+                project_data,
+                next_context,
+                "",
+                planning_mode="chapter",
+            )
+            prompt = build_writer_prompt(context)
+
+            self.assertIn("creative_contract", context["sections"])
+            self.assertIn("关系引擎", context["sections"]["creative_contract"])
+            self.assertIn("叙述声音", context["sections"]["creative_contract"])
+            self.assertIn("场景承诺", context["sections"]["creative_contract"])
+            self.assertIn("平淡规避", context["sections"]["creative_contract"])
+            self.assertIn("创作风味契约", prompt)
+            self.assertIn("成人暧昧只写成年人之间的张力", prompt)
+
     def test_craft_brief_and_quality_review_prompts_expose_json_schemas(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp), project_id="quality_prompts")

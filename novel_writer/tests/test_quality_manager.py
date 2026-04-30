@@ -14,6 +14,7 @@ from quality_manager import (
     normalize_craft_brief,
     normalize_quality_review,
     normalize_rewrite_response_text,
+    quality_review_needs_rewrite,
     quality_review_passed,
     rewrite_chapter_draft,
     save_pre_rewrite_draft,
@@ -100,6 +101,26 @@ class QualityManagerTests(unittest.TestCase):
         self.assertEqual(review["score_reasons"], {})
         self.assertEqual(review["blocking_issues"], [])
         self.assertEqual(review["rewrite_plan"], [])
+
+    def test_balanced_low_flatness_scores_request_rewrite_without_failing_review(self) -> None:
+        scores = self._passing_scores()
+        scores["scene_freshness"] = 6
+        review = normalize_quality_review(
+            {
+                "scores": scores,
+                "passed": True,
+                "issues": [],
+                "rewrite_plan": [],
+            }
+        )
+
+        self.assertTrue(review["passed"])
+        self.assertTrue(quality_review_passed(review))
+        self.assertTrue(review["needs_rewrite"])
+        self.assertIn("scene_freshness", review["flatness_issues"])
+        self.assertTrue(review["rewrite_plan"])
+        self.assertTrue(quality_review_needs_rewrite(review, "balanced"))
+        self.assertFalse(quality_review_needs_rewrite(review, "light"))
 
     def test_unavailable_review_never_passes(self) -> None:
         review = normalize_quality_review(None, fallback_passed=False, review_unavailable=True)

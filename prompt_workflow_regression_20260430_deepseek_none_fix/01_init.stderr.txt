@@ -1,0 +1,14 @@
+[2026-04-30T02:01:02+00:00] [INFO] cli: init
+[2026-04-30T02:01:02+00:00] [INFO] init_project: loading config /tmp/novel_deepseek_regression.j5kiHl.json
+[2026-04-30T02:01:02+00:00] [INFO] init_project: creating project directory /home/wsy/novel_frame_2/prompt_workflow_regression_20260430_deepseek_none_fix/projects/novel_project_regression_fix_deepseek_none_20260430
+[2026-04-30T02:01:03+00:00] [SUCCESS] init_project: base directories ready
+[2026-04-30T02:01:03+00:00] [INFO] 初始化设定: 先请求模型生成人物和背景设定。
+[2026-04-30T02:01:03+00:00] [INFO] 初始化设定: 人物和背景设定第 1 次请求模型。
+[2026-04-30T02:02:02+00:00] [SUCCESS] 初始化设定: 人物和背景设定已生成。
+[2026-04-30T02:02:02+00:00] [INFO] 初始化设定: 开始请求模型生成世界观、人物、剧情状态和文风。
+[2026-04-30T02:02:02+00:00] [INFO] 初始化设定: 第 1 次请求模型。
+[2026-04-30T02:02:58+00:00] [SUCCESS] 初始化设定: 模型返回成功，已解析初始化设定。
+[2026-04-30T02:02:58+00:00] [INFO] init_project: writing project json files
+[2026-04-30T02:02:58+00:00] [SUCCESS] init_project: project files written
+[2026-04-30T02:02:58+00:00] [SUCCESS] init_project: snapshot saved to /home/wsy/novel_frame_2/prompt_workflow_regression_20260430_deepseek_none_fix/projects/novel_project_regression_fix_deepseek_none_20260430/snapshots/chapter_0000
+[2026-04-30T02:02:58+00:00] [SUCCESS] init_project: project initialized at /home/wsy/novel_frame_2/prompt_workflow_regression_20260430_deepseek_none_fix/projects/novel_project_regression_fix_deepseek_none_20260430

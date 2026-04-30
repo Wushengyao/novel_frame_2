@@ -1,0 +1,14 @@
+{
+  "chapter_count": 1,
+  "created_at": "2026-04-30T02:11:51+00:00",
+  "note": "post-write checkpoint",
+  "files": [
+    "project.json",
+    "story_setup.json",
+    "world.json",
+    "characters.json",
+    "plot_state.json",
+    "style.json",
+    "author_intent.json"
+  ]
+}

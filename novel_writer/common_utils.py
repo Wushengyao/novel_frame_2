@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 def utc_now() -> str:
@@ -69,3 +70,37 @@ def extract_json_object(text: str, error_message: str) -> dict:
                 return data
 
     raise ValueError(error_message)
+
+
+def save_failed_llm_output(
+    project_path: str,
+    phase: str,
+    response_text: str,
+    *,
+    error: str = "",
+    context: dict | None = None,
+) -> Path | None:
+    """Persist raw model text for malformed responses without storing request secrets."""
+    if not str(response_text or "").strip():
+        return None
+    base = Path(str(project_path or "")).expanduser()
+    if not base:
+        return None
+    timestamp = utc_now().replace(":", "").replace("-", "").replace("+0000", "Z").replace("+00:00", "Z")
+    safe_phase = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(phase or "llm").strip()) or "llm"
+    path = base / "failed_llm_outputs" / f"{timestamp}_{safe_phase}.json"
+    payload = {
+        "created_at": utc_now(),
+        "phase": safe_phase,
+        "error": str(error or "")[:1200],
+        "response_text": str(response_text or ""),
+    }
+    if context:
+        payload["context"] = {
+            key: value
+            for key, value in context.items()
+            if key not in {"api_key", "authorization", "headers", "request"}
+        }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
