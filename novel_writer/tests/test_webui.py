@@ -306,6 +306,19 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("/project/web/export", project_page.body)
         self.assertIn("llm_logs", project_page.body)
 
+    def test_projects_page_links_to_new_project_page_without_create_form(self) -> None:
+        projects_page = self._get("/projects")
+
+        self.assertEqual(projects_page.status, 200)
+        self.assertIn("项目书架", projects_page.body)
+        self.assertIn("导入项目", projects_page.body)
+        self.assertIn("后台任务", projects_page.body)
+        self.assertIn('href="/projects/new"', projects_page.body)
+        self.assertNotIn('action="/projects/create"', projects_page.body)
+        self.assertNotIn('name="story_request"', projects_page.body)
+        self.assertNotIn('name="model_preset"', projects_page.body)
+        self.assertNotIn('name="expert_model_preset_1"', projects_page.body)
+
     def test_project_export_endpoint_downloads_zip_archive(self) -> None:
         (self.project_path / "chapters" / "chapter_0001.md").write_text("第一章正文\n", encoding="utf-8")
 
@@ -638,19 +651,30 @@ class WebUiGuidedFlowTests(unittest.TestCase):
             },
         ), patch("webui._read_admin_action_status", return_value={}):
             projects_page = self._get("/projects")
+            new_project_page = self._get("/projects/new")
             settings_page = self._get("/settings")
 
         self.assertEqual(projects_page.status, 200)
-        self.assertIn('name="model_preset"', projects_page.body)
-        self.assertIn('name="quality_model_preset"', projects_page.body)
-        self.assertIn('name="expert_model_preset_1"', projects_page.body)
-        self.assertIn('data-model-target="quality"', projects_page.body)
-        self.assertIn('data-model-target="expert-1"', projects_page.body)
-        self.assertIn("使用 gemini 默认模型", projects_page.body)
+        self.assertIn('href="/projects/new"', projects_page.body)
+        self.assertNotIn('name="model_preset"', projects_page.body)
+        self.assertNotIn('name="quality_model_preset"', projects_page.body)
+        self.assertNotIn('name="expert_model_preset_1"', projects_page.body)
         self.assertIn(f"版本 {DISPLAY_VERSION}", projects_page.body)
         self.assertNotIn("维护操作", projects_page.body)
         self.assertNotIn("/admin/restart", projects_page.body)
         self.assertNotIn("/admin/update", projects_page.body)
+
+        self.assertEqual(new_project_page.status, 200)
+        self.assertIn("新建小说", new_project_page.body)
+        self.assertIn('action="/projects/create"', new_project_page.body)
+        self.assertIn('name="story_request"', new_project_page.body)
+        self.assertIn('name="model_preset"', new_project_page.body)
+        self.assertIn('name="quality_model_preset"', new_project_page.body)
+        self.assertIn('name="expert_model_preset_1"', new_project_page.body)
+        self.assertIn('data-model-target="quality"', new_project_page.body)
+        self.assertIn('data-model-target="expert-1"', new_project_page.body)
+        self.assertIn("使用 gemini 默认模型", new_project_page.body)
+        self.assertIn(f"版本 {DISPLAY_VERSION}", new_project_page.body)
 
         self.assertEqual(settings_page.status, 200)
         self.assertIn("维护操作", settings_page.body)
@@ -668,9 +692,12 @@ class WebUiGuidedFlowTests(unittest.TestCase):
     def test_protected_pages_redirect_to_login_when_auth_enabled(self) -> None:
         with patch("webui._auth_settings", return_value=self._make_auth_settings(enabled=True)):
             response = self._get("/projects")
+            new_project_response = self._get("/projects/new")
 
         self.assertEqual(response.status, 303)
         self.assertIn("/login?next=", response.getheader("Location"))
+        self.assertEqual(new_project_response.status, 303)
+        self.assertIn("/login?next=", new_project_response.getheader("Location"))
 
     def test_login_submit_sets_cookie_and_allows_followup_access(self) -> None:
         settings = self._make_auth_settings(enabled=True)

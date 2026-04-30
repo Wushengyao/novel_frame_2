@@ -1746,6 +1746,161 @@ def _render_runtime_override_fields(
     """
 
 
+def _render_create_project_form() -> str:
+    return f"""
+    <form method="post" action="/projects/create" class="create-project-form">
+      <section class="panel">
+        <div class="form-panel-head">
+          <h2>基础信息</h2>
+          <p class="muted">先描述你想写的故事，系统会据此初始化设定、人物、风格和大纲。</p>
+        </div>
+        <label>项目名
+          <input type="text" name="project_name" value="雪封穹顶">
+        </label>
+        <label>项目简介
+          <input type="text" name="project_description" value="由模型根据需求自动生成设定的长篇小说项目。">
+        </label>
+        <label>故事需求
+          <textarea name="story_request" placeholder="把你想写的题材、角色、世界观、节奏偏好写在这里"></textarea>
+        </label>
+      </section>
+
+      <section class="panel">
+        <div class="form-panel-head">
+          <h2>主模型</h2>
+          <p class="muted">默认可直接使用预设下拉，不需要每次手填 Model ID。</p>
+        </div>
+        <div class="two-col">
+          <label>模型后端
+            <select
+              name="provider"
+              data-model-provider-select
+              data-model-target="main"
+              data-base-provider="gemini"
+            >
+              {_render_provider_options("gemini", include_project_default=False)}
+            </select>
+          </label>
+          <label>模型预设
+            <select
+              name="model_preset"
+              data-model-preset-select
+              data-model-target="main"
+              data-base-model=""
+            >
+              {_render_model_preset_options("gemini", blank_label=_model_blank_label("gemini", base_model="", provider_explicit=True))}
+            </select>
+          </label>
+        </div>
+        <label>自定义模型名（可选）
+          <input
+            type="text"
+            name="model_name_custom"
+            data-model-custom-input
+            data-model-target="main"
+            placeholder="如需未预设的 Model ID，可在这里手填覆盖"
+          >
+        </label>
+        <div class="two-col">
+          <label>Max Tokens
+            <input type="number" name="max_tokens" value="4000">
+          </label>
+          <label>Timeout
+            <input type="number" name="timeout" value="120">
+          </label>
+        </div>
+        <label>API Base（可选）
+          <input type="text" name="api_base" placeholder="如需自定义接口地址可填写">
+        </label>
+      </section>
+
+      <section class="panel">
+        <div class="form-panel-head">
+          <h2>规划与质检</h2>
+          <p class="muted">默认平衡模式会先生成短蓝图，写后保存质检报告；高质量模式可在自动审稿失败时重写一次。</p>
+        </div>
+        <label>Planning Mode
+          <select name="planning_mode">
+            {_render_planning_mode_options(DEFAULT_PLANNING_MODE)}
+          </select>
+        </label>
+        <div class="muted">{escape(_planning_mode_help(DEFAULT_PLANNING_MODE))}</div>
+        <div class="two-col">
+          <label>写作质量模式
+            <select name="writing_quality_mode">
+              {_render_quality_mode_options(DEFAULT_WRITING_QUALITY_MODE)}
+            </select>
+          </label>
+          <label>审稿模式
+            <select name="review_mode">
+              {_render_review_mode_options(DEFAULT_REVIEW_MODE)}
+            </select>
+          </label>
+        </div>
+        <div class="two-col">
+          <label>Quality Provider
+            <select
+              name="quality_provider"
+              data-model-provider-select
+              data-model-target="quality"
+              data-base-provider="gemini"
+              data-base-provider-target="main"
+            >
+              {_render_quality_provider_options()}
+            </select>
+          </label>
+          <label>Quality Model
+            <select
+              name="quality_model_preset"
+              data-model-preset-select
+              data-model-target="quality"
+              data-base-model=""
+            >
+              {_render_model_preset_options("gemini", blank_label=_model_blank_label("gemini", base_model="", provider_explicit=False))}
+            </select>
+          </label>
+        </div>
+        <label>Quality Custom Model（可选）
+          <input
+            type="text"
+            name="quality_model_name_custom"
+            data-model-custom-input
+            data-model-target="quality"
+            placeholder="预设里没有时再手填 Model ID"
+          >
+        </label>
+        <div class="two-col">
+          <label>Quality API Base
+            <input type="text" name="quality_api_base" placeholder="inherit or provider default">
+          </label>
+          <label>Quality Timeout
+            <input type="number" name="quality_timeout" placeholder="inherit or provider default">
+          </label>
+        </div>
+        <label>Quality Max Tokens
+          <input type="number" name="quality_max_tokens" placeholder="inherit main">
+        </label>
+        <div class="muted">Optional advanced model used only for craft brief, quality review, and rewrite.</div>
+      </section>
+
+      <section class="panel">
+        <div class="form-panel-head">
+          <h2>专家审稿</h2>
+          <p class="muted">可选的高级审稿模型组，适合后续对每章进行更严格诊断。</p>
+        </div>
+        {_render_expert_mode_fields()}
+      </section>
+
+      <section class="panel">
+        <div class="form-actions">
+          <a class="ghost-button" href="/projects">返回项目书架</a>
+          <button type="submit">创建项目</button>
+        </div>
+      </section>
+    </form>
+    """
+
+
 def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_callback=None) -> str:
     provider = (form.get("provider") or "gemini").strip().lower()
     provider = _normalize_provider_for_ui(provider, default="")
@@ -3446,6 +3601,47 @@ def _render_page(
       gap: 12px;
       flex-wrap: wrap;
     }}
+    .home-actions {{
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-top: 14px;
+    }}
+    .primary-button {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      padding: 12px 18px;
+      background: linear-gradient(135deg, var(--accent) 0%, #cf7c52 100%);
+      color: #fff9f3;
+      font-weight: 600;
+    }}
+    .primary-button:hover {{
+      text-decoration: none;
+      filter: brightness(0.97);
+    }}
+    .create-project-form {{
+      display: grid;
+      gap: 18px;
+    }}
+    .form-panel-head {{
+      margin-bottom: 14px;
+    }}
+    .form-panel-head h2 {{
+      margin-bottom: 6px;
+    }}
+    .form-panel-head p {{
+      margin: 0;
+    }}
+    .form-actions {{
+      display: flex;
+      justify-content: flex-end;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }}
     @media (max-width: 920px) {{
       .grid {{ grid-template-columns: 1fr; }}
       .project-layout {{ grid-template-columns: 1fr; }}
@@ -3720,6 +3916,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
 
         if parsed.path in {"/", "/projects"}:
             self._handle_projects(notice=notice, error=error)
+            return
+
+        if parsed.path == "/projects/new":
+            self._handle_new_project_page(notice=notice, error=error)
             return
 
         if parsed.path == "/settings":
@@ -4566,6 +4766,33 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             )
         )
 
+    def _handle_new_project_page(self, notice: str = "", error: str = "") -> None:
+        auth_settings = self._current_auth_settings()
+        authenticated = self._is_authenticated(auth_settings)
+        body = f"""
+        <div class="stack">
+          <div class="hero">
+            <h2>新建小说</h2>
+            <p class="sub">把创建配置集中到独立页面，后续可以继续扩展更多开书选项。</p>
+            <div class="home-actions">
+              <a class="ghost-button" href="/projects">返回项目书架</a>
+            </div>
+          </div>
+          {_render_create_project_form()}
+        </div>
+        """
+        self._write_html(
+            _render_page(
+                "新建小说",
+                body,
+                notice=notice,
+                error=error,
+                auth_enabled=auth_settings.enabled,
+                authenticated=authenticated,
+                theme=_read_theme_cookie(self),
+            )
+        )
+
     def _handle_projects(self, notice: str = "", error: str = "") -> None:
         auth_settings = self._current_auth_settings()
         authenticated = self._is_authenticated(auth_settings)
@@ -4593,7 +4820,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 </div>
                 """
             )
-        project_html = "".join(cards) or "<p>当前还没有项目，先在左侧创建一个新项目吧。</p>"
+        project_html = "".join(cards) or "<p>当前还没有项目。可以新建小说，或导入已有项目包。</p>"
         recent_jobs_html = _render_job_cards(
             JOB_REGISTRY.list_jobs(limit=6),
             "当前还没有后台任务。",
@@ -4602,126 +4829,11 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         <div class="grid">
           <div class="stack">
             <section class="panel">
-              <h2>新建项目</h2>
-              <form method="post" action="/projects/create">
-                <div class="two-col">
-                  <label>模型后端
-                    <select
-                      name="provider"
-                      data-model-provider-select
-                      data-model-target="main"
-                      data-base-provider="gemini"
-                    >
-                      {_render_provider_options("gemini", include_project_default=False)}
-                    </select>
-                  </label>
-                  <label>模型预设
-                    <select
-                      name="model_preset"
-                      data-model-preset-select
-                      data-model-target="main"
-                      data-base-model=""
-                    >
-                      {_render_model_preset_options("gemini", blank_label=_model_blank_label("gemini", base_model="", provider_explicit=True))}
-                    </select>
-                  </label>
-                </div>
-                <label>自定义模型名（可选）
-                  <input
-                    type="text"
-                    name="model_name_custom"
-                    data-model-custom-input
-                    data-model-target="main"
-                    placeholder="如需未预设的 Model ID，可在这里手填覆盖"
-                  >
-                </label>
-                <div class="muted">默认可直接使用预设下拉，不需要每次手填 Model ID。</div>
-                <label>项目名
-                  <input type="text" name="project_name" value="雪封穹顶">
-                </label>
-                <label>项目简介
-                  <input type="text" name="project_description" value="由模型根据需求自动生成设定的长篇小说项目。">
-                </label>
-                <label>故事需求
-                  <textarea name="story_request" placeholder="把你想写的题材、角色、世界观、节奏偏好写在这里"></textarea>
-                </label>
-                <div class="two-col">
-                  <label>Max Tokens
-                    <input type="number" name="max_tokens" value="4000">
-                  </label>
-                  <label>Timeout
-                    <input type="number" name="timeout" value="120">
-                  </label>
-                </div>
-                <label>API Base（可选）
-                  <input type="text" name="api_base" placeholder="如需自定义接口地址可填写">
-                </label>
-                <label>Planning Mode
-                  <select name="planning_mode">
-                    {_render_planning_mode_options(DEFAULT_PLANNING_MODE)}
-                  </select>
-                </label>
-                <div class="muted">{escape(_planning_mode_help(DEFAULT_PLANNING_MODE))}</div>
-                <div class="two-col">
-                  <label>写作质量模式
-                    <select name="writing_quality_mode">
-                      {_render_quality_mode_options(DEFAULT_WRITING_QUALITY_MODE)}
-                    </select>
-                  </label>
-                  <label>审稿模式
-                    <select name="review_mode">
-                      {_render_review_mode_options(DEFAULT_REVIEW_MODE)}
-                    </select>
-                  </label>
-                </div>
-                <div class="muted">默认平衡模式会先生成短蓝图，写后保存质检报告；高质量模式可在自动审稿失败时重写一次。</div>
-                <div class="two-col">
-                  <label>Quality Provider
-                    <select
-                      name="quality_provider"
-                      data-model-provider-select
-                      data-model-target="quality"
-                      data-base-provider="gemini"
-                      data-base-provider-target="main"
-                    >
-                      {_render_quality_provider_options()}
-                    </select>
-                  </label>
-                  <label>Quality Model
-                    <select
-                      name="quality_model_preset"
-                      data-model-preset-select
-                      data-model-target="quality"
-                      data-base-model=""
-                    >
-                      {_render_model_preset_options("gemini", blank_label=_model_blank_label("gemini", base_model="", provider_explicit=False))}
-                    </select>
-                  </label>
-                </div>
-                <label>Quality Custom Model（可选）
-                  <input
-                    type="text"
-                    name="quality_model_name_custom"
-                    data-model-custom-input
-                    data-model-target="quality"
-                    placeholder="预设里没有时再手填 Model ID"
-                  >
-                </label>
-                <div class="two-col">
-                  <label>Quality API Base
-                    <input type="text" name="quality_api_base" placeholder="inherit or provider default">
-                  </label>
-                  <label>Quality Timeout
-                    <input type="number" name="quality_timeout" placeholder="inherit or provider default">
-                  </label>
-                </div>
-                <label>Quality Max Tokens
-                  <input type="number" name="quality_max_tokens" placeholder="inherit main">
-                </label>
-                <div class="muted">Optional advanced model used only for craft brief, quality review, and rewrite.</div>
-                {_render_expert_mode_fields()}
-                <button type="submit">创建项目</button>
-              </form>
+              <h2>新建小说</h2>
+              <p class="muted">创建配置已移到独立页面，首页专注浏览和管理已有项目。</p>
+              <div class="home-actions">
+                <a class="primary-button" href="/projects/new">新建小说</a>
+              </div>
             </section>
             <section class="panel">
               <h2>导入项目</h2>
@@ -6285,7 +6397,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             job = JOB_REGISTRY.create_job(kind="create_project", title="创建新项目")
         except Exception as exc:
             _discard_checkpoint(cancel_checkpoint)
-            self._redirect("/projects?error=" + urllib.parse.quote(str(exc)))
+            self._redirect("/projects/new?error=" + urllib.parse.quote(str(exc)))
             return
 
         def runner(progress_callback):
