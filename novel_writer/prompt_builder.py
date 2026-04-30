@@ -23,6 +23,29 @@ def _join_blocks(*blocks: str) -> str:
     return "\n\n".join(block for block in blocks if block)
 
 
+def _numbered_requirements(items: list[str]) -> str:
+    return "\n".join(f"{index}. {item}" for index, item in enumerate(items, start=1))
+
+
+def _has_section(sections: dict, key: str) -> bool:
+    return bool(str(sections.get(key, "") or "").strip())
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_first_chapter_prompt(data: dict, next_context: dict | None = None) -> bool:
+    project = data.get("project", {}) if isinstance(data, dict) else {}
+    chapter_count = _safe_int(project.get("chapter_count"), 0)
+    chapter = (next_context or {}).get("chapter", {}) if isinstance(next_context, dict) else {}
+    chapter_number = _safe_int(chapter.get("chapter_number"), chapter_count + 1)
+    return chapter_count == 0 and max(1, chapter_number) == 1
+
+
 _BASE_SYSTEM_PROMPT = (
     "你是小说创作工作流中的稳定执行代理。始终优先遵守用户消息里的任务、输出格式、"
     "既有设定和连续性事实；不要编造缺失的工程信息，不要输出与任务无关的解释。"
@@ -616,6 +639,25 @@ def build_auto_objective_prompt(
 
     if isinstance(data, dict) and isinstance(data.get("sections"), dict):
         sections = data["sections"]
+        requirements = [
+            "输出必须是合法 JSON",
+            "只生成“下一章”的 objective，不要把两三章后的目标提前写进来",
+            "objective 必须是本章要完成的叙事任务，不要写成执行 plan、情绪要求或文风要求",
+            "objective 要尊重当前 live state、最近场景、相关记忆和基线任务卡",
+            "objective 必须包含可验证的场景压力、人物选择、关系推进或生存建设变化之一，避免只写普通任务句",
+            "objective 应当具体、可执行、可验证，长度尽量控制在 1 句话内",
+        ]
+        if user_request.strip():
+            requirements.append("用户这次想看的方向已提供；请自然吸收进本章任务")
+        if _has_section(sections, "opening_contract"):
+            requirements.append(
+                "本章是正文第一章；objective 只定义首章必须完成的核心变化，不把读者尚未看见的设定前情当作已写事实"
+            )
+        if _has_section(sections, "reader_setup"):
+            requirements.append(
+                "读者开卷导语只是公开入口信息；objective 可以与导语保持一致，但正文仍需要交代人物、地点、压力和行动理由"
+            )
+        requirements.append("不要输出解释，不要输出 Markdown")
         prompt_body = _join_blocks(
             "你是长篇连载小说的章节规划助手。请只为下一章提炼一个清晰的 objective。",
             _section_block("作者意图", sections.get("author_intent", "")),
@@ -635,19 +677,26 @@ def build_auto_objective_prompt(
         return f"""{prompt_body}
 
 要求：
-1. 输出必须是合法 JSON
-2. 只生成“下一章”的 objective，不要把两三章后的目标提前写进来
-3. objective 必须是本章要完成的叙事任务，不要写成执行 plan、情绪要求或文风要求
-4. objective 要尊重当前 live state、最近场景、相关记忆和基线任务卡；若用户有额外意图，请自然吸收进本章任务
-5. objective 必须包含可验证的场景压力、人物选择、关系推进或生存建设变化之一，避免只写普通任务句
-6. objective 应当具体、可执行、可验证，长度尽量控制在 1 句话内
-7. 如果提供了“首章读者入口约束”，objective 只能定义首章必须完成的核心变化，不能把读者还不知道的设定前情当作已写事实
-8. 如果提供了“读者开卷导语”，objective 可以与导语保持一致，但不能假设正文可以省略人物、地点、压力和行动理由
-9. 不要输出解释，不要输出 Markdown
+{_numbered_requirements(requirements)}
 
 输出 JSON：
 {{"objective":""}}
 """
+
+    requirements = [
+        "输出必须是合法 JSON",
+        "只生成“下一章”的 objective，不要把两三章后的目标提前写进来",
+        "objective 必须是本章要完成的叙事任务，不要写成执行 plan、情绪要求或文风要求",
+        "objective 要尊重当前状态和最近正文",
+        "objective 应当具体、可执行、可验证，长度尽量控制在 1 句话内",
+    ]
+    if user_request.strip():
+        requirements.append("用户这次想看的方向已提供；请自然吸收进本章任务")
+    if _is_first_chapter_prompt(data, next_context):
+        requirements.append(
+            "本章是正文第一章；objective 需要允许正文先自然建立读者入口，不把读者尚未看见的设定前情当作已写事实"
+        )
+    requirements.append("不要输出解释，不要输出 Markdown")
 
     return f"""你是长篇连载小说的章节规划助手。请只为下一章提炼一个清晰的 objective。
 
@@ -670,13 +719,7 @@ def build_auto_objective_prompt(
 {user_request_block}
 
 要求：
-1. 输出必须是合法 JSON
-2. 只生成“下一章”的 objective，不要把两三章后的目标提前写进来
-3. objective 必须是本章要完成的叙事任务，不要写成执行 plan、情绪要求或文风要求
-4. objective 要尊重当前状态和最近正文；若用户有额外意图，请自然吸收进本章任务
-5. objective 应当具体、可执行、可验证，长度尽量控制在 1 句话内
-6. 如果这是第一章，不要把读者尚未看见的设定前情当作已写事实；objective 需要允许正文先自然建立读者入口
-7. 不要输出解释，不要输出 Markdown
+{_numbered_requirements(requirements)}
 
 输出 JSON：
 {{
@@ -719,6 +762,29 @@ def build_progression_options_prompt(
             recommendation_rule = "`recommended_option_id` 必须与唯一的推荐项一致"
             objective_rule = "方案要尊重既有设定、当前状态、最近场景和下一章任务卡；先把任务卡里的 `objective` 当作硬约束，再基于它设计不同 plan"
             scope_rule = "选项只改变这一章的切入角度、推进顺序和强调重点，不要另起一个与当前任务卡冲突的新目标"
+        requirements = [
+            "输出必须是合法 JSON",
+            "只针对下一章给方案，不要把两三章后的核心剧情提前塞进来",
+            count_rule,
+            recommendation_rule,
+            objective_rule,
+            scope_rule,
+        ]
+        if _has_section(sections, "opening_contract"):
+            requirements.append(
+                "本章是正文第一章；每个方案的 `plan_steps` 第一项必须先设计“读者入口/开场桥”：交代当下处境、人物身份/关系、同场原因和行动压力，再进入任务事件"
+            )
+        if _has_section(sections, "reader_setup"):
+            requirements.append("方案要与读者开卷导语公开的信息一致，但不要把导语当成正文已经完成的交代")
+        requirements.extend(
+            [
+                "每个方案都必须体现本章的钩子、压力、互动火花和至少一项新变化；多选项时彼此要有清晰戏剧重心差异",
+                "每个选项都必须包含 `option_id`、`title`、`plan_summary`、`plan_steps`、`plan_guidance`、`recommended`",
+                "`plan_steps` 给 2 到 5 个条目，写本章真正会发生的推进节点",
+                "`plan_summary` 要描述这一章会怎么推进；`plan_guidance` 只补充写法与强调点，不要偷偷改写章节主目标",
+                "不要输出解释，不要输出 Markdown",
+            ]
+        )
         prompt_body = _join_blocks(
             opening,
             _section_block("作者意图", sections.get("author_intent", "")),
@@ -738,19 +804,7 @@ def build_progression_options_prompt(
         return f"""{prompt_body}
 
 要求：
-1. 输出必须是合法 JSON
-2. 只针对下一章给方案，不要把两三章后的核心剧情提前塞进来
-3. {count_rule}
-4. {recommendation_rule}
-5. {objective_rule}
-6. {scope_rule}
-7. 如果提供了“首章读者入口约束”，每个方案的 `plan_steps` 第一项必须先设计“读者入口/开场桥”：交代当下处境、人物身份/关系、同场原因和行动压力，再进入任务事件
-8. 如果提供了“读者开卷导语”，方案要与导语公开给读者的信息一致，但不要把导语当成正文已经完成的交代
-9. 每个方案都必须体现本章的钩子、压力、互动火花和至少一项新变化；多选项时彼此要有清晰戏剧重心差异
-10. 每个选项都必须包含 `option_id`、`title`、`plan_summary`、`plan_steps`、`plan_guidance`、`recommended`
-11. `plan_steps` 给 2 到 5 个条目，写本章真正会发生的推进节点
-12. `plan_summary` 要描述这一章会怎么推进；`plan_guidance` 只补充写法与强调点，不要偷偷改写章节主目标
-13. 不要输出解释，不要输出 Markdown
+{_numbered_requirements(requirements)}
 
 输出 JSON 骨架：
 {{"recommended_option_id":"option_1","options":[{{"option_id":"option_1","title":"","plan_summary":"","plan_steps":["",""],"plan_guidance":"","recommended":true}}]}}
@@ -769,6 +823,26 @@ def build_progression_options_prompt(
         recommendation_rule = "只能有一个选项 `recommended=true`，并且 `recommended_option_id` 必须与该选项一致"
         objective_rule = "方案要尊重既有设定、最近正文、当前剧情状态和下一章上下文，不要推翻已有章纲；先把当前任务卡里的 `objective` 当作硬约束，再基于它设计不同 plan"
         scope_rule = "选项只改变这一章怎么推进，不要另起一个与当前任务卡或章纲冲突的新目标"
+    requirements = [
+        "输出必须是合法 JSON",
+        "必须只针对“下一章”给方案，不要把两三章后的核心剧情提前塞进来",
+        count_rule,
+        objective_rule,
+        scope_rule,
+    ]
+    if _is_first_chapter_prompt(data, next_context):
+        requirements.append(
+            "本章是正文第一章；每个选项的 `plan_steps` 第一项必须先设计读者入口/开场桥，不能直接跳到任务事件"
+        )
+    requirements.extend(
+        [
+            "每个选项都必须包含 `option_id`、`title`、`plan_summary`、`plan_steps`、`plan_guidance`、`recommended`",
+            "`plan_summary` 描述本章会怎么推进；`plan_guidance` 只补充写法、氛围和强调点，不要改写章节主目标",
+            "`plan_steps` 要给出 2 到 5 个条目，写本章会实际发生的关键推进",
+            recommendation_rule,
+            "不要输出解释，不要输出 Markdown",
+        ]
+    )
 
     return f"""{opening}
 
@@ -800,23 +874,7 @@ def build_progression_options_prompt(
 {option_total}
 
 要求：
-1. 输出必须是合法 JSON
-2. 必须只针对“下一章”给方案，不要把两三章后的核心剧情提前塞进来
-3. {count_rule}
-4. {objective_rule}
-5. {scope_rule}
-6. 如果这是第一章，每个选项的 `plan_steps` 第一项必须先设计读者入口/开场桥，不能直接跳到任务事件
-7. 每个选项都必须包含：
-   - `option_id`
-   - `title`
-   - `plan_summary`
-   - `plan_steps`
-   - `plan_guidance`
-   - `recommended`
-8. `plan_summary` 描述本章会怎么推进；`plan_guidance` 只补充写法、氛围和强调点，不要改写章节主目标
-9. `plan_steps` 要给出 2 到 5 个条目，写本章会实际发生的关键推进
-10. {recommendation_rule}
-11. 不要输出解释，不要输出 Markdown
+{_numbered_requirements(requirements)}
 
 输出 JSON：
 {{
@@ -837,6 +895,28 @@ def build_progression_options_prompt(
 
 def build_craft_brief_prompt(data: dict) -> str:
     sections = data.get("sections", {}) if isinstance(data, dict) else {}
+    requirements = [
+        "输出必须是合法 JSON",
+        "只设计当前这一章，不要改变任务卡的核心目标",
+        "蓝图要帮助正文更吸引人：开章钩子、戏剧问题、压力来源、人物选择、情绪转折都要具体",
+        "`context_bridge` 写清本章开场需要补给读者的处境、人物入口或连续性锚点",
+        "`action_reasoning` 写清人物采取关键行动的直接原因、压力与选择依据",
+    ]
+    if _has_section(sections, "opening_contract"):
+        requirements.append(
+            "本章是正文第一章；`context_bridge` 必须具体说明前 600-1000 字如何让读者理解人物、地点、前情和行动理由，不能只写“承接上一章”"
+        )
+    if _has_section(sections, "reader_setup"):
+        requirements.append("蓝图要决定哪些读者开卷导语里的公开设定需要在正文中戏剧化呈现，不能安排正文机械复述导语")
+    requirements.extend(
+        [
+            "蓝图必须显式照顾创作风味契约：开章钩子、关系火花、生存细节、感官描写、核心人物身心反应、幽默或温情破局、平淡规避",
+            "`forbidden_repeats` 必须列出需要避开的上一章表层动作、姿态、句式或结尾套路",
+            "`fresh_interaction_patterns` 要给出新的互动方式，不要只写“更细腻”“更紧张”这类抽象要求",
+            "`success_criteria` 给出 2 到 5 条本章必须兑现的可检查目标，用于写后质检",
+            "不要输出解释，不要输出 Markdown",
+        ]
+    )
     prompt_body = _join_blocks(
         "你是一名长篇小说创作总监。请在正式写正文前，为下一章设计一份短小但可执行的创作蓝图。",
         _section_block("作者意图", sections.get("author_intent", "")),
@@ -855,18 +935,7 @@ def build_craft_brief_prompt(data: dict) -> str:
     return f"""{prompt_body}
 
 要求：
-1. 输出必须是合法 JSON
-2. 只设计当前这一章，不要改变任务卡的核心目标
-3. 蓝图要帮助正文更吸引人：开章钩子、戏剧问题、压力来源、人物选择、情绪转折都要具体
-4. `context_bridge` 写清本章开场需要补给读者的处境、人物入口或连续性锚点
-5. `action_reasoning` 写清人物采取关键行动的直接原因、压力与选择依据
-6. 如果提供了“首章读者入口约束”，`context_bridge` 必须具体说明前 600-1000 字如何让读者理解人物、地点、前情和行动理由，不能只写“承接上一章”
-7. 如果提供了“读者开卷导语”，蓝图要决定哪些公开设定需要在正文中戏剧化呈现，不能安排正文机械复述导语
-8. 蓝图必须显式照顾创作风味契约：开章钩子、关系火花、生存细节、感官描写、核心人物身心反应、幽默或温情破局、平淡规避
-9. `forbidden_repeats` 必须列出需要避开的上一章表层动作、姿态、句式或结尾套路
-10. `fresh_interaction_patterns` 要给出新的互动方式，不要只写“更细腻”“更紧张”这类抽象要求
-11. `success_criteria` 给出 2 到 5 条本章必须兑现的可检查目标，用于写后质检
-12. 不要输出解释，不要输出 Markdown
+{_numbered_requirements(requirements)}
 
 输出 JSON 骨架：
 {{"chapter_hook":"","context_bridge":"","dramatic_question":"","conflict_pressure":"","action_reasoning":"","emotional_turn":"","scene_movement":[],"sensory_palette":[],"fresh_interaction_patterns":[],"forbidden_repeats":[],"success_criteria":[],"focus_notes":""}}
@@ -888,11 +957,36 @@ def build_writer_prompt(
             "读者可能会先看到“读者开卷导语”，但正文仍必须独立可读，不能把导语当成已经写过的正文。"
             "开章可以有强钩子，但前 600-1000 字必须把读者入口做成可读场景："
             "当下地点/时间/危机、叙述者或核心人物身份、核心人物为何同场或彼此认识、"
-            "他们为什么现在必须行动。若任务卡第一步已经是爆炸、逃亡、喊名或战斗，"
-            "先用动作间隙、感官、内心和对白完成开场桥，再推进任务事件；"
+            "他们为什么现在必须行动。先用动作间隙、感官、内心和对白完成开场桥，"
+            "再推进爆炸、逃亡、喊名、战斗等任务事件；"
             "背景和人物要嵌入观察、对话和选择，不要写成设定说明书，也不要预支后续章节大事件。"
             if chapter_count == 0
-            else "这不是第一章，请延续已有状态、记忆与场景动势。"
+            else ""
+        )
+        requirements = [
+            "人物、地点、时间、未解线程、连续性锚点、因果/动机线与已写正文必须一致；不要遗忘伏笔，也不要把已解决的事情重新写回未解决",
+            "每个关键行动都要能看出“为什么现在做、人物想达成什么、受到什么压力或限制、选择造成什么结果”",
+            "本章必须产生至少一项新的可验证变化；沿用同一地点、目标或冲突时，也要写出新的信息、代价、决定或结果",
+            "严格只写当前这一章。任务卡是当前章节任务的最高优先级来源，不要提前完成下一章或后续章节的大事件",
+        ]
+        if _has_section(sections, "recent_craft_memory") or _has_section(sections, "craft_brief"):
+            requirements.append(
+                "避开近期写法避让和本章创作蓝图中列出的表层重复；同类动作只有在产生新功能、新代价或新关系变化时才能使用"
+            )
+        requirements.extend(
+            [
+                "开章要尽快给读者一个具体钩子；场景推进要有压力、选择、结果，不要只在同一种姿态和情绪里反复停留",
+                "关键场景不能只概括推进，必须让动作、感官、心理和对话交替出现；每章至少产生一项地点、资源、关系或怪物认知的新变化",
+                "结尾可留下明确悬念或过渡，但不要把后续章核心情节直接写完",
+            ]
+        )
+        if _has_section(sections, "reader_setup"):
+            requirements.append("正文要与读者开卷导语保持一致，并用场景、行动、感官、对话和选择重新让读者理解必要设定")
+        requirements.extend(
+            [
+                "输出纯正文，不要章标题、序号、小标题、Markdown 标题",
+                "字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读",
+            ]
         )
         prompt_body = _join_blocks(
             "你是一名长篇小说写作助手。请续写下一章。",
@@ -914,17 +1008,7 @@ def build_writer_prompt(
         return f"""{prompt_body}
 
 要求：
-1. 人物、地点、时间、未解线程、连续性锚点、因果/动机线与已写正文必须一致；不要遗忘伏笔，也不要把已解决的事情重新写回未解决
-2. 每个关键行动都要能看出“为什么现在做、人物想达成什么、受到什么压力或限制、选择造成什么结果”
-3. 本章必须产生至少一项新的可验证变化；若沿用同一地点、目标或冲突，也要写出新的信息、代价、决定或结果
-4. 严格只写当前这一章。任务卡是当前章节任务的最高优先级来源，不要提前完成下一章或后续章节的大事件
-5. 如果提供了“近期写法避让”和“本章创作蓝图”，必须避开其中列出的表层重复；同类动作只有在产生新功能、新代价或新关系变化时才能使用
-6. 开章要尽快给读者一个具体钩子；场景推进要有压力、选择、结果，不要只在同一种姿态和情绪里反复停留
-7. 关键场景不能只概括推进，必须让动作、感官、心理和对话交替出现；每章至少产生一项地点、资源、关系或怪物认知的新变化
-8. 结尾可留下明确悬念或过渡，但不要把后续章核心情节直接写完
-9. 如果提供了“读者开卷导语”，正文要与导语保持一致，但必须用场景、行动、感官、对话和选择重新让读者理解必要设定
-10. 输出纯正文，不要章标题、序号、小标题、Markdown 标题
-11. 字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读
+{_numbered_requirements(requirements)}
 """
 
     world = _to_block(data.get("world", {}))
@@ -945,10 +1029,39 @@ def build_writer_prompt(
         "读者可能会先看到“读者开卷导语”，但正文仍必须独立可读，不能把导语当成已经写过的正文。"
         "开章可以有强钩子，但前 600-1000 字必须把读者入口做成可读场景：故事发生的基本处境、"
         "地点/时间/关键世界规则、至少核心人物的姓名/关系/当前状态，以及他们为什么现在必须行动。"
-        "如果任务事件依赖设定前情，先用动作间隙、感官、内心和对白搭桥；背景和人物要嵌入观察、对话和选择，不要直接跳到任务事件，也不要写成设定说明书。"
+        "用动作间隙、感官、内心和对白为任务事件补足设定前情；背景和人物要嵌入观察、对话和选择，不要直接跳到任务事件，也不要写成设定说明书。"
         if chapter_count == 0
         else ""
     )
+    requirements = [
+        "人物不能 OOC",
+        "不遗忘伏笔、连续性锚点和因果/动机线",
+        "循序渐进推进剧情或场景，不能急于结束或完成；关键行动必须有当前原因、人物目标、压力限制和可见结果",
+        "输出纯正文",
+        "不要输出章标题、序号、小标题、Markdown 标题",
+    ]
+    if user_request.strip():
+        requirements.append("用户额外要求已提供；在不破坏既有设定一致性的前提下优先吸收，并柔和兼容用户意图")
+    if has_chapter_outline:
+        requirements.extend(
+            [
+                "本章分章大纲是当前章节任务的最高优先级来源；不要再自行改写成另一个目标",
+                "本章必须完成分章大纲中的核心任务，同时与所属卷的阶段目标保持一致",
+            ]
+        )
+    if chapter_count == 0:
+        requirements.append("本章是正文第一章，必须先建立背景、人物和行动理由，再推进任务事件")
+    else:
+        requirements.append("本章必须承接已保存的状态与记忆")
+    requirements.extend(
+        [
+            "严格只写当前这一章，不要提前完成下一章或后续章节的大事件",
+            "本章结尾需要承接后续内容时，可以留下明确悬念或过渡，但不要把后续章的核心情节直接写完",
+        ]
+    )
+    if reader_setup:
+        requirements.append("正文要与读者开卷导语保持一致，并用场景、行动、感官、对话和选择重新让读者理解必要设定")
+    requirements.append("字数建议在 3000 字以上、5000 字以下，保持内容的丰富性和可读性")
 
     return f"""你是一名长篇小说写作助手。请续写下一章。
 
@@ -976,8 +1089,7 @@ def build_writer_prompt(
 【本章目标补充说明】
 {fallback_goal_block or "无额外补充；请以本章分章大纲为准。"}
 
-【开篇说明】
-{first_chapter_note or "这不是第一章，请延续已有状态与正文。"}
+{_section_block("开篇说明", first_chapter_note)}
 
 【用户额外要求】
 {user_request_block}
@@ -986,25 +1098,42 @@ def build_writer_prompt(
 {style}
 
 要求：
-1. 人物不能 OOC
-2. 不遗忘伏笔、连续性锚点和因果/动机线
-3. 循序渐进推进剧情或场景，不能急于结束或完成；关键行动必须有当前原因、人物目标、压力限制和可见结果
-4. 输出纯正文
-5. 不要输出章标题、序号、小标题、Markdown 标题
-6. 如果用户额外要求与既有设定不冲突，优先吸收；若有冲突，以既有设定一致性为先，并尽量柔和地兼容用户意图
-7. 如果提供了“本章分章大纲”，它就是当前章节任务的最高优先级来源；不要再自行改写成另一个目标
-8. 本章必须完成分章大纲中的核心任务，同时与所属卷的阶段目标保持一致
-9. 严格只写当前这一章，不要提前完成下一章或后续章节的大事件
-10. 如果本章结尾需要承接后续内容，可以留下明确悬念或过渡，但不要把后续章的核心情节直接写完
-11. 第一章必须先建立背景、人物和行动理由，再推进任务事件；后续章节必须承接已保存的状态与记忆
-12. 如果提供了“读者开卷导语”，正文要与导语保持一致，但必须用场景、行动、感官、对话和选择重新让读者理解必要设定
-13. 字数建议在 3000 字以上、5000 字以下，保持内容的丰富性和可读性
+{_numbered_requirements(requirements)}
 """
 
 
 def build_quality_review_prompt(data: dict, draft_text: str, *, strict: bool = False) -> str:
     sections = data.get("sections", {}) if isinstance(data, dict) else {}
     threshold_note = "高质量模式：评分要严格，重复动作、无效拖延、弱钩子都应指出。" if strict else "平衡模式：重点识别明显问题。"
+    requirements = [
+        "输出必须是合法 JSON",
+        "七个分项分数都用 0 到 10，分数越高越好",
+        "`repetition_risk` 的高分代表重复风险低、写法新鲜；低分代表动作/句式/场景结构复用明显",
+        "`motivation_causality` 检查关键行动是否有明确动因、压力、选择和结果",
+    ]
+    if _has_section(sections, "craft_brief"):
+        requirements.append("重点检查“本章创作蓝图”里的验收标准是否兑现；未兑现的必须写入 `blocking_issues` 或 `issues`")
+    requirements.append(
+        "单独检查“平淡度”：开章钩子弱、角色声音泛、场景新鲜度低、互动火花不足、概括性叙述过多，都要压低对应分项并写入 `issues` 或 `nice_to_have`"
+    )
+    if _has_section(sections, "opening_contract"):
+        requirements.append(
+            "本章是正文第一章；必须检查草稿是否把工程设定转成读者可理解的开场，直接跳到任务事件、默认人物关系已知或缺少行动理由时，要压低 `reader_hook` 与 `motivation_causality`，严重时列为 blocker"
+        )
+    if _has_section(sections, "reader_setup"):
+        requirements.append("必须检查草稿是否与读者开卷导语公开信息一致，同时不能因为有导语就省略正文内必要交代")
+    requirements.extend(
+        [
+            '`passed` 表示是否可以作为最终章节保存；有 `severity="blocker"` 的问题时必须为 false',
+            "`score_reasons` 为低分或关键分项给出一句具体理由",
+            "`blocking_issues` 只放会阻止保存的硬伤，每项包含 `category`、`severity`、`issue`、`evidence`、`fix`",
+            "`nice_to_have` 放不阻止保存但值得优化的问题",
+            "`rewrite_plan` 给出可直接交给改稿模型执行的 2 到 6 步修订方案",
+            "`revision_guidance` 必须具体指出需要如何改，不要泛泛而谈",
+            "`review_unavailable` 正常审稿时必须为 false",
+            "不要输出解释，不要输出 Markdown",
+        ]
+    )
     prompt_body = _join_blocks(
         "你是一名长篇小说责任编辑。请审阅这章草稿是否完成任务、是否吸引人、是否重复上一章写法。",
         _section_block("审稿模式", threshold_note),
@@ -1022,22 +1151,7 @@ def build_quality_review_prompt(data: dict, draft_text: str, *, strict: bool = F
     return f"""{prompt_body}
 
 要求：
-1. 输出必须是合法 JSON
-2. 七个分项分数都用 0 到 10，分数越高越好
-3. `repetition_risk` 的高分代表重复风险低、写法新鲜；低分代表动作/句式/场景结构复用明显
-4. `motivation_causality` 检查关键行动是否有明确动因、压力、选择和结果
-5. 重点检查“本章创作蓝图”里的验收标准是否兑现；未兑现的必须写入 `blocking_issues` 或 `issues`
-6. 单独检查“平淡度”：开章钩子弱、角色声音泛、场景新鲜度低、互动火花不足、概括性叙述过多，都要压低对应分项并写入 `issues` 或 `nice_to_have`
-7. 如果提供了“首章读者入口约束”，必须检查草稿是否把工程设定转成读者可理解的开场；若直接跳到任务事件、默认人物关系已知或缺少行动理由，要压低 `reader_hook` 与 `motivation_causality`，严重时列为 blocker
-8. 如果提供了“读者开卷导语”，必须检查草稿是否与导语公开信息一致，同时不能因为有导语就省略正文内必要交代
-9. `passed` 表示是否可以作为最终章节保存；有 `severity="blocker"` 的问题时必须为 false
-10. `score_reasons` 为低分或关键分项给出一句具体理由
-11. `blocking_issues` 只放会阻止保存的硬伤，每项包含 `category`、`severity`、`issue`、`evidence`、`fix`
-12. `nice_to_have` 放不阻止保存但值得优化的问题
-13. `rewrite_plan` 给出可直接交给改稿模型执行的 2 到 6 步修订方案
-14. `revision_guidance` 必须具体指出需要如何改，不要泛泛而谈
-15. `review_unavailable` 正常审稿时必须为 false
-16. 不要输出解释，不要输出 Markdown
+{_numbered_requirements(requirements)}
 
 输出 JSON 骨架：
 {{"schema_version":2,"scores":{{"task_completion":0,"reader_hook":0,"scene_freshness":0,"character_specificity":0,"motivation_causality":0,"repetition_risk":0,"continuity":0}},"score_reasons":{{"task_completion":"","reader_hook":"","scene_freshness":"","character_specificity":"","motivation_causality":"","repetition_risk":"","continuity":""}},"passed":false,"review_unavailable":false,"strengths":[],"issues":[],"blocking_issues":[{{"category":"","severity":"blocker","issue":"","evidence":"","fix":""}}],"nice_to_have":[],"revision_guidance":"","rewrite_plan":[],"repeat_examples":[]}}
@@ -1047,6 +1161,21 @@ def build_quality_review_prompt(data: dict, draft_text: str, *, strict: bool = F
 def build_rewrite_prompt(data: dict, draft_text: str, review_report: dict) -> str:
     sections = data.get("sections", {}) if isinstance(data, dict) else {}
     review_block = _to_block(review_report)
+    requirements = [
+        "保留已经正确完成的剧情目标和连续性",
+        "优先修复审稿报告中的 `blocking_issues`、低分项和 `rewrite_plan`",
+        "尤其注意重复动作、弱钩子、场景空转、人物反应泛化、关键行动缺少原因",
+    ]
+    if _has_section(sections, "opening_contract"):
+        requirements.append("本章是正文第一章；重写时必须补足读者入口，再推进任务卡事件，不要默认读者知道设定文件里的前情")
+    if _has_section(sections, "reader_setup"):
+        requirements.append("重写后要与读者开卷导语公开信息一致；正文仍要独立可读，不能把导语当作已发生正文")
+    requirements.extend(
+        [
+            "不要写改稿说明，不要输出 JSON，不要输出 Markdown 标题",
+            "输出纯正文，字数建议仍在 3000 字以上、5000 字以下",
+        ]
+    )
     prompt_body = _join_blocks(
         "你是一名长篇小说改稿助手。请根据审稿意见重写当前章节，并只输出重写后的完整正文。",
         _section_block("作者意图", sections.get("author_intent", "")),
@@ -1064,13 +1193,7 @@ def build_rewrite_prompt(data: dict, draft_text: str, review_report: dict) -> st
     return f"""{prompt_body}
 
 要求：
-1. 保留已经正确完成的剧情目标和连续性
-2. 优先修复审稿报告中的 `blocking_issues`、低分项和 `rewrite_plan`
-3. 尤其注意重复动作、弱钩子、场景空转、人物反应泛化、关键行动缺少原因
-4. 如果提供了“首章读者入口约束”，重写时必须补足读者入口，再推进任务卡事件；不要默认读者知道设定文件里的前情
-5. 如果提供了“读者开卷导语”，重写后要与导语公开信息一致，但正文仍要独立可读，不能把导语当作已发生正文
-6. 不要写改稿说明，不要输出 JSON，不要输出 Markdown 标题
-7. 输出纯正文，字数建议仍在 3000 字以上、5000 字以下
+{_numbered_requirements(requirements)}
 """
 
 
@@ -1092,7 +1215,7 @@ def build_summary_prompt(data: dict, new_text: str) -> str:
 3. `open_threads` 只保留仍未解决的问题，已解决的写入 `resolved_threads`
 4. `active_characters` 只保留本章真正参与推进的角色
 5. `chapter_summary` 用 1 到 2 句话概括本章核心推进
-6. `next_chapter_goal` 写本章结束后最该继续推进的一步；如果本章主任务已完成，不要直接重复任务卡原句
+6. `next_chapter_goal` 写本章结束后最该继续推进的一步；本章主任务已完成时，不要直接重复任务卡原句
 7. `continuity_anchors` 记录后续必须记住且不能随意改写的事实、限制、资源状态、关系变化或承诺
 8. `causal_links` 记录本章形成的行动原因链：因为什么压力/信息，谁决定做什么，导致什么新局面
 9. `retrieval_tags` 给出便于后续检索的简短标签

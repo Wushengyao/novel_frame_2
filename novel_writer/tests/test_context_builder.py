@@ -19,6 +19,7 @@ from context_builder import (
     select_recent_scene_window,
 )
 from prompt_builder import (
+    build_auto_objective_prompt,
     build_batch_chapter_plan_prompt,
     build_chapter_outline_prompt,
     build_craft_brief_prompt,
@@ -313,6 +314,84 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertIn("开篇困境", context["sections"]["static_world"])
             self.assertIn("reader_setup", context["sections"])
             self.assertIn("读者入口", context["task_card"]["plan_steps"][0])
+
+    def test_non_first_prompts_skip_first_chapter_branch_instructions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="non_first_branching", planning_mode="chapter")
+            project = load_json(str(project_path / "project.json"))
+            project["chapter_count"] = 1
+            save_json(str(project_path / "project.json"), project)
+            (project_path / "chapters" / "chapter_0001.md").write_text("第一章正文。", encoding="utf-8")
+            save_json(
+                str(project_path / "summaries" / "summary_0001.json"),
+                {
+                    "chapter_summary": "三人建立临时安全区。",
+                    "current_location": "空间站隔离区",
+                    "current_time": "入侵后第48小时",
+                    "current_arc": "开篇阶段",
+                    "recent_events": ["建立临时安全区"],
+                    "open_threads": [],
+                    "resolved_threads": [],
+                    "foreshadowing": [],
+                    "continuity_anchors": ["隔离区门已封好"],
+                    "causal_links": ["确认安全需求后封门"],
+                    "character_updates": [],
+                    "active_characters": ["林宇", "苏浅"],
+                    "retrieval_tags": ["安全区"],
+                    "next_chapter_goal": "尝试离开隔离区",
+                },
+            )
+            project_data = load_project(str(project_path))
+            next_context = {
+                "volume": project_data["outlines"]["volumes"][0],
+                "chapter": project_data["outlines"]["volumes"][0]["chapters"][1],
+            }
+
+            writer_context = build_writer_context(
+                str(project_path),
+                project_data,
+                next_context,
+                "第一章正文。",
+                planning_mode="chapter",
+            )
+            progression_context = build_progression_context(
+                str(project_path),
+                project_data,
+                next_context,
+                "第一章正文。",
+                user_request="",
+                option_count=4,
+                planning_mode="chapter",
+            )
+            combined_prompt = "\n".join(
+                [
+                    build_writer_prompt(writer_context),
+                    build_progression_options_prompt(
+                        progression_context,
+                        "第一章正文。",
+                        next_context,
+                        user_request="",
+                        option_count=4,
+                        planning_mode="chapter",
+                    ),
+                    build_auto_objective_prompt(
+                        progression_context,
+                        "第一章正文。",
+                        next_context,
+                        user_request="",
+                        planning_mode="chapter",
+                    ),
+                ]
+            )
+
+            self.assertEqual(writer_context["sections"].get("opening_contract"), "")
+            self.assertEqual(progression_context["sections"].get("opening_contract"), "")
+            self.assertNotIn("首章读者入口约束", combined_prompt)
+            self.assertNotIn("读者开卷导语（读者可见）", combined_prompt)
+            self.assertNotIn("当前将要写的是第一章", combined_prompt)
+            self.assertNotIn("如果提供了", combined_prompt)
+            self.assertNotIn("如果这是第一章", combined_prompt)
+            self.assertNotIn("读者尚未看见", combined_prompt)
 
     def test_first_chapter_selected_progression_task_card_prepends_reader_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

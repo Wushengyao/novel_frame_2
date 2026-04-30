@@ -680,6 +680,13 @@ def _build_creative_contract_block(author_intent: dict, *, max_chars: int) -> st
         lines.append(f"场景承诺: {'；'.join(_trim_text(item, 64) for item in intent['scene_promises'][:5])}")
     if intent["anti_flat_rules"]:
         lines.append(f"平淡规避: {'；'.join(_trim_text(item, 64) for item in intent['anti_flat_rules'][:4])}")
+    adult_boundary_source = " ".join(
+        [intent.get("tone_contract", ""), *intent["voice_rules"], *intent["must_not_break"]]
+    )
+    if any(marker in adult_boundary_source for marker in ("成人", "暧昧", "黄段子", "露骨")):
+        boundary = "成人暧昧只写成年人之间的张力、调侃、照料和感官氛围，不写露骨性行为。"
+        if not any(_is_duplicateish(boundary, line) for line in lines):
+            lines.append(f"边界: {boundary}")
     if intent.get("creativity_guidance"):
         lines.append(f"创作弹性: {_trim_text(intent['creativity_guidance'], 100)}")
     return _trim_text("\n".join(lines), max_chars)
