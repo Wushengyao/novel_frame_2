@@ -5065,6 +5065,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <p><strong>Quality:</strong>{escape(_quality_mode_label((project.get("llm_config") or {}).get("writing_quality_mode", DEFAULT_WRITING_QUALITY_MODE)))}</p>
               <p><strong>Review:</strong>{escape(_review_mode_label((project.get("llm_config") or {}).get("review_mode", DEFAULT_REVIEW_MODE)))}</p>
               <p><strong>Quality Model:</strong>{escape(_quality_model_label(project.get("llm_config") or {}))}</p>
+              <p><strong>Audiobook Segment Model:</strong>{escape(_audiobook_segment_model_label(project.get("llm_config") or {}))}</p>
               <p><strong>Expert Mode:</strong>{escape(_expert_mode_label(project.get("llm_config") or {}))}</p>
             </section>
             <section class="panel">
@@ -6252,6 +6253,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 <p><strong>Quality:</strong>{escape(_quality_mode_label(project_llm_config.get("writing_quality_mode", DEFAULT_WRITING_QUALITY_MODE)))}</p>
                 <p><strong>Review:</strong>{escape(_review_mode_label(project_llm_config.get("review_mode", DEFAULT_REVIEW_MODE)))}</p>
                 <p><strong>Quality Model:</strong>{escape(_quality_model_label(project_llm_config))}</p>
+                <p><strong>Audiobook Segment Model:</strong>{escape(_audiobook_segment_model_label(project_llm_config))}</p>
                 <p><strong>Expert Mode:</strong>{escape(_expert_mode_label(project_llm_config))}</p>
               </div>
             </section>

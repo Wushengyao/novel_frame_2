@@ -112,6 +112,38 @@ class AudiobookManagerTests(unittest.TestCase):
         self.assertEqual(inner[0]["text"], "苏浅握紧工具，心里想，不能让他发现。")
         self.assertEqual(inner[0]["performance_instruction"], "紧张，压低声音，停顿明显")
 
+    def test_parse_chapter_segments_uses_independent_audiobook_segment_model(self) -> None:
+        characters = load_json(str(self.project_path / "characters.json"))
+        chapter_text = "Lin Yu said: \"Check the door.\""
+        response_payload = {
+            "segments": [
+                {"id": "unit_0001", "type": "narration", "speaker": "narrator"},
+                {"id": "unit_0002", "type": "dialogue", "speaker": "鏋楀畤"},
+            ]
+        }
+        llm_config = {
+            "model_provider": "ollama",
+            "model": "llama3.2",
+            "api_base": "http://127.0.0.1:11434/v1",
+            "audiobook_segment_model": {
+                "model_provider": "gemini",
+                "model_name": "gemini-2.5-flash",
+                "api_key": "gemini-key",
+            },
+        }
+
+        with patch(
+            "audiobook_manager.generate_text_with_metadata",
+            return_value=(json.dumps(response_payload, ensure_ascii=False), {"usage": {"total_tokens": 12}}),
+        ) as mocked_llm:
+            parse_chapter_segments(chapter_text, characters, llm_config=llm_config)
+
+        used_config = mocked_llm.call_args.args[1]
+        self.assertEqual(used_config["model_provider"], "gemini")
+        self.assertEqual(used_config["model_name"], "gemini-2.5-flash")
+        self.assertEqual(used_config["api_key"], "gemini-key")
+        self.assertEqual(used_config["temperature"], 0.2)
+
     def test_split_text_for_tts_keeps_chunks_under_hard_limit(self) -> None:
         text = "。".join(["这是一段需要稳定切分的长句子" * 4 for _ in range(5)])
 

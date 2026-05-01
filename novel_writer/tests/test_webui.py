@@ -1036,6 +1036,26 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(config["quality_model"]["api_key"], "gemini-key")
         self.assertEqual(config["quality_model"]["temperature"], "0.2")
 
+    def test_runtime_config_resolves_audiobook_segment_model_overrides(self) -> None:
+        project = load_json(str(self.project_path / "project.json"))
+        project["llm_config"]["audiobook_segment_model"] = {
+            "model_provider": "gemini",
+            "model_name": "gemini-2.5-pro",
+            "api_key": "",
+        }
+        save_json(str(self.project_path / "project.json"), project)
+
+        config = webui._build_runtime_config(
+            self.project_path,
+            {"audiobook_segment_model": {"model_name": "gemini-2.5-flash"}},
+            {"OLLAMA_API_KEY": "", "GEMINI_API_KEY": "gemini-key"},
+        )
+
+        self.assertEqual(config["model_name"], "llama3.2")
+        self.assertEqual(config["audiobook_segment_model"]["model_provider"], "gemini")
+        self.assertEqual(config["audiobook_segment_model"]["model_name"], "gemini-2.5-flash")
+        self.assertEqual(config["audiobook_segment_model"]["api_key"], "gemini-key")
+
     def test_runtime_config_resolves_expert_mode_and_forces_logging(self) -> None:
         project = load_json(str(self.project_path / "project.json"))
         project["llm_config"]["expert_mode"] = {
@@ -1092,6 +1112,28 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         )
 
         self.assertEqual(legacy_overrides["quality_model"]["model_name"], "gemini-legacy-reviewer")
+
+    def test_runtime_overrides_include_audiobook_segment_model_fields(self) -> None:
+        overrides = webui._runtime_overrides_from_form(
+            {
+                "audiobook_segment_provider": "gemini",
+                "audiobook_segment_model_preset": "gemini-2.5-flash",
+                "audiobook_segment_max_tokens": "3000",
+            }
+        )
+
+        self.assertEqual(overrides["audiobook_segment_model"]["model_provider"], "gemini")
+        self.assertEqual(overrides["audiobook_segment_model"]["model_name"], "gemini-2.5-flash")
+        self.assertEqual(overrides["audiobook_segment_model"]["max_tokens"], "3000")
+
+        overrides = webui._runtime_overrides_from_form(
+            {
+                "audiobook_segment_model_preset": "gemini-2.5-flash",
+                "audiobook_segment_model_name_custom": "gemini-custom-segmenter",
+            }
+        )
+
+        self.assertEqual(overrides["audiobook_segment_model"]["model_name"], "gemini-custom-segmenter")
 
     def test_runtime_overrides_includes_log_llm_payload_when_checked(self) -> None:
         overrides = webui._runtime_overrides_from_form(
@@ -1558,6 +1600,47 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         voices = load_json(str(self.project_path / "audiobook" / "voices.json"))
         self.assertTrue(voices["character_voices"]["林宇"]["reference_audio"].startswith("audiobook/voice_refs/"))
         self.assertEqual(voices["character_voices"]["林宇"]["prompt_text"], "这是参考文本")
+
+    def test_audiobook_endpoint_passes_independent_segment_llm_config(self) -> None:
+        (self.project_path / "chapters" / "chapter_0001.md").write_text(
+            "Chapter one text.",
+            encoding="utf-8",
+        )
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 1
+        save_json(str(self.project_path / "project.json"), project)
+
+        with patch(
+            "webui.generate_audiobook_chapters",
+            return_value=[
+                {
+                    "chapter_slug": "chapter_0001",
+                    "combined_audio": "audiobook/chapter_0001/chapter_0001.wav",
+                    "reused": False,
+                }
+            ],
+        ) as mocked_generate, patch("webui._load_api_keys", return_value={"OLLAMA_API_KEY": "", "GEMINI_API_KEY": "gemini-key"}):
+            response = self._post_multipart(
+                "/project/web/audiobook",
+                {
+                    "chapter_slug": "chapter_0001",
+                    "generation_mode": "simple",
+                    "audiobook_segment_provider": "gemini",
+                    "audiobook_segment_model_preset": "gemini-2.5-flash",
+                    "audiobook_segment_timeout": "240",
+                },
+                {},
+            )
+            self.assertEqual(response.status, 303)
+            job_id = response.getheader("Location").rsplit("/", 1)[-1]
+            self._wait_for_job_status(job_id)
+
+        _, kwargs = mocked_generate.call_args
+        segment_model = kwargs["llm_config"]["audiobook_segment_model"]
+        self.assertEqual(segment_model["model_provider"], "gemini")
+        self.assertEqual(segment_model["model_name"], "gemini-2.5-flash")
+        self.assertEqual(segment_model["api_key"], "gemini-key")
+        self.assertEqual(segment_model["timeout"], "240")
 
     def test_audiobook_endpoint_generates_missing_chapters_in_batch(self) -> None:
         for index in range(1, 4):

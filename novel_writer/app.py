@@ -237,6 +237,18 @@ def _expert_mode_overrides_from_args(args: argparse.Namespace) -> dict:
     )
 
 
+def _audiobook_segment_model_overrides_from_args(args: argparse.Namespace) -> dict:
+    return sanitize_runtime_overrides(
+        {
+            "audiobook_segment_provider": getattr(args, "audiobook_segment_provider", None),
+            "audiobook_segment_model_name": getattr(args, "audiobook_segment_model", None),
+            "audiobook_segment_api_base": getattr(args, "audiobook_segment_api_base", None),
+            "audiobook_segment_max_tokens": getattr(args, "audiobook_segment_max_tokens", None),
+            "audiobook_segment_timeout": getattr(args, "audiobook_segment_timeout", None),
+        }
+    )
+
+
 def _launch_background_illustration_job(
     project_path: str,
     *,
@@ -720,6 +732,17 @@ def _print_status(project_path: str) -> None:
         print(f"Quality Model: {quality_provider}/{quality_model_name}")
     else:
         print("Quality Model: inherit main")
+    audiobook_segment_model = (
+        llm_config.get("audiobook_segment_model")
+        if isinstance(llm_config.get("audiobook_segment_model"), dict)
+        else {}
+    )
+    if audiobook_segment_model:
+        segment_provider = audiobook_segment_model.get("model_provider") or llm_config.get("model_provider", "")
+        segment_model_name = audiobook_segment_model.get("model_name") or audiobook_segment_model.get("model") or "default"
+        print(f"Audiobook Segment Model: {segment_provider}/{segment_model_name}")
+    else:
+        print("Audiobook Segment Model: inherit main")
     expert_mode = llm_config.get("expert_mode") if isinstance(llm_config.get("expert_mode"), dict) else {}
     expert_models = expert_mode.get("models") if isinstance(expert_mode.get("models"), list) else []
     print(f"Expert Mode: {'enabled' if expert_mode_enabled(llm_config) else 'disabled'}")
@@ -887,6 +910,11 @@ def main() -> None:
     audiobook_parser.add_argument("--all", action="store_true", help="Generate audiobook WAV files for all chapters")
     audiobook_parser.add_argument("--force", action="store_true", help="Regenerate existing audiobook files")
     audiobook_parser.add_argument("--config", help="Optional config.json for LLM speaker classification")
+    audiobook_parser.add_argument("--audiobook-segment-provider", help="Override provider for audiobook text classification")
+    audiobook_parser.add_argument("--audiobook-segment-model", help="Override model name for audiobook text classification")
+    audiobook_parser.add_argument("--audiobook-segment-api-base", help="Override API base for audiobook text classification")
+    audiobook_parser.add_argument("--audiobook-segment-max-tokens", type=int, help="Override max tokens for audiobook text classification")
+    audiobook_parser.add_argument("--audiobook-segment-timeout", type=int, help="Override timeout for audiobook text classification")
     audiobook_parser.add_argument("--narrator-preset", default="", help="Narrator preset id to use")
     audiobook_parser.add_argument(
         "--audiobook-mode",
@@ -1124,6 +1152,17 @@ def main() -> None:
         elif not chapter_refs:
             chapter_refs = [args.chapter]
         config = extract_llm_config(args.config) if args.config else load_runtime_config(args.project)
+        segment_overrides = _audiobook_segment_model_overrides_from_args(args)
+        if segment_overrides.get("audiobook_segment_model"):
+            existing_segment_model = (
+                config.get("audiobook_segment_model")
+                if isinstance(config.get("audiobook_segment_model"), dict)
+                else {}
+            )
+            config["audiobook_segment_model"] = merge_quality_model_configs(
+                existing_segment_model,
+                segment_overrides["audiobook_segment_model"],
+            )
         results = generate_audiobook_chapters(
             args.project,
             chapter_refs=chapter_refs,
