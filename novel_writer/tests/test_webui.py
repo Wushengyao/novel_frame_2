@@ -1256,6 +1256,48 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self._wait_for_job_status(location.rsplit("/", 1)[-1])
         mocked_run_next_chapters.assert_called_once()
 
+    def test_audiobook_async_allows_same_project_when_continue_job_active(self) -> None:
+        (self.project_path / "chapters" / "chapter_0001.md").write_text(
+            "Chapter one text.",
+            encoding="utf-8",
+        )
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 1
+        save_json(str(self.project_path / "project.json"), project)
+        webui.JOB_REGISTRY.create_job(
+            kind="continue",
+            title="existing continue",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+        )
+
+        with patch(
+            "webui.generate_audiobook_chapters",
+            return_value=[
+                {
+                    "chapter_slug": "chapter_0001",
+                    "combined_audio": "audiobook/chapter_0001/chapter_0001.wav",
+                    "reused": False,
+                }
+            ],
+        ) as mocked_generate:
+            response = self._post_multipart(
+                "/project/web/audiobook",
+                {
+                    "chapter_slug": "chapter_0001",
+                    "generation_mode": "simple",
+                    "narrator_preset": "calm_male",
+                },
+                {},
+            )
+
+        self.assertEqual(response.status, 303)
+        location = response.getheader("Location")
+        self.assertTrue(location.startswith("/job/"))
+        job = self._wait_for_job_status(location.rsplit("/", 1)[-1])
+        self.assertEqual(job["kind"], "audiobook")
+        mocked_generate.assert_called_once()
+
     def test_create_project_async_starts_followup_progression_job(self) -> None:
         session_payload = {
             "session_id": "session_project_bootstrap",
@@ -1320,6 +1362,23 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(page.status, 200)
         self.assertIn("有声章节正在生成中，可以继续续写", page.body)
         self.assertNotIn("为避免并发写入冲突", page.body)
+
+    def test_project_page_allows_audiobook_form_during_continue_job(self) -> None:
+        webui.JOB_REGISTRY.create_job(
+            kind="continue",
+            title="existing continue",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+        )
+
+        page = self._get("/project/web")
+
+        self.assertEqual(page.status, 200)
+        form_marker = 'action="/project/web/audiobook" enctype="multipart/form-data">'
+        form_start = page.body.index(form_marker)
+        form_fragment = page.body[form_start : form_start + 120]
+        self.assertIn("<fieldset>", form_fragment)
+        self.assertNotIn("<fieldset disabled>", form_fragment)
 
     def test_chapter_page_shows_polish_form(self) -> None:
         (self.project_path / "chapters" / "chapter_0001.md").write_text(

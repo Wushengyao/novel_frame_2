@@ -999,6 +999,54 @@ def _quality_model_label(llm_config: dict) -> str:
     return "inherit main"
 
 
+def _audiobook_segment_model_from_form(form: dict[str, str], api_keys: dict[str, str] | None = None) -> dict:
+    provider = _normalize_provider_for_ui(form.get("audiobook_segment_provider"), default="")
+    model_name = _resolve_aux_model_name_from_form(
+        form,
+        custom_key="audiobook_segment_model_name_custom",
+        preset_key="audiobook_segment_model_preset",
+        legacy_key="audiobook_segment_model_name",
+    )
+    api_base = (form.get("audiobook_segment_api_base") or "").strip()
+    model_config: dict[str, object] = {}
+    if provider:
+        model_config["model_provider"] = provider
+    if model_name:
+        model_config["model_name"] = model_name
+        model_config["model"] = model_name
+    if api_base:
+        model_config["api_base"] = api_base
+    for form_key, config_key in (
+        ("audiobook_segment_max_tokens", "max_tokens"),
+        ("audiobook_segment_timeout", "timeout"),
+    ):
+        value = (form.get(form_key) or "").strip()
+        if value:
+            model_config[config_key] = value
+    if provider and api_keys is not None:
+        model_config["api_key"] = _api_key_for_provider(provider, api_keys)
+    return model_config
+
+
+def _audiobook_segment_model_label(llm_config: dict) -> str:
+    segment_model = (
+        llm_config.get("audiobook_segment_model")
+        if isinstance(llm_config.get("audiobook_segment_model"), dict)
+        else {}
+    )
+    if not segment_model:
+        return "inherit main"
+    provider = str(segment_model.get("model_provider") or llm_config.get("model_provider") or "").strip()
+    model = str(segment_model.get("model_name") or segment_model.get("model") or "").strip()
+    if provider and model:
+        return f"{provider}/{model}"
+    if provider:
+        return f"{provider}/default"
+    if model:
+        return f"main/{model}"
+    return "inherit main"
+
+
 def _expert_mode_from_form(form: dict[str, str], api_keys: dict[str, str] | None = None) -> dict:
     enabled = bool(form.get("expert_mode_enabled"))
     models = []
@@ -1488,6 +1536,7 @@ def _runtime_overrides_from_form(form: dict[str, str]) -> dict[str, object]:
             "api_base": form.get("api_base"),
             "log_llm_payload": "1" if log_llm_payload else "",
             "quality_model": _quality_model_from_form(form),
+            "audiobook_segment_model": _audiobook_segment_model_from_form(form),
         }
     )
 
@@ -1932,6 +1981,9 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_cal
     quality_model = _quality_model_from_form(form, api_keys)
     if quality_model:
         config["quality_model"] = quality_model
+    audiobook_segment_model = _audiobook_segment_model_from_form(form, api_keys)
+    if audiobook_segment_model:
+        config["audiobook_segment_model"] = audiobook_segment_model
     expert_mode = _expert_mode_from_form(form, api_keys)
     if expert_mode:
         config["expert_mode"] = expert_mode
@@ -2231,6 +2283,63 @@ def _render_audiobook_mode_options(project_path: Path, selected: str = "") -> st
         selected_attr = ' selected' if value == active else ""
         options.append(f'<option value="{escape(value)}"{selected_attr}>{escape(labels[value])}</option>')
     return "".join(options)
+
+
+def _render_audiobook_segment_model_fields(base_provider: str = "gemini", base_model: str = "") -> str:
+    effective_provider = _normalize_provider_for_ui(base_provider, default="gemini")
+    blank_label = _model_blank_label(
+        effective_provider,
+        base_model=base_model,
+        provider_explicit=False,
+    )
+    return f"""
+    <details>
+      <summary>旁白 / 角色识别 LLM</summary>
+      <div class="two-col">
+        <label>分类 Provider
+          <select
+            name="audiobook_segment_provider"
+            data-model-provider-select
+            data-model-target="audiobook-segment"
+            data-base-provider="{escape(effective_provider)}"
+          >
+            {_render_quality_provider_options()}
+          </select>
+        </label>
+        <label>分类 Model
+          <select
+            name="audiobook_segment_model_preset"
+            data-model-preset-select
+            data-model-target="audiobook-segment"
+            data-base-model="{escape(base_model)}"
+          >
+            {_render_model_preset_options(effective_provider, blank_label=blank_label)}
+          </select>
+        </label>
+      </div>
+      <label>分类 Custom Model（可选）
+        <input
+          type="text"
+          name="audiobook_segment_model_name_custom"
+          data-model-custom-input
+          data-model-target="audiobook-segment"
+          placeholder="预设里没有时再手填 Model ID"
+        >
+      </label>
+      <div class="two-col">
+        <label>分类 API Base
+          <input type="text" name="audiobook_segment_api_base" placeholder="inherit or provider default">
+        </label>
+        <label>分类 Timeout
+          <input type="number" name="audiobook_segment_timeout" placeholder="inherit or provider default">
+        </label>
+      </div>
+      <label>分类 Max Tokens
+        <input type="number" name="audiobook_segment_max_tokens" placeholder="inherit main">
+      </label>
+      <div class="muted">只用于生成音频前的旁白、台词、心理活动和引用分类；留空则继承项目主模型。</div>
+    </details>
+    """
 
 
 def _project_character_names(project_path: Path) -> list[str]:
@@ -5167,6 +5276,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         audiobook_busy = _active_audiobook_job(project_path) is not None
         destructive_busy = project_busy or audiobook_busy
         busy_attr = " disabled" if project_busy else ""
+        audiobook_busy_attr = " disabled" if audiobook_busy else ""
         destructive_busy_attr = " disabled" if destructive_busy else ""
         busy_notice = (
             '<div class="warning-box">当前项目有后台任务正在运行。为避免并发写入冲突，章节润色暂时禁用。</div>'
@@ -5285,7 +5395,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <h2>本章有声小说</h2>
             {audiobook_player_html}
             <form method="post" action="/project/{escape(project_id)}/audiobook" enctype="multipart/form-data">
-              <fieldset{destructive_busy_attr}>
+              <fieldset{audiobook_busy_attr}>
                 <input type="hidden" name="chapter_slug" value="{escape(chapter_slug)}">
                 <label>生成模式
                   <select name="generation_mode">
@@ -5995,6 +6105,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             active_job=progression_jobs[0] if progression_jobs else None,
         )
         busy_attr = " disabled" if project_busy else ""
+        audiobook_busy_attr = " disabled" if audiobook_busy else ""
         destructive_busy_attr = " disabled" if destructive_busy else ""
         busy_notice = (
             '<div class="warning-box">当前项目有后台任务正在运行。为避免并发写入冲突，续写、回滚和插图表单已暂时禁用。你可以打开上方任务卡片查看实时进度。</div>'
@@ -6247,7 +6358,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <section class="panel">
               <h3>有声小说</h3>
               <form method="post" action="/project/{escape(project_id)}/audiobook" enctype="multipart/form-data">
-                <fieldset{destructive_busy_attr}>
+                <fieldset{audiobook_busy_attr}>
                   <label>生成范围
                     <select name="audiobook_scope">
                       <option value="single">选定章节</option>
@@ -6743,9 +6854,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 project_id=project_id,
                 project_path=str(project_path.resolve()),
                 blocks_project=False,
-                conflicts_with_blocking=True,
                 conflict_kinds=AUDIOBOOK_JOB_KINDS,
-                busy_message="当前项目已有后台任务在运行，请稍后再生成有声章节。",
+                busy_message="当前项目已有有声章节生成任务在运行，请稍后再生成有声章节。",
             )
         except Exception as exc:
             _discard_checkpoint(cancel_checkpoint)

@@ -30,6 +30,7 @@ from external_services import (
 )
 from llm_client import generate_text_with_metadata
 from project_manager import acquire_project_audio_lock, load_json, load_project, save_json, update_project_stats
+from runtime_config import resolve_audiobook_segment_model_config
 
 
 AUDIOBOOK_DIR_NAME = "audiobook"
@@ -1134,13 +1135,17 @@ def parse_chapter_segments(
     config = dict(DEFAULT_SPLIT_CONFIG)
     config.update(split_config or {})
 
-    if _llm_config_available(llm_config):
+    segment_llm_config = llm_config
+    if isinstance(llm_config, dict):
+        segment_llm_config, _ = resolve_audiobook_segment_model_config(llm_config)
+
+    if _llm_config_available(segment_llm_config):
         try:
             emit_progress(progress_callback, "audiobook_segment_llm", "正在用 LLM 分辨旁白、台词、心理活动和引号引用")
             segments, metadata = _parse_segments_with_llm(
                 chapter_text,
                 characters,
-                llm_config=llm_config or {},
+                llm_config=segment_llm_config or {},
                 split_config=config,
             )
             _update_audiobook_llm_stats(project_path, success=True, metadata=metadata)

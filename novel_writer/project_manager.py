@@ -615,8 +615,8 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return merged
 
 
-def _build_quality_model_config(config: dict, *, include_api_key: bool) -> dict:
-    raw = config.get("quality_model") if isinstance(config.get("quality_model"), dict) else {}
+def _build_aux_model_config(config: dict, key: str, *, include_api_key: bool) -> dict:
+    raw = config.get(key) if isinstance(config.get(key), dict) else {}
     quality_model: dict[str, object] = {}
     provider = str(raw.get("model_provider") or raw.get("provider") or "").strip().lower()
     if provider:
@@ -637,6 +637,14 @@ def _build_quality_model_config(config: dict, *, include_api_key: bool) -> dict:
         if value not in (None, ""):
             quality_model[key] = value
     return quality_model
+
+
+def _build_quality_model_config(config: dict, *, include_api_key: bool) -> dict:
+    return _build_aux_model_config(config, "quality_model", include_api_key=include_api_key)
+
+
+def _build_audiobook_segment_model_config(config: dict, *, include_api_key: bool) -> dict:
+    return _build_aux_model_config(config, "audiobook_segment_model", include_api_key=include_api_key)
 
 
 def _coerce_config_bool(value: object, default: bool = False) -> bool:
@@ -690,6 +698,9 @@ def _build_llm_config(config: dict) -> dict:
     quality_model = _build_quality_model_config(config, include_api_key=True)
     if quality_model:
         llm_config["quality_model"] = quality_model
+    audiobook_segment_model = _build_audiobook_segment_model_config(config, include_api_key=True)
+    if audiobook_segment_model:
+        llm_config["audiobook_segment_model"] = audiobook_segment_model
     expert_mode = _build_expert_mode_config(config, include_api_key=True)
     if expert_mode:
         llm_config["expert_mode"] = expert_mode
@@ -702,6 +713,8 @@ def _build_persisted_llm_config(config: dict) -> dict:
     persisted.pop("project_path", None)
     if isinstance(persisted.get("quality_model"), dict):
         persisted["quality_model"]["api_key"] = ""
+    if isinstance(persisted.get("audiobook_segment_model"), dict):
+        persisted["audiobook_segment_model"]["api_key"] = ""
     expert_mode = persisted.get("expert_mode")
     if isinstance(expert_mode, dict):
         for model in expert_mode.get("models") or []:

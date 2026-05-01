@@ -112,6 +112,13 @@ QUALITY_MODEL_OVERRIDE_KEYS = {
     "quality_max_tokens": "max_tokens",
     "quality_timeout": "timeout",
 }
+AUDIOBOOK_SEGMENT_MODEL_OVERRIDE_KEYS = {
+    "audiobook_segment_provider": "model_provider",
+    "audiobook_segment_model_name": "model_name",
+    "audiobook_segment_api_base": "api_base",
+    "audiobook_segment_max_tokens": "max_tokens",
+    "audiobook_segment_timeout": "timeout",
+}
 EXPERT_MODE_MODEL_LIMIT = 3
 
 
@@ -410,6 +417,7 @@ def _resolve_auxiliary_model_config(
     resolved = dict(config)
     resolved.pop("quality_model", None)
     resolved.pop("expert_mode", None)
+    resolved.pop("audiobook_segment_model", None)
     resolved.update(
         {
             "model_provider": provider,
@@ -457,6 +465,18 @@ def resolve_quality_model_config(config: dict) -> tuple[dict, bool]:
     return resolved, True
 
 
+def resolve_audiobook_segment_model_config(config: dict) -> tuple[dict, bool]:
+    raw_segment_model = _clean_quality_model_config(config.get("audiobook_segment_model"))
+    if not quality_model_configured(raw_segment_model):
+        resolved = dict(config)
+        resolved.pop("audiobook_segment_model", None)
+        return resolved, False
+
+    resolved = _resolve_auxiliary_model_config(config, raw_segment_model, default_temperature=0.2)
+    resolved["log_llm_payload"] = config.get("log_llm_payload", False)
+    return resolved, True
+
+
 def sanitize_runtime_overrides(overrides: dict | None) -> dict[str, object]:
     raw = overrides if isinstance(overrides, dict) else {}
     sanitized: dict[str, object] = {}
@@ -494,6 +514,22 @@ def sanitize_runtime_overrides(overrides: dict | None) -> dict[str, object]:
             quality_model["model"] = str(value).strip()
     if quality_model:
         sanitized["quality_model"] = quality_model
+
+    audiobook_segment_model = _clean_quality_model_config(raw.get("audiobook_segment_model"))
+    for raw_key, model_key in AUDIOBOOK_SEGMENT_MODEL_OVERRIDE_KEYS.items():
+        value = raw.get(raw_key)
+        if value in (None, ""):
+            continue
+        if model_key == "model_provider":
+            normalized = normalize_provider(value, default="")
+            if normalized:
+                audiobook_segment_model[model_key] = normalized
+            continue
+        audiobook_segment_model[model_key] = str(value).strip()
+        if model_key == "model_name":
+            audiobook_segment_model["model"] = str(value).strip()
+    if audiobook_segment_model:
+        sanitized["audiobook_segment_model"] = audiobook_segment_model
 
     expert_mode = _clean_expert_mode_config(raw.get("expert_mode"))
     for enabled_key in ("expert_mode_enabled", "expert_enabled"):
@@ -547,6 +583,9 @@ def _normalized_llm_config(raw: dict) -> dict:
     quality_model = _clean_quality_model_config(raw.get("quality_model"))
     if quality_model:
         config["quality_model"] = quality_model
+    audiobook_segment_model = _clean_quality_model_config(raw.get("audiobook_segment_model"))
+    if audiobook_segment_model:
+        config["audiobook_segment_model"] = audiobook_segment_model
     expert_mode = _clean_expert_mode_config(raw.get("expert_mode"))
     if expert_mode:
         config["expert_mode"] = expert_mode
@@ -637,6 +676,23 @@ def build_runtime_config(project_path: str | Path, overrides: dict[str, object],
         quality_provider = normalize_provider(quality_runtime.get("model_provider"), default=provider)
         if provider_requires_api_key(quality_provider) and not str(quality_runtime.get("api_key", "") or "").strip():
             raise RuntimeError(f"quality provider={quality_provider} missing API key, please fill api_keys.sh")
+    audiobook_segment_model = merge_quality_model_configs(
+        saved.get("audiobook_segment_model"),
+        runtime_overrides.get("audiobook_segment_model"),
+    )
+    if audiobook_segment_model:
+        segment_provider = normalize_provider(audiobook_segment_model.get("model_provider"), default=provider)
+        if not str(audiobook_segment_model.get("api_key", "") or "").strip():
+            audiobook_segment_model["api_key"] = (
+                runtime["api_key"]
+                if segment_provider == provider
+                else api_key_for_provider(segment_provider, api_keys)
+            )
+        runtime["audiobook_segment_model"] = audiobook_segment_model
+        segment_runtime, _ = resolve_audiobook_segment_model_config(runtime)
+        segment_provider = normalize_provider(segment_runtime.get("model_provider"), default=provider)
+        if provider_requires_api_key(segment_provider) and not str(segment_runtime.get("api_key", "") or "").strip():
+            raise RuntimeError(f"audiobook segment provider={segment_provider} missing API key, please fill api_keys.sh")
     expert_mode = merge_expert_mode_configs(saved.get("expert_mode"), runtime_overrides.get("expert_mode"))
     if expert_mode:
         models = []
