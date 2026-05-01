@@ -5328,6 +5328,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         audiobook_mode_options_html = _render_audiobook_mode_options(project_path)
         narrator_options_html = _render_narrator_preset_options(project_path)
         character_voice_options_html = _render_character_voice_options(project_path)
+        audiobook_segment_model_fields_html = _render_audiobook_segment_model_fields(
+            str(project_llm_config.get("model_provider") or ""),
+            str(project_llm_config.get("model_name") or project_llm_config.get("model") or ""),
+        )
 
         body = f"""
         <div class="stack">
@@ -5402,6 +5406,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                     {audiobook_mode_options_html}
                   </select>
                 </label>
+                {audiobook_segment_model_fields_html}
                 <label>旁白音色
                   <select name="narrator_preset">
                     {narrator_options_html}
