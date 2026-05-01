@@ -1340,6 +1340,84 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(job["kind"], "audiobook")
         mocked_generate.assert_called_once()
 
+    def test_continue_async_allows_same_project_when_illustration_job_active(self) -> None:
+        illustration_job = webui.JOB_REGISTRY.create_job(
+            kind="illustrate",
+            title="生成插图",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+            blocks_project=False,
+        )
+        webui.JOB_REGISTRY.mark_running(illustration_job["id"], "正在生成插图")
+
+        with patch(
+            "webui.run_next_chapters",
+            return_value=[str(self.project_path / "chapters" / "chapter_0001.md")],
+        ) as mocked_run_next_chapters, patch("webui._enqueue_progression_job", return_value=None):
+            response = self._post(
+                "/project/web/continue",
+                "count=1&selection_mode=recommended",
+            )
+
+        self.assertEqual(response.status, 303)
+        location = response.getheader("Location")
+        self.assertTrue(location.startswith("/job/"))
+        self._wait_for_job_status(location.rsplit("/", 1)[-1])
+        mocked_run_next_chapters.assert_called_once()
+
+    def test_illustration_async_allows_same_project_when_continue_and_audiobook_jobs_active(self) -> None:
+        webui.JOB_REGISTRY.create_job(
+            kind="continue",
+            title="existing continue",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+        )
+        audio_job = webui.JOB_REGISTRY.create_job(
+            kind="audiobook",
+            title="existing audiobook",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+            blocks_project=False,
+        )
+        webui.JOB_REGISTRY.mark_running(audio_job["id"], "正在生成有声章节")
+
+        with patch(
+            "webui.illustrate_chapters",
+            return_value=[{"chapter_slug": "chapter_0001", "reused": False}],
+        ) as mocked_illustrate:
+            response = self._post(
+                "/project/web/illustrate",
+                "chapter_slug=chapter_0001",
+            )
+
+        self.assertEqual(response.status, 303)
+        location = response.getheader("Location")
+        self.assertTrue(location.startswith("/job/"))
+        job = self._wait_for_job_status(location.rsplit("/", 1)[-1])
+        self.assertEqual(job["kind"], "illustrate")
+        self.assertFalse(job["blocks_project"])
+        mocked_illustrate.assert_called_once()
+
+    def test_illustration_async_rejects_same_project_when_illustration_job_active(self) -> None:
+        job = webui.JOB_REGISTRY.create_job(
+            kind="illustrate",
+            title="existing illustration",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+            blocks_project=False,
+        )
+        webui.JOB_REGISTRY.mark_running(job["id"], "正在生成插图")
+
+        with patch("webui.illustrate_chapters") as mocked_illustrate:
+            response = self._post(
+                "/project/web/illustrate",
+                "chapter_slug=chapter_0001",
+            )
+
+        self.assertEqual(response.status, 303)
+        self.assertIn("/project/web?error=", response.getheader("Location"))
+        mocked_illustrate.assert_not_called()
+
     def test_create_project_async_starts_followup_progression_job(self) -> None:
         session_payload = {
             "session_id": "session_project_bootstrap",
@@ -1404,6 +1482,32 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(page.status, 200)
         self.assertIn("有声章节正在生成中，可以继续续写", page.body)
         self.assertNotIn("为避免并发写入冲突", page.body)
+
+    def test_project_page_allows_continue_and_audiobook_but_disables_illustration_during_illustration_job(self) -> None:
+        job = webui.JOB_REGISTRY.create_job(
+            kind="illustrate",
+            title="生成插图",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+            blocks_project=False,
+        )
+        webui.JOB_REGISTRY.mark_running(job["id"], "正在生成插图")
+
+        page = self._get("/project/web")
+
+        self.assertEqual(page.status, 200)
+        self.assertIn("插图正在生成中，可以继续续写和生成有声章节", page.body)
+        continue_marker = 'action="/project/web/continue">'
+        continue_fragment = page.body[page.body.index(continue_marker) : page.body.index(continue_marker) + 120]
+        self.assertIn("<fieldset>", continue_fragment)
+        self.assertNotIn("<fieldset disabled>", continue_fragment)
+        audiobook_marker = 'action="/project/web/audiobook" enctype="multipart/form-data">'
+        audiobook_fragment = page.body[page.body.index(audiobook_marker) : page.body.index(audiobook_marker) + 120]
+        self.assertIn("<fieldset>", audiobook_fragment)
+        self.assertNotIn("<fieldset disabled>", audiobook_fragment)
+        illustration_marker = 'action="/project/web/illustrate">'
+        illustration_fragment = page.body[page.body.index(illustration_marker) : page.body.index(illustration_marker) + 120]
+        self.assertIn("<fieldset disabled>", illustration_fragment)
 
     def test_project_page_allows_audiobook_form_during_continue_job(self) -> None:
         webui.JOB_REGISTRY.create_job(

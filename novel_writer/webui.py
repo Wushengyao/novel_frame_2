@@ -129,6 +129,7 @@ JOB_ACTIVE_STATUSES = {"queued", "running", "canceling"}
 JOB_FINISHED_STATUSES = {"succeeded", "failed", "canceled"}
 PROGRESSION_JOB_KINDS = {"progression_options", "progression_options_auto"}
 AUDIOBOOK_JOB_KINDS = {"audiobook"}
+ILLUSTRATION_JOB_KINDS = {"illustrate"}
 
 _LOGIN_ATTEMPT_GUARDS: dict[tuple[int, int, int], LoginAttemptGuard] = {}
 _LOGIN_ATTEMPT_GUARDS_LOCK = threading.Lock()
@@ -404,11 +405,22 @@ def _active_audiobook_job(project_path: Path) -> dict | None:
     return jobs[0] if jobs else None
 
 
+def _active_illustration_job(project_path: Path) -> dict | None:
+    jobs = JOB_REGISTRY.list_jobs(
+        project_path=str(project_path.resolve()),
+        active_only=True,
+        blocking_only=False,
+        kinds=ILLUSTRATION_JOB_KINDS,
+        limit=1,
+    )
+    return jobs[0] if jobs else None
+
+
 def _audiobook_conflict_message(action: str) -> str:
     return f"有声章节正在生成中，可以继续续写，但暂时不能{action}。请等音频任务完成后再试。"
 
 
-PROJECT_TREE_RUNTIME_PRESERVE_PATHS = ("audiobook", ".project_audio.lock")
+PROJECT_TREE_RUNTIME_PRESERVE_PATHS = ("audiobook", "illustrations", ".project_audio.lock")
 PROJECT_TREE_RUNTIME_IGNORE_NAMES = {".project_write.lock", *PROJECT_TREE_RUNTIME_PRESERVE_PATHS}
 
 
@@ -5275,9 +5287,11 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         blocking_jobs = [job for job in active_jobs if job.get("blocks_project", True)]
         project_busy = bool(blocking_jobs)
         audiobook_busy = _active_audiobook_job(project_path) is not None
-        destructive_busy = project_busy or audiobook_busy
+        illustration_busy = _active_illustration_job(project_path) is not None
+        destructive_busy = project_busy or audiobook_busy or illustration_busy
         busy_attr = " disabled" if project_busy else ""
         audiobook_busy_attr = " disabled" if audiobook_busy else ""
+        illustration_busy_attr = " disabled" if illustration_busy else ""
         destructive_busy_attr = " disabled" if destructive_busy else ""
         busy_notice = (
             '<div class="warning-box">当前项目有后台任务正在运行。为避免并发写入冲突，章节润色暂时禁用。</div>'
@@ -5287,6 +5301,11 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         audiobook_notice = (
             '<div class="warning-box">有声章节正在生成中，可以继续续写，但回滚和章节润色暂时禁用。</div>'
             if audiobook_busy
+            else ""
+        )
+        illustration_notice = (
+            '<div class="warning-box">插图正在生成中，可以继续续写和生成有声章节，但暂时不能再次生成插图或回滚。</div>'
+            if illustration_busy
             else ""
         )
         polish_runtime_fields_html = _render_runtime_override_fields(
@@ -5358,6 +5377,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
           {expert_panel_html}
           {busy_notice}
           {audiobook_notice}
+          {illustration_notice}
           <section class="panel">
             <h2>章节润色</h2>
             <p class="muted">对当前章节做表达、节奏和细节层面的润色。完成后会直接覆盖本章正文，并在项目下自动备份原文。</p>
@@ -5380,20 +5400,22 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <h2>本章插图</h2>
             <div class="gallery">{illustration_gallery}</div>
             <form method="post" action="/project/{escape(project_id)}/illustrate">
-              <input type="hidden" name="chapter_slug" value="{escape(chapter_slug)}">
-              <label>插图要求（可选）
-                <input type="text" name="user_request" placeholder="例如：强调人物表情与空间纵深。">
-              </label>
-              <div class="two-col">
-                <label>Checkpoint（可选）
-                  <input type="text" name="checkpoint" placeholder="illusious/illustrij_v21.safetensors">
+              <fieldset{illustration_busy_attr}>
+                <input type="hidden" name="chapter_slug" value="{escape(chapter_slug)}">
+                <label>插图要求（可选）
+                  <input type="text" name="user_request" placeholder="例如：强调人物表情与空间纵深。">
                 </label>
-                <label>ComfyUI API（可选）
-                  <input type="text" name="comfyui_api_base" placeholder="http://127.0.0.1:8188">
-                </label>
-              </div>
-              <label><input type="checkbox" name="force" value="1"> 强制重绘</label>
-              <button type="submit">为本章生成插图</button>
+                <div class="two-col">
+                  <label>Checkpoint（可选）
+                    <input type="text" name="checkpoint" placeholder="illusious/illustrij_v21.safetensors">
+                  </label>
+                  <label>ComfyUI API（可选）
+                    <input type="text" name="comfyui_api_base" placeholder="http://127.0.0.1:8188">
+                  </label>
+                </div>
+                <label><input type="checkbox" name="force" value="1"> 强制重绘</label>
+                <button type="submit">为本章生成插图</button>
+              </fieldset>
             </form>
           </section>
           <section class="panel">
@@ -5831,12 +5853,28 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if project_path is None:
             self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
             return
+        if JOB_REGISTRY.has_active_project_job(project_path, blocking_only=True):
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote("当前项目有后台写作任务正在运行，请稍后再回滚。")
+            )
+            return
         if _active_audiobook_job(project_path) is not None:
             self._redirect(
                 "/project/"
                 + urllib.parse.quote(project_id)
                 + "?error="
                 + urllib.parse.quote(_audiobook_conflict_message("回滚"))
+            )
+            return
+        if _active_illustration_job(project_path) is not None:
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote("插图正在生成中，可以继续续写和生成有声章节，但暂时不能回滚。请等插图任务完成后再试。")
             )
             return
 
@@ -6097,7 +6135,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         progression_jobs = [job for job in active_jobs if job.get("kind") in PROGRESSION_JOB_KINDS]
         project_busy = bool(blocking_jobs)
         audiobook_busy = _active_audiobook_job(project_path) is not None
-        destructive_busy = project_busy or audiobook_busy
+        illustration_busy = _active_illustration_job(project_path) is not None
+        destructive_busy = project_busy or audiobook_busy or illustration_busy
         progression_session = get_latest_active_progression_session(str(project_path))
         project_llm_config = project.get("llm_config") or {}
         runtime_override_fields_html = _render_runtime_override_fields(
@@ -6112,15 +6151,21 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         )
         busy_attr = " disabled" if project_busy else ""
         audiobook_busy_attr = " disabled" if audiobook_busy else ""
+        illustration_busy_attr = " disabled" if illustration_busy else ""
         destructive_busy_attr = " disabled" if destructive_busy else ""
         busy_notice = (
-            '<div class="warning-box">当前项目有后台任务正在运行。为避免并发写入冲突，续写、回滚和插图表单已暂时禁用。你可以打开上方任务卡片查看实时进度。</div>'
+            '<div class="warning-box">当前项目有后台写作任务正在运行。为避免并发写入冲突，续写、回滚和推进选项表单已暂时禁用。你可以打开上方任务卡片查看实时进度。</div>'
             if project_busy
             else ""
         )
         audiobook_notice = (
             '<div class="warning-box">有声章节正在生成中，可以继续续写，但回滚和章节润色暂时禁用。</div>'
             if audiobook_busy
+            else ""
+        )
+        illustration_notice = (
+            '<div class="warning-box">插图正在生成中，可以继续续写和生成有声章节，但暂时不能再次生成插图或回滚。</div>'
+            if illustration_busy
             else ""
         )
         progression_notice = (
@@ -6264,6 +6309,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             {external_service_panel_html}
             {busy_notice}
             {audiobook_notice}
+            {illustration_notice}
             <section class="panel">
               <h3>续写</h3>
               <form method="post" action="/project/{escape(project_id)}/continue">
@@ -6328,7 +6374,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <section class="panel">
               <h3>生成插图</h3>
               <form method="post" action="/project/{escape(project_id)}/illustrate">
-                <fieldset{busy_attr}>
+                <fieldset{illustration_busy_attr}>
                   <label>目标章节
                     <select name="chapter_slug">
                       {''.join(chapter_options)}
@@ -6762,6 +6808,16 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if project_path is None:
             self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
             return
+        if _active_illustration_job(project_path) is not None:
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "/chapter/"
+                + urllib.parse.quote(chapter_slug)
+                + "?error="
+                + urllib.parse.quote("插图正在生成中，可以继续续写和生成有声章节，但暂时不能润色章节。请等插图任务完成后再试。")
+            )
+            return
         if _active_audiobook_job(project_path) is not None:
             self._redirect(
                 "/project/"
@@ -6959,12 +7015,15 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 llm_runtime_config = _build_runtime_config(project_path, {}, api_keys)
             except Exception:
                 llm_runtime_config = None
-            cancel_checkpoint = ProjectTreeCheckpoint(project_path)
+            cancel_checkpoint = ProjectSubtreeCheckpoint(project_path, ["illustrations"])
             job = JOB_REGISTRY.create_job(
                 kind="illustrate",
                 title=f"生成插图：{chapter_slug}",
                 project_id=project_id,
                 project_path=str(project_path.resolve()),
+                blocks_project=False,
+                conflict_kinds=ILLUSTRATION_JOB_KINDS,
+                busy_message="当前项目已有插图生成任务正在运行，请稍后再生成插图。",
             )
         except Exception as exc:
             _discard_checkpoint(cancel_checkpoint)
