@@ -6178,6 +6178,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         audiobook_mode_options_html = _render_audiobook_mode_options(project_path)
         narrator_options_html = _render_narrator_preset_options(project_path)
         character_voice_options_html = _render_character_voice_options(project_path)
+        audiobook_segment_model_fields_html = _render_audiobook_segment_model_fields(
+            str(project_llm_config.get("model_provider") or ""),
+            str(project_llm_config.get("model_name") or project_llm_config.get("model") or ""),
+        )
         latest_chapter_text = escape(chapters[-1]["text"]) if chapters else "还没有正文。"
         snapshot_text = f"已保存到第 {latest_snapshot} 章" if latest_snapshot is not None else "暂无"
         continue_advanced_toggle_script = """
@@ -6390,6 +6394,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                       {audiobook_mode_options_html}
                     </select>
                   </label>
+                  {audiobook_segment_model_fields_html}
                   <label>旁白音色
                     <select name="narrator_preset">
                       {narrator_options_html}
@@ -6843,9 +6848,16 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         cancel_checkpoint = None
         try:
             llm_runtime_config = None
+            audiobook_segment_model = _audiobook_segment_model_from_form(form)
             try:
-                llm_runtime_config = _build_runtime_config(project_path, {}, api_keys)
+                llm_runtime_config = _build_runtime_config(
+                    project_path,
+                    {"audiobook_segment_model": audiobook_segment_model} if audiobook_segment_model else {},
+                    api_keys,
+                )
             except Exception:
+                if audiobook_segment_model:
+                    raise
                 llm_runtime_config = None
             if _active_audiobook_job(project_path) is not None:
                 raise RuntimeError("当前项目已有有声章节生成任务正在运行，请稍后再生成有声章节。")
