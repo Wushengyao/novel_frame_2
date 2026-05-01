@@ -12,6 +12,7 @@ import base64
 from copy import deepcopy
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -42,6 +43,19 @@ DEFAULT_VOXCPM2_PYTHON = "/home/wsy/VoxCPM2/.venv/bin/python"
 DEFAULT_VOXCPM2_MODEL_ID = "openbmb/VoxCPM2"
 DEFAULT_IMAGE_FRAME_API_BASE = "http://127.0.0.1:8010"
 DEFAULT_AUDIO_FRAME_API_BASE = "http://127.0.0.1:8810"
+IMAGE_FRAME_PROVIDER_ALIASES = {
+    "google": "google_ai",
+    "google-ai": "google_ai",
+    "googleai": "google_ai",
+    "gemini": "google_ai",
+    "google_ai": "google_ai",
+    "openai": "openai",
+    "open_ai": "openai",
+    "xai": "xai",
+    "x-ai": "xai",
+    "grok": "xai",
+    "comfyui": "comfyui",
+}
 
 DEFAULT_EXTERNAL_SERVICES_CONFIG: dict[str, Any] = {
     "version": 1,
@@ -80,7 +94,7 @@ DEFAULT_EXTERNAL_SERVICES_CONFIG: dict[str, Any] = {
     },
     "image_frame": {
         "api_base": DEFAULT_IMAGE_FRAME_API_BASE,
-        "provider": "google",
+        "provider": "google_ai",
         "model": "",
         "size": "",
         "aspect_ratio": "1:1",
@@ -420,7 +434,7 @@ def normalize_image_frame_runtime(raw_config: dict[str, Any] | None) -> dict[str
     raw = raw_config if isinstance(raw_config, dict) else {}
     return {
         "api_base": normalize_http_base(raw.get("api_base"), DEFAULT_IMAGE_FRAME_API_BASE),
-        "provider": str(raw.get("provider") or "google").strip() or "google",
+        "provider": normalize_image_frame_provider(raw.get("provider")),
         "model": str(raw.get("model") or "").strip(),
         "size": str(raw.get("size") or "").strip(),
         "aspect_ratio": str(raw.get("aspect_ratio") or "1:1").strip() or "1:1",
@@ -434,6 +448,12 @@ def normalize_image_frame_runtime(raw_config: dict[str, Any] | None) -> dict[str
         "auth_username": str(raw.get("auth_username") or "").strip(),
         "auth_password": str(raw.get("auth_password") or "").strip(),
     }
+
+
+def normalize_image_frame_provider(value: object) -> str:
+    text = str(value or "google_ai").strip().lower()
+    normalized = re.sub(r"[\s\-]+", "_", text)
+    return IMAGE_FRAME_PROVIDER_ALIASES.get(text) or IMAGE_FRAME_PROVIDER_ALIASES.get(normalized) or "google_ai"
 
 
 def normalize_audio_frame_runtime(raw_config: dict[str, Any] | None) -> dict[str, Any]:
@@ -650,6 +670,9 @@ class ImageFrameClient(JsonHttpClient):
             "moderation": runtime.get("moderation", ""),
             "num_outputs": str(max(1, coerce_int(runtime.get("num_outputs"), 1))),
         }
+        seed = coerce_int(runtime.get("seed"), 0)
+        if seed:
+            fields["seed"] = str(seed)
         return self.request_multipart("/api/tasks", fields=fields, timeout=timeout)
 
     def request_multipart(self, path_or_url: str, *, fields: dict[str, str], timeout: int = 60) -> dict[str, Any]:

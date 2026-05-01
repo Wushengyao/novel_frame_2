@@ -15,6 +15,9 @@ import threading
 import time
 import traceback
 import urllib.parse
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.parser import BytesParser
 from email.policy import default as email_policy_default
 from html import escape
@@ -41,7 +44,13 @@ from audiobook_manager import (
 from chapter_context import peek_next_context_for_mode
 from common_utils import utc_now
 from context_builder import resolve_effective_chapter_task
-from external_services import AudioFrameClient, ImageFrameClient, load_audio_frame_runtime, load_image_frame_runtime
+from external_services import (
+    AudioFrameClient,
+    ImageFrameClient,
+    load_audio_frame_runtime,
+    load_image_frame_runtime,
+    normalize_image_frame_provider,
+)
 from illustration_manager import get_illustration_record, illustrate_chapters, list_illustration_records
 from polish_manager import POLISH_PRESETS, run_chapter_polish
 from progression_manager import (
@@ -124,6 +133,7 @@ ADMIN_ACTION_STATUS_FILENAME = "admin_action_status.json"
 PUBLIC_PATHS = {"/login", "/healthz"}
 API_PATH_PREFIX = "/api/"
 EXTERNAL_SERVICE_HEALTH_TIMEOUT_SECONDS = 3.0
+PROVIDER_CONNECTIVITY_TIMEOUT_SECONDS = 6.0
 
 JOB_ACTIVE_STATUSES = {"queued", "running", "canceling"}
 JOB_FINISHED_STATUSES = {"succeeded", "failed", "canceled"}
@@ -135,6 +145,8 @@ _LOGIN_ATTEMPT_GUARDS: dict[tuple[int, int, int], LoginAttemptGuard] = {}
 _LOGIN_ATTEMPT_GUARDS_LOCK = threading.Lock()
 _EXTERNAL_SERVICE_HEALTH_LOCK = threading.Lock()
 _EXTERNAL_SERVICE_HEALTH_CACHE: dict = {}
+_PROVIDER_CONNECTIVITY_LOCK = threading.Lock()
+_PROVIDER_CONNECTIVITY_CACHE: dict = {}
 
 
 class JobCanceled(RuntimeError):
@@ -607,6 +619,8 @@ def _load_api_keys() -> dict[str, str]:
         "DEEPSEEK_API_KEY": os.environ.get("DEEPSEEK_API_KEY", ""),
         "DOUBAO_API_KEY": os.environ.get("DOUBAO_API_KEY", ""),
         "OLLAMA_API_KEY": os.environ.get("OLLAMA_API_KEY", ""),
+        "LLAMA_CPP_API_KEY": os.environ.get("LLAMA_CPP_API_KEY", ""),
+        "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
     }
     if all(env_keys.values()) or not API_KEYS_PATH.exists():
         return env_keys
@@ -1481,6 +1495,282 @@ def _provider_requires_api_key(provider: str) -> bool:
     return shared_provider_requires_api_key(provider)
 
 
+def _provider_default_api_base(provider: str) -> str:
+    normalized = _normalize_provider_for_ui(provider, default="openai_compatible")
+    provider_defaults = {
+        "gemini": "https://generativelanguage.googleapis.com/v1beta",
+        "grok": "https://api.x.ai/v1",
+        "deepseek": "https://api.deepseek.com/v1",
+        "doubao": "https://ark.cn-beijing.volces.com/api/v3",
+        "ollama": "http://127.0.0.1:11434/v1",
+        "llama_cpp": "http://127.0.0.1:8080/v1",
+    }
+    return _default_api_base_for_provider(normalized) or provider_defaults.get(normalized, "")
+
+
+def _normalize_provider_api_base(value: object, default: str) -> str:
+    text = str(value or default or "").strip().rstrip("/")
+    if text and not text.startswith(("http://", "https://")):
+        text = "http://" + text
+    return text
+
+
+def _provider_models_endpoint(provider: str, api_base: str) -> str:
+    base = _normalize_provider_api_base(api_base, _provider_default_api_base(provider))
+    if _normalize_provider_for_ui(provider, default="") == "gemini":
+        return f"{base}/models"
+    if base.endswith("/models"):
+        return base
+    if base.endswith(("/v1", "/v2", "/v3", "/api/v1", "/api/v2", "/api/v3")):
+        return f"{base}/models"
+    return f"{base}/v1/models"
+
+
+def _provider_status_label(status: str) -> str:
+    mapping = {
+        "succeeded": "可用",
+        "failed": "失败",
+        "missing_key": "缺 Key",
+        "unknown": "未检测",
+    }
+    return mapping.get(status, status or "unknown")
+
+
+def _provider_status_class(status: str) -> str:
+    if status == "missing_key":
+        return "status-failed"
+    if status == "unknown":
+        return "status-neutral"
+    return _job_status_class(status)
+
+
+def _provider_model_count(payload: object) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    for key in ("models", "data"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return len(value)
+    return 0
+
+
+def _provider_payload_summary(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        return {}
+    summary: dict[str, object] = {}
+    for key, value in payload.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            summary[str(key)] = value
+        elif isinstance(value, list):
+            summary[str(key)] = len(value)
+    return summary
+
+
+def _mask_provider_error(text: object, api_key: str = "") -> str:
+    sanitized = str(text or "")
+    if api_key:
+        sanitized = sanitized.replace(api_key, "***")
+    sanitized = re.sub(r"([?&](?:key|api_key|access_token|token)=)[^&\s]+", r"\1***", sanitized, flags=re.IGNORECASE)
+    return sanitized[:1200]
+
+
+def _provider_status_entry(
+    provider: str,
+    *,
+    status: str,
+    message: str,
+    ok: bool | None,
+    latency_ms: int | None = None,
+    details: dict | None = None,
+) -> dict:
+    normalized = _normalize_provider_for_ui(provider, default="")
+    api_base = _provider_default_api_base(normalized)
+    models_path = urllib.parse.urlparse(_provider_models_endpoint(normalized, api_base)).path if normalized else ""
+    return {
+        "id": normalized,
+        "provider": normalized,
+        "label": normalized,
+        "api_base": api_base,
+        "models_path": models_path,
+        "model": _default_model_for_provider(normalized),
+        "ok": ok,
+        "status": status,
+        "message": message,
+        "latency_ms": latency_ms,
+        "details": details or {},
+    }
+
+
+def _provider_missing_key_entry(provider: str) -> dict:
+    return _provider_status_entry(
+        provider,
+        status="missing_key",
+        message="API key 未配置，请填写 api_keys.sh",
+        ok=False,
+        details={"requires_api_key": True},
+    )
+
+
+def _provider_placeholder(api_keys: dict[str, str] | None = None) -> dict:
+    keys = api_keys if isinstance(api_keys, dict) else _load_api_keys()
+    providers = []
+    for provider in sorted(WEB_SELECTABLE_PROVIDERS):
+        if _provider_requires_api_key(provider) and not _api_key_for_provider(provider, keys):
+            providers.append(_provider_missing_key_entry(provider))
+            continue
+        providers.append(
+            _provider_status_entry(
+                provider,
+                status="unknown",
+                message="尚未检测",
+                ok=None,
+                details={"requires_api_key": _provider_requires_api_key(provider)},
+            )
+        )
+    return {"ok": False, "checked_at": "", "providers": providers}
+
+
+def _check_provider_connectivity(provider: str, api_keys: dict[str, str]) -> dict:
+    normalized = _normalize_provider_for_ui(provider, default="")
+    started = time.monotonic()
+    api_key = _api_key_for_provider(normalized, api_keys)
+    if _provider_requires_api_key(normalized) and not api_key:
+        return _provider_missing_key_entry(normalized)
+
+    api_base = _provider_default_api_base(normalized)
+    endpoint = _provider_models_endpoint(normalized, api_base)
+    headers = {"Accept": "application/json"}
+    if normalized == "gemini":
+        if api_key:
+            headers["x-goog-api-key"] = api_key
+    elif api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        req = urllib.request.Request(endpoint, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=PROVIDER_CONNECTIVITY_TIMEOUT_SECONDS) as response:
+            raw_response = response.read().decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(raw_response) if raw_response.strip() else {}
+        except ValueError:
+            payload = {}
+        model_count = _provider_model_count(payload)
+        message = "连通正常"
+        if model_count:
+            message = f"连通正常，可见 {model_count} 个模型"
+        entry = _provider_status_entry(
+            normalized,
+            status="succeeded",
+            message=message,
+            ok=True,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            details=_provider_payload_summary(payload),
+        )
+        entry["api_base"] = api_base
+        entry["models_path"] = urllib.parse.urlparse(endpoint).path
+        return entry
+    except urllib.error.HTTPError as exc:
+        detail = _mask_provider_error(exc.read().decode("utf-8", errors="replace"), api_key)
+        if exc.code in {401, 403}:
+            message = f"鉴权失败（HTTP {exc.code}）"
+        else:
+            message = f"HTTP {exc.code}: {detail[:300]}"
+        entry = _provider_status_entry(
+            normalized,
+            status="failed",
+            message=message,
+            ok=False,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            details={"http_status": exc.code},
+        )
+        entry["api_base"] = api_base
+        entry["models_path"] = urllib.parse.urlparse(endpoint).path
+        return entry
+    except urllib.error.URLError as exc:
+        reason = _mask_provider_error(getattr(exc, "reason", exc), api_key)
+        message = f"连接失败：{reason}"
+    except Exception as exc:
+        message = f"检测失败：{_mask_provider_error(exc, api_key)}"
+
+    entry = _provider_status_entry(
+        normalized,
+        status="failed",
+        message=message,
+        ok=False,
+        latency_ms=int((time.monotonic() - started) * 1000),
+        details={},
+    )
+    entry["api_base"] = api_base
+    entry["models_path"] = urllib.parse.urlparse(endpoint).path
+    return entry
+
+
+def _check_provider_connectivity_all() -> dict:
+    api_keys = _load_api_keys()
+    providers = sorted(WEB_SELECTABLE_PROVIDERS)
+    by_provider: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max(1, min(len(providers), 6))) as executor:
+        futures = {
+            executor.submit(_check_provider_connectivity, provider, api_keys): provider
+            for provider in providers
+        }
+        for future in as_completed(futures):
+            provider = futures[future]
+            try:
+                by_provider[provider] = future.result()
+            except Exception as exc:
+                by_provider[provider] = _provider_status_entry(
+                    provider,
+                    status="failed",
+                    message=f"检测失败：{exc}",
+                    ok=False,
+                )
+    results = [by_provider[provider] for provider in providers if provider in by_provider]
+    return {
+        "ok": all(bool(item.get("ok")) for item in results),
+        "checked_at": utc_now(),
+        "providers": results,
+    }
+
+
+def _refresh_provider_connectivity() -> dict:
+    snapshot = _check_provider_connectivity_all()
+    with _PROVIDER_CONNECTIVITY_LOCK:
+        _PROVIDER_CONNECTIVITY_CACHE.clear()
+        _PROVIDER_CONNECTIVITY_CACHE.update(snapshot)
+    return snapshot
+
+
+def _provider_connectivity_snapshot() -> dict:
+    with _PROVIDER_CONNECTIVITY_LOCK:
+        if _PROVIDER_CONNECTIVITY_CACHE:
+            return {
+                "ok": bool(_PROVIDER_CONNECTIVITY_CACHE.get("ok")),
+                "checked_at": str(_PROVIDER_CONNECTIVITY_CACHE.get("checked_at") or ""),
+                "providers": [dict(provider) for provider in _PROVIDER_CONNECTIVITY_CACHE.get("providers", [])],
+            }
+    return _provider_placeholder()
+
+
+def _provider_connectivity_status_map(snapshot: dict | None = None) -> dict[str, dict]:
+    source = snapshot if isinstance(snapshot, dict) else _provider_connectivity_snapshot()
+    providers = source.get("providers") if isinstance(source.get("providers"), list) else []
+    result: dict[str, dict] = {}
+    for item in providers:
+        if not isinstance(item, dict):
+            continue
+        provider = _normalize_provider_for_ui(item.get("provider") or item.get("id"), default="")
+        if provider:
+            result[provider] = dict(item)
+    return result
+
+
+def _provider_option_label(provider: str) -> str:
+    normalized = _normalize_provider_for_ui(provider, default=provider)
+    status = str(_provider_connectivity_status_map().get(normalized, {}).get("status") or "unknown")
+    return f"{normalized}（{_provider_status_label(status)}）"
+
+
 def _list_projects() -> list[dict]:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     projects = []
@@ -1635,7 +1925,10 @@ def _render_provider_options(selected: str = "", *, include_project_default: boo
     options = ['<option value="">沿用项目设置</option>'] if include_project_default else []
     for provider in sorted(WEB_SELECTABLE_PROVIDERS):
         selected_attr = ' selected' if selected == provider else ""
-        options.append(f'<option value="{provider}"{selected_attr}>{provider}</option>')
+        options.append(
+            f'<option value="{provider}" data-provider-option="{provider}"{selected_attr}>'
+            f'{escape(_provider_option_label(provider))}</option>'
+        )
     return "".join(options)
 
 
@@ -1643,7 +1936,10 @@ def _render_quality_provider_options(selected: str = "") -> str:
     options = ['<option value="">inherit main provider</option>']
     for provider in sorted(WEB_SELECTABLE_PROVIDERS):
         selected_attr = ' selected' if selected == provider else ""
-        options.append(f'<option value="{provider}"{selected_attr}>{provider}</option>')
+        options.append(
+            f'<option value="{provider}" data-provider-option="{provider}"{selected_attr}>'
+            f'{escape(_provider_option_label(provider))}</option>'
+        )
     return "".join(options)
 
 
@@ -2259,14 +2555,205 @@ def _render_score_rows(scores: object) -> str:
 
 def _illustration_overrides_from_form(form: dict[str, str]) -> dict:
     mapping = {
+        "image_frame_api_base": (form.get("image_frame_api_base") or "").strip(),
+        "image_frame_model": (form.get("image_frame_model") or "").strip(),
+        "image_frame_size": (form.get("image_frame_size") or "").strip(),
+        "image_frame_aspect_ratio": (form.get("image_frame_aspect_ratio") or "").strip(),
+        "image_frame_google_image_size": (form.get("image_frame_google_image_size") or "").strip(),
+        "image_frame_quality": (form.get("image_frame_quality") or "").strip(),
+        "image_frame_background": (form.get("image_frame_background") or "").strip(),
+        "image_frame_moderation": (form.get("image_frame_moderation") or "").strip(),
+        "image_frame_num_outputs": (form.get("image_frame_num_outputs") or "").strip(),
+        "image_frame_timeout": (form.get("image_frame_timeout") or "").strip(),
+        "image_frame_poll_interval": (form.get("image_frame_poll_interval") or "").strip(),
+        "image_frame_auth_username": (form.get("image_frame_auth_username") or "").strip(),
+        "image_frame_auth_password": (form.get("image_frame_auth_password") or "").strip(),
         "checkpoint": (form.get("checkpoint") or "").strip(),
         "width": (form.get("width") or "").strip(),
         "height": (form.get("height") or "").strip(),
         "steps": (form.get("steps") or "").strip(),
         "cfg": (form.get("cfg") or "").strip(),
         "comfyui_api_base": (form.get("comfyui_api_base") or "").strip(),
+        "seed": (form.get("seed") or "").strip(),
     }
+    backend = (form.get("backend") or form.get("illustration_backend") or "").strip().lower()
+    if backend in {"image_frame", "comfyui"}:
+        mapping["backend"] = backend
+    provider = (form.get("image_frame_provider") or "").strip()
+    if provider:
+        mapping["image_frame_provider"] = normalize_image_frame_provider(provider)
     return {key: value for key, value in mapping.items() if value}
+
+
+def _render_illustration_backend_options(selected: str = "") -> str:
+    active = selected if selected in {"image_frame", "comfyui"} else "image_frame"
+    options = [("image_frame", "Image Frame"), ("comfyui", "ComfyUI")]
+    return "".join(
+        f'<option value="{escape(value)}"{" selected" if value == active else ""}>{escape(label)}</option>'
+        for value, label in options
+    )
+
+
+def _render_image_frame_provider_options(selected: str = "") -> str:
+    active = normalize_image_frame_provider(selected)
+    options = [
+        ("google_ai", "Google AI"),
+        ("openai", "OpenAI"),
+        ("xai", "xAI"),
+    ]
+    valid_values = {value for value, _ in options}
+    if active not in valid_values:
+        active = "google_ai"
+    return "".join(
+        f'<option value="{escape(value)}"{" selected" if value == active else ""}>{escape(label)}</option>'
+        for value, label in options
+    )
+
+
+def _illustration_ui_config(project: dict) -> dict:
+    saved = project.get("illustration_config") if isinstance(project.get("illustration_config"), dict) else {}
+    backend = str(saved.get("backend") or os.environ.get("NOVEL_ILLUSTRATION_BACKEND") or "image_frame").strip().lower()
+    if backend not in {"image_frame", "comfyui"}:
+        backend = "image_frame"
+    image_runtime = load_image_frame_runtime(
+        {
+            key: value
+            for key, value in {
+                "api_base": saved.get("image_frame_api_base"),
+                "provider": saved.get("image_frame_provider"),
+                "model": saved.get("image_frame_model"),
+                "size": saved.get("image_frame_size"),
+                "aspect_ratio": saved.get("image_frame_aspect_ratio"),
+                "google_image_size": saved.get("image_frame_google_image_size"),
+                "quality": saved.get("image_frame_quality"),
+                "background": saved.get("image_frame_background"),
+                "moderation": saved.get("image_frame_moderation"),
+                "num_outputs": saved.get("image_frame_num_outputs"),
+                "timeout": saved.get("image_frame_timeout"),
+                "poll_interval": saved.get("image_frame_poll_interval"),
+                "auth_username": saved.get("image_frame_auth_username"),
+            }.items()
+            if value not in (None, "")
+        }
+    )
+    return {
+        "backend": backend,
+        "image_frame": image_runtime,
+        "comfyui_api_base": str(saved.get("comfyui_api_base") or "").strip(),
+        "checkpoint": str(saved.get("checkpoint") or "").strip(),
+        "width": str(saved.get("width") or "").strip(),
+        "height": str(saved.get("height") or "").strip(),
+        "steps": str(saved.get("steps") or "").strip(),
+        "cfg": str(saved.get("cfg") or "").strip(),
+        "seed": str(saved.get("seed") or "").strip(),
+    }
+
+
+def _render_illustration_settings_fields(project: dict, *, compact: bool = False) -> str:
+    config = _illustration_ui_config(project)
+    image_runtime = config["image_frame"]
+    backend = str(config.get("backend") or "image_frame")
+    image_frame_basic = f"""
+      <label>生图后端
+        <select name="backend">
+          {_render_illustration_backend_options(backend)}
+        </select>
+      </label>
+      <div class="two-col">
+        <label>Image Frame API
+          <input type="text" name="image_frame_api_base" value="{escape(str(image_runtime.get('api_base') or ''))}" placeholder="http://127.0.0.1:8010">
+        </label>
+        <label>Image Frame 供应商
+          <select name="image_frame_provider">
+            {_render_image_frame_provider_options(str(image_runtime.get('provider') or ''))}
+          </select>
+        </label>
+      </div>
+      <div class="two-col">
+        <label>Image Frame 模型（可选）
+          <input type="text" name="image_frame_model" value="{escape(str(image_runtime.get('model') or ''))}" placeholder="留空使用 Image Frame 默认模型">
+        </label>
+        <label>宽高比
+          <input type="text" name="image_frame_aspect_ratio" value="{escape(str(image_runtime.get('aspect_ratio') or ''))}" placeholder="1:1">
+        </label>
+      </div>
+    """
+    image_frame_extra = "" if compact else f"""
+      <div class="two-col">
+        <label>图片尺寸 / OpenAI size
+          <input type="text" name="image_frame_size" value="{escape(str(image_runtime.get('size') or ''))}" placeholder="1024x1024">
+        </label>
+        <label>Google image_size
+          <input type="text" name="image_frame_google_image_size" value="{escape(str(image_runtime.get('google_image_size') or ''))}" placeholder="2K">
+        </label>
+      </div>
+      <div class="two-col">
+        <label>输出张数
+          <input type="number" name="image_frame_num_outputs" min="1" max="4" value="{escape(str(image_runtime.get('num_outputs') or 1))}">
+        </label>
+        <label>Image Frame 超时
+          <input type="number" name="image_frame_timeout" value="{escape(str(image_runtime.get('timeout') or ''))}" placeholder="600">
+        </label>
+      </div>
+      <div class="two-col">
+        <label>质量（可选）
+          <input type="text" name="image_frame_quality" value="{escape(str(image_runtime.get('quality') or ''))}" placeholder="auto / high">
+        </label>
+        <label>背景（可选）
+          <input type="text" name="image_frame_background" value="{escape(str(image_runtime.get('background') or ''))}" placeholder="auto / transparent">
+        </label>
+      </div>
+      <div class="two-col">
+        <label>Moderation（可选）
+          <input type="text" name="image_frame_moderation" value="{escape(str(image_runtime.get('moderation') or ''))}" placeholder="auto">
+        </label>
+        <label>轮询间隔
+          <input type="number" step="0.1" name="image_frame_poll_interval" value="{escape(str(image_runtime.get('poll_interval') or ''))}" placeholder="2.0">
+        </label>
+      </div>
+      <div class="two-col">
+        <label>Image Frame 用户名（可选）
+          <input type="text" name="image_frame_auth_username" value="{escape(str(image_runtime.get('auth_username') or ''))}">
+        </label>
+        <label>Image Frame 密码（可选）
+          <input type="password" name="image_frame_auth_password" placeholder="留空沿用服务配置">
+        </label>
+      </div>
+    """
+    comfyui_fields = f"""
+      <div class="two-col">
+        <label>ComfyUI API
+          <input type="text" name="comfyui_api_base" value="{escape(str(config.get('comfyui_api_base') or ''))}" placeholder="http://127.0.0.1:8188">
+        </label>
+        <label>Checkpoint
+          <input type="text" name="checkpoint" value="{escape(str(config.get('checkpoint') or ''))}" placeholder="illusious/illustrij_v21.safetensors">
+        </label>
+      </div>
+    """
+    comfyui_extra = "" if compact else f"""
+      <div class="two-col">
+        <label>宽度
+          <input type="number" name="width" value="{escape(str(config.get('width') or ''))}" placeholder="832">
+        </label>
+        <label>高度
+          <input type="number" name="height" value="{escape(str(config.get('height') or ''))}" placeholder="1216">
+        </label>
+      </div>
+      <div class="two-col">
+        <label>Steps
+          <input type="number" name="steps" value="{escape(str(config.get('steps') or ''))}" placeholder="28">
+        </label>
+        <label>CFG
+          <input type="number" step="0.1" name="cfg" value="{escape(str(config.get('cfg') or ''))}" placeholder="6.5">
+        </label>
+      </div>
+    """
+    seed_field = "" if compact else f"""
+      <label>Seed（可选）
+        <input type="number" name="seed" value="{escape(str(config.get('seed') or ''))}" placeholder="留空随机">
+      </label>
+    """
+    return image_frame_basic + image_frame_extra + comfyui_fields + comfyui_extra + seed_field
 
 
 def _render_narrator_preset_options(project_path: Path, selected: str = "") -> str:
@@ -2617,6 +3104,100 @@ def _external_service_health_snapshot() -> dict:
                 "services": [dict(service) for service in _EXTERNAL_SERVICE_HEALTH_CACHE.get("services", [])],
             }
     return _external_service_placeholder()
+
+
+def _render_provider_connectivity_panel() -> str:
+    snapshot = _provider_connectivity_snapshot()
+    provider_rows = []
+    for provider in snapshot.get("providers", []):
+        status = str(provider.get("status") or "unknown")
+        latency = provider.get("latency_ms")
+        latency_text = f" / {latency} ms" if isinstance(latency, int) else ""
+        models_path = str(provider.get("models_path") or "")
+        provider_rows.append(
+            f"""
+            <div class="job-card" data-provider-connectivity-row="{escape(str(provider.get('provider') or ''))}">
+              <div class="job-card-head">
+                <strong>{escape(str(provider.get("label") or provider.get("provider") or ""))}</strong>
+                <span class="status-pill {escape(_provider_status_class(status))}" data-provider-connectivity-status>
+                  {escape(_provider_status_label(status))}
+                </span>
+              </div>
+              <div class="muted" data-provider-connectivity-base>{escape(str(provider.get("api_base") or ""))}{escape(models_path)}</div>
+              <div class="muted" data-provider-connectivity-message>{escape(str(provider.get("message") or ""))}{escape(latency_text)}</div>
+            </div>
+            """
+        )
+    checked_at = str(snapshot.get("checked_at") or "未检测")
+    return f"""
+    <section class="panel" data-provider-connectivity-panel>
+      <div class="option-panel-head">
+        <div>
+          <h2>模型 Provider</h2>
+          <p class="muted">检测 LLM provider 的 API key、网络和 /models 端点。</p>
+        </div>
+        <button type="button" class="ghost-button" data-provider-connectivity-check>测试 Provider</button>
+      </div>
+      <div class="muted" data-provider-connectivity-checked>最近检测：{escape(checked_at)}</div>
+      <div class="stack" data-provider-connectivity-list>
+        {''.join(provider_rows)}
+      </div>
+    </section>
+    <script>
+    (() => {{
+      const panel = document.querySelector("[data-provider-connectivity-panel]");
+      if (!panel || panel.dataset.bound === "1") return;
+      panel.dataset.bound = "1";
+      const button = panel.querySelector("[data-provider-connectivity-check]");
+      const checked = panel.querySelector("[data-provider-connectivity-checked]");
+      const list = panel.querySelector("[data-provider-connectivity-list]");
+      const statusLabel = (status) => ({{succeeded: "可用", failed: "失败", missing_key: "缺 Key", unknown: "未检测"}}[status] || status || "unknown");
+      const statusClass = (status) => {{
+        const map = {{succeeded: "status-succeeded", failed: "status-failed", missing_key: "status-failed", unknown: "status-neutral"}};
+        return `status-pill ${{map[status] || "status-neutral"}}`;
+      }};
+      const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({{
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      }}[char]));
+      const render = (payload) => {{
+        if (checked) checked.textContent = `最近检测：${{payload.checked_at || "未检测"}}`;
+        if (!list) return;
+        list.innerHTML = (payload.providers || []).map((provider) => {{
+          const latency = Number.isInteger(provider.latency_ms) ? ` / ${{provider.latency_ms}} ms` : "";
+          return `
+            <div class="job-card" data-provider-connectivity-row="${{escapeHtml(provider.provider || provider.id)}}">
+              <div class="job-card-head">
+                <strong>${{escapeHtml(provider.label || provider.provider || provider.id)}}</strong>
+                <span class="${{statusClass(provider.status)}}" data-provider-connectivity-status>${{statusLabel(provider.status)}}</span>
+              </div>
+              <div class="muted" data-provider-connectivity-base>${{escapeHtml(provider.api_base)}}${{escapeHtml(provider.models_path)}}</div>
+              <div class="muted" data-provider-connectivity-message>${{escapeHtml(provider.message)}}${{escapeHtml(latency)}}</div>
+            </div>`;
+        }}).join("");
+      }};
+      button?.addEventListener("click", async () => {{
+        button.disabled = true;
+        const previousText = button.textContent;
+        button.textContent = "检测中...";
+        try {{
+          const response = await fetch("/api/providers/check", {{headers: {{"Accept": "application/json"}}}});
+          const payload = await response.json();
+          render(payload);
+          window.NOVEL_PROVIDER_CONNECTIVITY?.setSnapshot(payload);
+        }} catch (error) {{
+          if (checked) checked.textContent = `检测失败：${{error}}`;
+        }} finally {{
+          button.disabled = false;
+          button.textContent = previousText || "测试 Provider";
+        }}
+      }});
+    }})();
+    </script>
+    """
 
 
 def _render_external_service_panel() -> str:
@@ -3207,6 +3788,7 @@ def _render_page(
         provider: _default_model_for_provider(provider)
         for provider in sorted(model_presets)
     }
+    provider_statuses = _provider_connectivity_status_map()
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -3790,9 +4372,40 @@ def _render_page(
     (() => {{
       const modelPresets = {json.dumps(model_presets, ensure_ascii=False)};
       const defaultModels = {json.dumps(default_models, ensure_ascii=False)};
+      const providerStatuses = {json.dumps(provider_statuses, ensure_ascii=False)};
       const normalizeProvider = (provider, fallback = "gemini") => {{
         const value = String(provider || "").trim().toLowerCase();
         return Object.prototype.hasOwnProperty.call(modelPresets, value) ? value : fallback;
+      }};
+      const providerStatusLabel = (status) => ({{
+        succeeded: "可用",
+        failed: "失败",
+        missing_key: "缺 Key",
+        unknown: "未检测",
+      }}[status] || status || "未检测");
+      const providerDisplayLabel = (provider) => {{
+        const normalized = normalizeProvider(provider, provider);
+        const status = String((providerStatuses[normalized] && providerStatuses[normalized].status) || "unknown");
+        return `${{normalized}}（${{providerStatusLabel(status)}}）`;
+      }};
+      const annotateProviderOptions = () => {{
+        document.querySelectorAll("option[data-provider-option]").forEach((option) => {{
+          const provider = String(option.dataset.providerOption || option.value || "").trim().toLowerCase();
+          if (!provider) return;
+          option.textContent = providerDisplayLabel(provider);
+        }});
+      }};
+      window.NOVEL_PROVIDER_CONNECTIVITY = {{
+        setSnapshot: (payload) => {{
+          for (const key of Object.keys(providerStatuses)) {{
+            delete providerStatuses[key];
+          }}
+          for (const item of (payload && payload.providers) || []) {{
+            const provider = normalizeProvider(item.provider || item.id || "", "");
+            if (provider) providerStatuses[provider] = item;
+          }}
+          annotateProviderOptions();
+        }},
       }};
       const findTargetElement = (form, selector, target) => {{
         const elements = Array.from(form.querySelectorAll(selector));
@@ -3891,6 +4504,7 @@ def _render_page(
       }};
 
       document.querySelectorAll("[data-model-provider-select]").forEach(bindPresetForm);
+      annotateProviderOptions();
     }})();
   </script>
 </body>
@@ -4050,6 +4664,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
         if len(parts) == 2 and parts[0] == "job":
             self._handle_job_page(parts[1], notice=notice, error=error)
+            return
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "providers" and parts[2] == "check":
+            self._handle_provider_connectivity_check()
             return
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "external-services" and parts[2] == "check":
             self._handle_external_services_check()
@@ -4279,6 +4896,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             auth_settings=auth_settings,
             authenticated=authenticated,
         )
+        provider_connectivity_panel_html = _render_provider_connectivity_panel()
         external_service_panel_html = _render_external_service_panel()
 
         body = f"""
@@ -4318,6 +4936,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               </form>
             </section>
             {admin_html}
+            {provider_connectivity_panel_html}
             {external_service_panel_html}
           </div>
           <section class="panel">
@@ -4466,6 +5085,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
 
     def _handle_external_services_check(self) -> None:
         self._write_json(_refresh_external_service_health())
+
+    def _handle_provider_connectivity_check(self) -> None:
+        self._write_json(_refresh_provider_connectivity())
 
     def send_error(self, code, message=None, explain=None):
         safe_message = message
@@ -5134,7 +5756,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                     <input type="number" name="timeout" placeholder="沿用项目设置">
                   </label>
                 </div>
-                <label><input type="checkbox" name="illustrate_generated" value="1"> 续写完成后立即调用 ComfyUI 生成插图</label>
+                <label><input type="checkbox" name="illustrate_generated" value="1"> 续写完成后立即生成插图</label>
                 <label>插图额外要求（可选）
                   <input type="text" name="illustration_request" placeholder="例如：突出雪夜窗景与室内暖光反差。">
                 </label>
@@ -5352,6 +5974,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             str(project_llm_config.get("model_provider") or ""),
             str(project_llm_config.get("model_name") or project_llm_config.get("model") or ""),
         )
+        illustration_settings_html = _render_illustration_settings_fields(project, compact=True)
 
         body = f"""
         <div class="stack">
@@ -5405,14 +6028,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 <label>插图要求（可选）
                   <input type="text" name="user_request" placeholder="例如：强调人物表情与空间纵深。">
                 </label>
-                <div class="two-col">
-                  <label>Checkpoint（可选）
-                    <input type="text" name="checkpoint" placeholder="illusious/illustrij_v21.safetensors">
-                  </label>
-                  <label>ComfyUI API（可选）
-                    <input type="text" name="comfyui_api_base" placeholder="http://127.0.0.1:8188">
-                  </label>
-                </div>
+                {illustration_settings_html}
                 <label><input type="checkbox" name="force" value="1"> 强制重绘</label>
                 <button type="submit">为本章生成插图</button>
               </fieldset>
@@ -6228,6 +6844,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             str(project_llm_config.get("model_provider") or ""),
             str(project_llm_config.get("model_name") or project_llm_config.get("model") or ""),
         )
+        illustration_settings_html = _render_illustration_settings_fields(project)
         latest_chapter_text = escape(chapters[-1]["text"]) if chapters else "还没有正文。"
         snapshot_text = f"已保存到第 {latest_snapshot} 章" if latest_snapshot is not None else "暂无"
         continue_advanced_toggle_script = """
@@ -6334,7 +6951,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                   <div id="continue-advanced-options" data-continue-advanced-panel hidden>
                     {runtime_override_fields_html}
                   </div>
-                  <label><input type="checkbox" name="illustrate_generated" value="1"> 续写完成后立即调用 ComfyUI 生成插图</label>
+                  <label><input type="checkbox" name="illustrate_generated" value="1"> 续写完成后立即生成插图</label>
                   <label>插图额外要求（可选）
                     <input type="text" name="illustration_request" placeholder="例如：突出雪夜窗景与室内暖光反差。">
                   </label>
@@ -6383,30 +7000,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                   <label>插图要求（可选）
                     <textarea name="user_request" placeholder="例如：更强调角色站位、情绪与镜头感。"></textarea>
                   </label>
-                  <div class="two-col">
-                    <label>Checkpoint（可选）
-                      <input type="text" name="checkpoint" placeholder="illusious/illustrij_v21.safetensors">
-                    </label>
-                    <label>ComfyUI API（可选）
-                      <input type="text" name="comfyui_api_base" placeholder="http://127.0.0.1:8188">
-                    </label>
-                  </div>
-                  <div class="two-col">
-                    <label>宽度
-                      <input type="number" name="width" placeholder="832">
-                    </label>
-                    <label>高度
-                      <input type="number" name="height" placeholder="1216">
-                    </label>
-                  </div>
-                  <div class="two-col">
-                    <label>Steps
-                      <input type="number" name="steps" placeholder="28">
-                    </label>
-                    <label>CFG
-                      <input type="number" step="0.1" name="cfg" placeholder="6.5">
-                    </label>
-                  </div>
+                  {illustration_settings_html}
                   <label><input type="checkbox" name="force" value="1"> 强制重绘</label>
                   <button type="submit">为章节生成插图</button>
                 </fieldset>

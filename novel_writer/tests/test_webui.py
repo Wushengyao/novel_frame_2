@@ -40,6 +40,8 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         webui._LOGIN_ATTEMPT_GUARDS.clear()
         with webui._EXTERNAL_SERVICE_HEALTH_LOCK:
             webui._EXTERNAL_SERVICE_HEALTH_CACHE.clear()
+        with webui._PROVIDER_CONNECTIVITY_LOCK:
+            webui._PROVIDER_CONNECTIVITY_CACHE.clear()
         webui.OUTPUT_DIR = self.output_dir
         webui.JOB_REGISTRY = webui.BackgroundJobRegistry()
         self.auth_settings_patch = patch("webui._auth_settings", return_value=self._make_auth_settings(enabled=False))
@@ -59,6 +61,8 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         webui.JOB_REGISTRY = self.original_registry
         with webui._EXTERNAL_SERVICE_HEALTH_LOCK:
             webui._EXTERNAL_SERVICE_HEALTH_CACHE.clear()
+        with webui._PROVIDER_CONNECTIVITY_LOCK:
+            webui._PROVIDER_CONNECTIVITY_CACHE.clear()
 
     def _make_auth_settings(self, *, enabled: bool, **overrides) -> WebAuthSettings:
         data = {
@@ -221,6 +225,102 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         projects_page = self._get("/projects")
         self.assertEqual(projects_page.status, 200)
         self.assertNotIn("data-external-service-panel", projects_page.body)
+
+    def test_provider_connectivity_panel_and_manual_check_endpoint(self) -> None:
+        cached_status = {
+            "ok": False,
+            "checked_at": "2026-04-26T00:00:00+00:00",
+            "providers": [
+                {
+                    "id": "gemini",
+                    "provider": "gemini",
+                    "label": "gemini",
+                    "api_base": "https://generativelanguage.googleapis.com/v1beta",
+                    "models_path": "/models",
+                    "model": "gemini-3.1-flash-lite-preview",
+                    "ok": True,
+                    "status": "succeeded",
+                    "message": "ok",
+                    "latency_ms": 22,
+                    "details": {"models": 4},
+                },
+                {
+                    "id": "deepseek",
+                    "provider": "deepseek",
+                    "label": "deepseek",
+                    "api_base": "https://api.deepseek.com/v1",
+                    "models_path": "/models",
+                    "model": "deepseek-v4-flash",
+                    "ok": False,
+                    "status": "missing_key",
+                    "message": "API key 未配置，请填写 api_keys.sh",
+                    "latency_ms": None,
+                    "details": {},
+                },
+            ],
+        }
+        refreshed_status = {
+            "ok": False,
+            "checked_at": "2026-04-26T00:01:00+00:00",
+            "providers": [
+                dict(cached_status["providers"][0]),
+                {
+                    **dict(cached_status["providers"][1]),
+                    "status": "failed",
+                    "message": "HTTP 401",
+                },
+            ],
+        }
+        with patch("webui._provider_connectivity_snapshot", return_value=cached_status):
+            with patch("webui._refresh_provider_connectivity", return_value=refreshed_status) as refresh:
+                settings_page = self._get("/settings")
+                new_project_page = self._get("/projects/new")
+                api_response = self._get("/api/providers/check")
+
+        self.assertEqual(settings_page.status, 200)
+        self.assertIn("data-provider-connectivity-panel", settings_page.body)
+        self.assertIn("data-provider-connectivity-check", settings_page.body)
+        self.assertIn("/api/providers/check", settings_page.body)
+        self.assertEqual(new_project_page.status, 200)
+        self.assertIn('data-provider-option="gemini"', new_project_page.body)
+        self.assertIn("gemini（可用）", new_project_page.body)
+        self.assertEqual(api_response.status, 200)
+        payload = json.loads(api_response.body)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["providers"][1]["status"], "failed")
+        refresh.assert_called_once_with()
+
+        projects_page = self._get("/projects")
+        self.assertEqual(projects_page.status, 200)
+        self.assertNotIn("data-provider-connectivity-panel", projects_page.body)
+
+    def test_provider_connectivity_reports_missing_api_key_without_network(self) -> None:
+        with patch("webui.urllib.request.urlopen") as mocked_urlopen:
+            result = webui._check_provider_connectivity("gemini", {"GEMINI_API_KEY": ""})
+
+        self.assertEqual(result["status"], "missing_key")
+        self.assertFalse(result["ok"])
+        mocked_urlopen.assert_not_called()
+
+    def test_provider_connectivity_uses_models_endpoint(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return b'{"data":[{"id":"llama3.2"}]}'
+
+        with patch("webui.urllib.request.urlopen", return_value=FakeResponse()) as mocked_urlopen:
+            result = webui._check_provider_connectivity("ollama", {"OLLAMA_API_KEY": ""})
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["details"]["data"], 1)
+        request = mocked_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:11434/v1/models")
 
     def test_project_pages_show_token_cost_statistics(self) -> None:
         project_file = self.project_path / "project.json"
@@ -1418,6 +1518,43 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("/project/web?error=", response.getheader("Location"))
         mocked_illustrate.assert_not_called()
 
+    def test_illustration_endpoint_passes_image_frame_overrides(self) -> None:
+        form = urllib.parse.urlencode(
+            {
+                "chapter_slug": "chapter_0001",
+                "backend": "image_frame",
+                "image_frame_api_base": "http://127.0.0.1:8010",
+                "image_frame_provider": "google",
+                "image_frame_model": "gemini-3.1-flash-image-preview",
+                "image_frame_aspect_ratio": "16:9",
+                "image_frame_google_image_size": "2K",
+                "image_frame_num_outputs": "2",
+                "image_frame_quality": "high",
+                "image_frame_timeout": "900",
+                "seed": "123",
+            }
+        )
+
+        with patch(
+            "webui.illustrate_chapters",
+            return_value=[{"chapter_slug": "chapter_0001", "reused": False}],
+        ) as mocked_illustrate:
+            response = self._post("/project/web/illustrate", form)
+
+        self.assertEqual(response.status, 303)
+        self._wait_for_job_status(response.getheader("Location").rsplit("/", 1)[-1])
+        _, kwargs = mocked_illustrate.call_args
+        overrides = kwargs["overrides"]
+        self.assertEqual(overrides["backend"], "image_frame")
+        self.assertEqual(overrides["image_frame_provider"], "google_ai")
+        self.assertEqual(overrides["image_frame_model"], "gemini-3.1-flash-image-preview")
+        self.assertEqual(overrides["image_frame_aspect_ratio"], "16:9")
+        self.assertEqual(overrides["image_frame_google_image_size"], "2K")
+        self.assertEqual(overrides["image_frame_num_outputs"], "2")
+        self.assertEqual(overrides["image_frame_quality"], "high")
+        self.assertEqual(overrides["image_frame_timeout"], "900")
+        self.assertEqual(overrides["seed"], "123")
+
     def test_create_project_async_starts_followup_progression_job(self) -> None:
         session_payload = {
             "session_id": "session_project_bootstrap",
@@ -1497,6 +1634,8 @@ class WebUiGuidedFlowTests(unittest.TestCase):
 
         self.assertEqual(page.status, 200)
         self.assertIn("插图正在生成中，可以继续续写和生成有声章节", page.body)
+        self.assertIn("生图后端", page.body)
+        self.assertIn("Image Frame 供应商", page.body)
         continue_marker = 'action="/project/web/continue">'
         continue_fragment = page.body[page.body.index(continue_marker) : page.body.index(continue_marker) + 120]
         self.assertIn("<fieldset>", continue_fragment)

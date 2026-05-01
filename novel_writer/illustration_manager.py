@@ -490,7 +490,22 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
     ).strip().lower()
     if backend not in {"image_frame", "comfyui"}:
         backend = "image_frame"
-    image_runtime = load_image_frame_runtime(
+    image_frame_config = {
+        "api_base": saved.get("image_frame_api_base"),
+        "provider": saved.get("image_frame_provider"),
+        "model": saved.get("image_frame_model"),
+        "size": saved.get("image_frame_size"),
+        "aspect_ratio": saved.get("image_frame_aspect_ratio"),
+        "google_image_size": saved.get("image_frame_google_image_size"),
+        "quality": saved.get("image_frame_quality"),
+        "background": saved.get("image_frame_background"),
+        "moderation": saved.get("image_frame_moderation"),
+        "num_outputs": saved.get("image_frame_num_outputs"),
+        "timeout": saved.get("image_frame_timeout"),
+        "poll_interval": saved.get("image_frame_poll_interval"),
+        "auth_username": saved.get("image_frame_auth_username"),
+    }
+    image_frame_config.update(
         {
             key: value
             for key, value in {
@@ -511,6 +526,9 @@ def _build_runtime_config(project_path: str, overrides: dict | None = None) -> d
             }.items()
             if value not in (None, "")
         }
+    )
+    image_runtime = load_image_frame_runtime(
+        {key: value for key, value in image_frame_config.items() if value not in (None, "")}
     )
     service_defaults = load_service_config("comfyui", include_defaults=True)
     service_overrides = load_service_config("comfyui", include_defaults=False)
@@ -662,6 +680,7 @@ def _persist_runtime_config(project_path: str, runtime_config: dict) -> None:
         "image_frame_num_outputs": int(runtime_config.get("image_frame_num_outputs", 1)),
         "image_frame_timeout": int(runtime_config.get("image_frame_timeout", 600)),
         "image_frame_poll_interval": float(runtime_config.get("image_frame_poll_interval", 2.0)),
+        "image_frame_auth_username": runtime_config.get("image_frame_auth_username", ""),
         "comfyui_api_base": runtime_config.get("comfyui_api_base", ""),
         "comfyui_root": runtime_config.get("comfyui_root", ""),
         "workflow_template": runtime_config.get("workflow_template", ""),
@@ -676,6 +695,7 @@ def _persist_runtime_config(project_path: str, runtime_config: dict) -> None:
         "poll_interval": float(runtime_config.get("poll_interval", 1.5)),
         "negative_prompt": runtime_config.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT),
         "style_preset": runtime_config.get("style_preset", DEFAULT_STYLE_PRESET),
+        "seed": int(runtime_config.get("seed", 0) or 0),
     }
     project_data["updated_at"] = utc_now()
     save_json(str(project_file), project_data)
@@ -1126,28 +1146,29 @@ def _render_image_frame_images(
             "auth_password": runtime_config.get("image_frame_auth_password"),
         }
     )
+    runtime["seed"] = seed
     client = ImageFrameClient(runtime["api_base"])
     client.login(runtime.get("auth_username", ""), runtime.get("auth_password", ""))
-    emit_progress(progress_callback, "illustration_queue", "姝ｅ湪鎻愪氦鍒?Image Frame")
+    emit_progress(progress_callback, "illustration_queue", "正在提交到 Image Frame")
     created = client.create_text_to_image_task(runtime, _image_frame_prompt(prompt_payload), timeout=60)
     task_id = str(created.get("id") or "").strip()
     if not task_id:
-        raise RuntimeError(f"Image Frame 鏈繑鍥炰换鍔?ID: {created}")
+        raise RuntimeError(f"Image Frame 未返回任务 ID: {created}")
 
-    emit_progress(progress_callback, "illustration_wait", "Image Frame 姝ｅ湪鐢熸垚鍥剧墖")
+    emit_progress(progress_callback, "illustration_wait", "Image Frame 正在生成图片")
     completed = client.wait_for_task(
         task_id,
         timeout=int(runtime["timeout"]),
         poll_interval=float(runtime["poll_interval"]),
     )
     if str(completed.get("status", "")).lower() != "succeeded":
-        raise RuntimeError(f"Image Frame 鐢熸垚澶辫触: {completed.get('error') or completed}")
+        raise RuntimeError(f"Image Frame 生成失败: {completed.get('error') or completed}")
 
     assets = completed.get("output_assets") or []
     if not assets:
-        raise RuntimeError("Image Frame 宸插畬鎴愪换鍔★紝浣嗘病鏈夎繑鍥炲浘鐗囪緭鍑恒€?")
+        raise RuntimeError("Image Frame 已完成任务，但没有返回图片输出。")
 
-    emit_progress(progress_callback, "illustration_download", "姝ｅ湪涓嬭浇骞朵繚瀛?Image Frame 缁撴灉")
+    emit_progress(progress_callback, "illustration_download", "正在下载并保存 Image Frame 结果")
     record_dir.mkdir(parents=True, exist_ok=True)
     for old_file in record_dir.glob("image_*"):
         old_file.unlink(missing_ok=True)
@@ -1173,7 +1194,7 @@ def _render_image_frame_images(
             }
         )
 
-    emit_progress(progress_callback, "illustration_saved", "鎻掑浘鏂囦欢宸蹭繚瀛?")
+    emit_progress(progress_callback, "illustration_saved", "插图文件已保存")
     return task_id, seed, saved_images
 
 
@@ -1361,6 +1382,19 @@ def illustrate_chapter(
         "negative_prompt": prompt_payload.get("negative_prompt", ""),
         "prompt_source": prompt_payload.get("prompt_source", "fallback"),
         "user_request": user_request,
+        "backend": resolved_runtime.get("backend", "image_frame"),
+        "image_frame": {
+            "api_base": resolved_runtime.get("image_frame_api_base", ""),
+            "provider": resolved_runtime.get("image_frame_provider", ""),
+            "model": resolved_runtime.get("image_frame_model", ""),
+            "size": resolved_runtime.get("image_frame_size", ""),
+            "aspect_ratio": resolved_runtime.get("image_frame_aspect_ratio", ""),
+            "google_image_size": resolved_runtime.get("image_frame_google_image_size", ""),
+            "quality": resolved_runtime.get("image_frame_quality", ""),
+            "background": resolved_runtime.get("image_frame_background", ""),
+            "moderation": resolved_runtime.get("image_frame_moderation", ""),
+            "num_outputs": int(resolved_runtime.get("image_frame_num_outputs", 1)),
+        },
         "comfyui": {
             "api_base": resolved_runtime.get("comfyui_api_base", ""),
             "workflow_template": resolved_runtime.get("workflow_template", ""),
@@ -1488,6 +1522,19 @@ def illustrate_cover(
         "negative_prompt": prompt_payload.get("negative_prompt", ""),
         "prompt_source": prompt_payload.get("prompt_source", "fallback"),
         "user_request": user_request,
+        "backend": resolved_runtime.get("backend", "image_frame"),
+        "image_frame": {
+            "api_base": resolved_runtime.get("image_frame_api_base", ""),
+            "provider": resolved_runtime.get("image_frame_provider", ""),
+            "model": resolved_runtime.get("image_frame_model", ""),
+            "size": resolved_runtime.get("image_frame_size", ""),
+            "aspect_ratio": resolved_runtime.get("image_frame_aspect_ratio", ""),
+            "google_image_size": resolved_runtime.get("image_frame_google_image_size", ""),
+            "quality": resolved_runtime.get("image_frame_quality", ""),
+            "background": resolved_runtime.get("image_frame_background", ""),
+            "moderation": resolved_runtime.get("image_frame_moderation", ""),
+            "num_outputs": int(resolved_runtime.get("image_frame_num_outputs", 1)),
+        },
         "comfyui": {
             "api_base": resolved_runtime.get("comfyui_api_base", ""),
             "workflow_template": resolved_runtime.get("workflow_template", ""),
@@ -1554,6 +1601,19 @@ def illustrate_character_portraits(
             "negative_prompt": prompt_payload.get("negative_prompt", ""),
             "prompt_source": prompt_payload.get("prompt_source", "fallback"),
             "user_request": user_request,
+            "backend": resolved_runtime.get("backend", "image_frame"),
+            "image_frame": {
+                "api_base": resolved_runtime.get("image_frame_api_base", ""),
+                "provider": resolved_runtime.get("image_frame_provider", ""),
+                "model": resolved_runtime.get("image_frame_model", ""),
+                "size": resolved_runtime.get("image_frame_size", ""),
+                "aspect_ratio": resolved_runtime.get("image_frame_aspect_ratio", ""),
+                "google_image_size": resolved_runtime.get("image_frame_google_image_size", ""),
+                "quality": resolved_runtime.get("image_frame_quality", ""),
+                "background": resolved_runtime.get("image_frame_background", ""),
+                "moderation": resolved_runtime.get("image_frame_moderation", ""),
+                "num_outputs": int(resolved_runtime.get("image_frame_num_outputs", 1)),
+            },
             "comfyui": {
                 "api_base": resolved_runtime.get("comfyui_api_base", ""),
                 "workflow_template": resolved_runtime.get("workflow_template", ""),

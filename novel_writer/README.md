@@ -156,7 +156,7 @@ cd /home/wsy/novel_frame_2/novel_writer
 cp external_services.example.json external_services.json
 ```
 
-`external_services.json` 已被 `.gitignore` 忽略，适合保存每台机器不同的 ComfyUI 地址、workflow 路径、checkpoint、VoxCPM2 环境路径等部署参数。如果你想把配置文件放到别处：
+`external_services.json` 已被 `.gitignore` 忽略，适合保存每台机器不同的 Image Frame、ComfyUI、VoxCPM2 等服务地址和部署参数。如果你想把配置文件放到别处：
 
 ```bash
 export NOVEL_EXTERNAL_SERVICES_CONFIG=/your/path/external_services.json
@@ -172,6 +172,14 @@ export NOVEL_EXTERNAL_SERVICES_CONFIG=/your/path/external_services.json
 
 ```json
 {
+  "image_frame": {
+    "api_base": "http://127.0.0.1:8010",
+    "provider": "google_ai",
+    "model": "",
+    "aspect_ratio": "1:1",
+    "num_outputs": 1,
+    "timeout": 600
+  },
   "comfyui": {
     "api_base": "http://127.0.0.1:8188",
     "root": "/home/wsy/ComfyUI_cu128_50XX/ComfyUI",
@@ -194,6 +202,8 @@ export NOVEL_EXTERNAL_SERVICES_CONFIG=/your/path/external_services.json
 说明：
 
 - `comfyui.api_base` 是 ComfyUI 的 HTTP API 地址
+- `image_frame.api_base` 是 Image Frame 的 HTTP API 地址，默认使用 `/api/tasks` 文生图
+- `image_frame.provider` 可填 `google_ai`、`openai`、`xai`，旧配置中的 `google` 会自动兼容为 `google_ai`
 - `comfyui.root` 用于自动寻找 `models/checkpoints/`
 - `comfyui.workflow_template` 可直接指定 workflow JSON
 - `voxcpm2.python` 是 VoxCPM2 虚拟环境里的 Python
@@ -524,16 +534,36 @@ NOVEL_WRITER_AUTH_ENABLED=0
 
 然后重启 Web UI。
 
-## 8. ComfyUI 插图能力
+## 8. 插图生成能力
 
-现在项目支持把章节正文送入 ComfyUI 生成插图：
+现在项目支持把章节正文送入 Image Frame 或 ComfyUI 生成插图：
 
 - `app.py illustrate`：为指定章节或全部章节生成插图
 - `app.py next --illustrate`：续写完后立即为本批新章节配图
 - `windows/quick_illustrate.ps1` / `windows/quick_illustrate.bat`：Windows 下快速给章节配图
 - Web UI 项目页与章节页都可以直接触发插图生成
 
-推荐先在 `external_services.json` 中配置 ComfyUI。未配置时，系统会继续尝试自动寻找同级目录中的 ComfyUI 安装，例如：
+默认插图后端是 `image_frame`，会调用 Image Frame 的 `POST /api/tasks` 创建 `text_to_image` 任务，再轮询 `GET /api/tasks/{task_id}` 下载结果。可在 `external_services.json` 中切换供应商：
+
+```json
+{
+  "image_frame": {
+    "api_base": "http://127.0.0.1:8010",
+    "provider": "google_ai",
+    "model": "",
+    "aspect_ratio": "1:1",
+    "num_outputs": 1
+  }
+}
+```
+
+命令行也可以临时覆盖：
+
+```bash
+python3 app.py illustrate --project ./output/novel_project_xxx --chapter chapter_0001 --illustration-backend image_frame --image-frame-provider openai --image-frame-model gpt-image-1.5
+```
+
+如果使用 ComfyUI，推荐先在 `external_services.json` 中配置。未配置时，系统会继续尝试自动寻找同级目录中的 ComfyUI 安装，例如：
 
 ```text
 ../ComfyUI_cu128_50XX/ComfyUI
@@ -553,7 +583,7 @@ NOVEL_WRITER_AUTH_ENABLED=0
 示例：
 
 ```bash
-python3 app.py illustrate --project ./output/novel_project_xxx --chapter chapter_0001 --checkpoint illusious/illustrij_v21.safetensors
+python3 app.py illustrate --project ./output/novel_project_xxx --chapter chapter_0001 --illustration-backend comfyui --checkpoint illusious/illustrij_v21.safetensors
 ```
 
 或在续写后自动配图：

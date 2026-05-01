@@ -46,7 +46,7 @@
   "image_frame": {
     "_note": "Image Frame HTTP service used when illustration backend is image_frame.",
     "api_base": "http://127.0.0.1:8010",
-    "provider": "google",
+    "provider": "google_ai",
     "model": "",
     "size": "",
     "aspect_ratio": "1:1",

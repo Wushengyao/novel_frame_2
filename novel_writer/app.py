@@ -103,12 +103,17 @@ def _add_illustration_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workers", type=int, help="Max concurrent illustration jobs")
     parser.add_argument("--illustration-backend", choices=("image_frame", "comfyui"), help="Illustration backend")
     parser.add_argument("--image-frame-api-base", help="Image Frame API base URL")
-    parser.add_argument("--image-frame-provider", help="Image Frame provider id, for example google/openai/xai")
+    parser.add_argument("--image-frame-provider", help="Image Frame provider id, for example google_ai/openai/xai")
     parser.add_argument("--image-frame-model", help="Image Frame model name")
     parser.add_argument("--image-frame-size", help="Image Frame size, for example 1024x1024")
     parser.add_argument("--image-frame-aspect-ratio", help="Image Frame aspect ratio, for example 1:1")
     parser.add_argument("--image-frame-google-image-size", help="Google image size option")
+    parser.add_argument("--image-frame-num-outputs", type=int, help="Number of Image Frame outputs")
+    parser.add_argument("--image-frame-quality", help="Image Frame quality option")
+    parser.add_argument("--image-frame-background", help="Image Frame background option")
+    parser.add_argument("--image-frame-moderation", help="Image Frame moderation option")
     parser.add_argument("--image-frame-timeout", type=int, help="Image Frame task timeout in seconds")
+    parser.add_argument("--image-frame-poll-interval", type=float, help="Image Frame task polling interval")
     parser.add_argument("--comfyui-api-base", help="ComfyUI API base URL")
     parser.add_argument("--comfyui-root", help="Optional ComfyUI root directory")
     parser.add_argument("--checkpoint", help="Checkpoint name for CheckpointLoaderSimple")
@@ -131,7 +136,12 @@ def _extract_illustration_overrides(args: argparse.Namespace) -> dict:
         "image_frame_size": getattr(args, "image_frame_size", None),
         "image_frame_aspect_ratio": getattr(args, "image_frame_aspect_ratio", None),
         "image_frame_google_image_size": getattr(args, "image_frame_google_image_size", None),
+        "image_frame_num_outputs": getattr(args, "image_frame_num_outputs", None),
+        "image_frame_quality": getattr(args, "image_frame_quality", None),
+        "image_frame_background": getattr(args, "image_frame_background", None),
+        "image_frame_moderation": getattr(args, "image_frame_moderation", None),
         "image_frame_timeout": getattr(args, "image_frame_timeout", None),
+        "image_frame_poll_interval": getattr(args, "image_frame_poll_interval", None),
         "comfyui_api_base": getattr(args, "comfyui_api_base", None),
         "comfyui_root": getattr(args, "comfyui_root", None),
         "checkpoint": getattr(args, "checkpoint", None),
@@ -282,6 +292,19 @@ def _launch_background_illustration_job(
         command.extend(["--workers", str(max_workers)])
 
     flag_map = {
+        "backend": "--illustration-backend",
+        "image_frame_api_base": "--image-frame-api-base",
+        "image_frame_provider": "--image-frame-provider",
+        "image_frame_model": "--image-frame-model",
+        "image_frame_size": "--image-frame-size",
+        "image_frame_aspect_ratio": "--image-frame-aspect-ratio",
+        "image_frame_google_image_size": "--image-frame-google-image-size",
+        "image_frame_num_outputs": "--image-frame-num-outputs",
+        "image_frame_quality": "--image-frame-quality",
+        "image_frame_background": "--image-frame-background",
+        "image_frame_moderation": "--image-frame-moderation",
+        "image_frame_timeout": "--image-frame-timeout",
+        "image_frame_poll_interval": "--image-frame-poll-interval",
         "comfyui_api_base": "--comfyui-api-base",
         "comfyui_root": "--comfyui-root",
         "checkpoint": "--checkpoint",
