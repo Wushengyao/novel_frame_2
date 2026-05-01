@@ -1002,7 +1002,6 @@ def _build_author_intent_from_project(project: dict, world: dict, style: dict, p
         "每章必须有具体场景压力、人物选择和可见结果，避免只概括推进。",
         "关键互动要用动作、感官、心理和对话交替呈现，避免平铺直叙。",
         "若延续同一地点或目标，必须写出新的信息、代价、关系变化或生存改造成果。",
-        "成人暧昧只写成年人之间的张力、调侃、照料和感官氛围，不写露骨性行为。",
     ]
     must_haves = [
         str(item).strip()
