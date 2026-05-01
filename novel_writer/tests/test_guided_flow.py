@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import (
+    _audiobook_segment_model_overrides_from_args,
     _expert_mode_overrides_from_args,
     _quality_model_overrides_from_args,
     main,
@@ -58,6 +59,23 @@ class GuidedFlowTests(unittest.TestCase):
         self.assertTrue(overrides["expert_mode"]["enabled"])
         self.assertEqual(overrides["expert_mode"]["models"][0]["model_provider"], "gemini")
         self.assertEqual(overrides["expert_mode"]["models"][0]["model_name"], "gemini-3.1-pro-preview")
+
+    def test_cli_audiobook_segment_model_overrides_are_nested(self) -> None:
+        overrides = _audiobook_segment_model_overrides_from_args(
+            Namespace(
+                audiobook_segment_provider="gemini",
+                audiobook_segment_model="gemini-2.5-flash",
+                audiobook_segment_api_base="",
+                audiobook_segment_max_tokens=3000,
+                audiobook_segment_timeout=240,
+            )
+        )
+
+        segment_model = overrides["audiobook_segment_model"]
+        self.assertEqual(segment_model["model_provider"], "gemini")
+        self.assertEqual(segment_model["model_name"], "gemini-2.5-flash")
+        self.assertEqual(segment_model["max_tokens"], "3000")
+        self.assertEqual(segment_model["timeout"], "240")
 
     def _summary_payload(self, next_goal: str = "继续推进下一步") -> dict:
         return {

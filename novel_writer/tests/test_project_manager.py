@@ -140,6 +140,12 @@ class ProjectManagerTests(unittest.TestCase):
                     "api_key": "quality-key",
                     "temperature": 0.4,
                 },
+                "audiobook_segment_model": {
+                    "model_provider": "gemini",
+                    "model_name": "gemini-2.5-flash",
+                    "api_key": "segment-key",
+                    "max_tokens": 3000,
+                },
                 "expert_mode": {
                     "enabled": True,
                     "models": [
@@ -157,6 +163,9 @@ class ProjectManagerTests(unittest.TestCase):
         self.assertEqual(persisted["quality_model"]["api_key"], "")
         self.assertEqual(persisted["quality_model"]["model_name"], "gemini-2.5-pro")
         self.assertEqual(persisted["quality_model"]["temperature"], 0.4)
+        self.assertEqual(persisted["audiobook_segment_model"]["api_key"], "")
+        self.assertEqual(persisted["audiobook_segment_model"]["model_name"], "gemini-2.5-flash")
+        self.assertEqual(persisted["audiobook_segment_model"]["max_tokens"], 3000)
         self.assertTrue(persisted["expert_mode"]["enabled"])
         self.assertEqual(persisted["expert_mode"]["models"][0]["api_key"], "")
 
