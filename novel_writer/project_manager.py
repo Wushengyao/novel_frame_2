@@ -106,6 +106,7 @@ GENERIC_CHAPTER_TITLE_PATTERN = re.compile(
 STATS_PHASES = (
     "init",
     "outline",
+    "high_auto_plan",
     "craft_brief",
     "writer",
     "quality_review",
@@ -2071,6 +2072,14 @@ def _unique_import_project_id(project_id: str, output_dir: Path, existing_ids: s
     raise RuntimeError("无法为导入项目生成唯一 project_id。")
 
 
+def _path_is_relative_to(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
 def _extract_project_archive(
     archive: zipfile.ZipFile,
     members: dict[str, zipfile.ZipInfo],
@@ -2089,7 +2098,7 @@ def _extract_project_archive(
             continue
         target_path = target_dir.joinpath(*relative_path.parts)
         resolved_target = target_path.resolve()
-        if not resolved_target.is_relative_to(target_root):
+        if not _path_is_relative_to(resolved_target, target_root):
             raise ValueError(f"项目包中包含不安全路径: {member_name!r}")
         target_path.parent.mkdir(parents=True, exist_ok=True)
         with archive.open(info) as source, target_path.open("wb") as destination:

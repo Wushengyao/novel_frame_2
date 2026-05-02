@@ -3486,6 +3486,7 @@ def _render_effective_task_summary(task_card: dict | None) -> str:
     source = str(task_card.get("source", "") or "").strip()
     source_label_map = {
         "progression_selected": "已由推进选项细化",
+        "high_auto_plan": "高质量自动细化",
         "chapter_outline": "来自分章大纲",
         "volume_outline": "来自分卷大纲",
         "plot_state": "来自 live state 的下一目标",
@@ -3498,10 +3499,11 @@ def _render_effective_task_summary(task_card: dict | None) -> str:
     key_events = "".join(f"<li>{escape(item)}</li>" for item in plan_steps)
     derived = task_card.get("derived_from") or {}
     derived_text = ""
-    if source == "progression_selected" and derived:
+    if source in {"progression_selected", "high_auto_plan"} and derived:
         option_id = str(derived.get("option_id", "") or "").strip()
-        session_id = str(derived.get("session_id", "") or "").strip()
-        details = " / ".join(part for part in (option_id, session_id) if part)
+        session_id = str(derived.get("session_id", "") or derived.get("workflow_id", "") or "").strip()
+        baseline_source = str(derived.get("baseline_source", "") or "").strip()
+        details = " / ".join(part for part in (option_id, baseline_source, session_id) if part)
         if details:
             derived_text = f'<div class="muted">来源记录：{escape(details)}</div>'
 

@@ -12,6 +12,7 @@ from llm_client import generate_text_with_metadata, raise_if_llm_response_trunca
 from project_manager import load_json, record_context_telemetry, save_json, update_project_stats
 from prompt_builder import (
     build_craft_brief_prompt,
+    build_high_auto_plan_prompt,
     build_quality_review_prompt,
     build_rewrite_prompt,
     build_system_prompt,
@@ -53,6 +54,7 @@ REVIEW_SCORE_KEYS = (
 REVIEW_PASS_AVERAGE = 7.0
 REVIEW_PASS_MINIMUM = 5.0
 REVIEW_FLATNESS_REWRITE_MINIMUM = 7.0
+HIGH_REVIEW_FLATNESS_REWRITE_MINIMUM = 8.0
 FLATNESS_SCORE_KEYS = (
     "reader_hook",
     "scene_freshness",
@@ -216,6 +218,34 @@ def fallback_craft_brief(prompt_context: dict) -> dict:
     )
 
 
+def fallback_high_auto_plan(prompt_context: dict) -> dict:
+    task_card = prompt_context.get("task_card") or {}
+    objective = str(task_card.get("objective") or task_card.get("goal") or "").strip()
+    plan_summary = str(task_card.get("plan_summary") or task_card.get("summary") or "").strip()
+    plan_steps = _normalize_string_list(task_card.get("plan_steps") or task_card.get("key_events"), max_items=5)
+    guidance = str(task_card.get("plan_guidance") or task_card.get("writer_guidance") or "").strip()
+    if not plan_steps:
+        plan_steps = [
+            "用具体场面开章，先呈现人物所处环境、身体/情绪状态和眼前压力。",
+            "让核心人物围绕本章 objective 做出明确选择，并遇到可见阻力。",
+            "用动作、感官、心理和对话交替推进，不把剧情写成概括清单。",
+            "在结尾兑现新的信息、代价、关系变化或生存成果。",
+        ]
+    return {
+        "title": str(task_card.get("title") or "").strip(),
+        "plan_summary": plan_summary or objective,
+        "plan_steps": plan_steps[:5],
+        "plan_guidance": "\n".join(
+            part
+            for part in (
+                guidance,
+                "高质量模式兜底细化：把任务目标转成具体场景、互动火花、人物选择和可验证变化。",
+            )
+            if part
+        ),
+    }
+
+
 def normalize_quality_review(payload: dict | None, *, fallback_passed: bool = False, review_unavailable: bool = False) -> dict:
     source = payload if isinstance(payload, dict) else {}
     raw_scores = source.get("scores") if isinstance(source.get("scores"), dict) else {}
@@ -323,6 +353,10 @@ def quality_review_needs_rewrite(review: dict, mode: object) -> bool:
         return False
     if not quality_review_passed(review):
         return True
+    if normalized_mode == WRITING_QUALITY_HIGH:
+        scores = review.get("scores") if isinstance(review.get("scores"), dict) else {}
+        if any(_coerce_score(scores.get(key)) < HIGH_REVIEW_FLATNESS_REWRITE_MINIMUM for key in FLATNESS_SCORE_KEYS):
+            return True
     return bool(review.get("needs_rewrite"))
 
 
@@ -526,6 +560,70 @@ def generate_craft_brief(
     return brief
 
 
+def generate_high_auto_plan(
+    project_path: str,
+    prompt_context: dict,
+    config: dict,
+    *,
+    log_context: dict[str, Any],
+    progress_callback=None,
+) -> dict:
+    chapter_number = int((prompt_context.get("task_card") or {}).get("chapter_number", 0) or 0)
+    fallback = fallback_high_auto_plan(prompt_context)
+    prompt = build_high_auto_plan_prompt(prompt_context)
+    request_config, request_log_context, quality_extra = _quality_request_config(config, log_context, "high_auto_plan")
+    record_context_telemetry(
+        project_path,
+        "high_auto_plan",
+        prompt_chars=len(prompt),
+        section_chars=prompt_context.get("section_chars"),
+        planning_mode=config.get("planning_mode", ""),
+        extra={"target_chapter_number": chapter_number, **quality_extra},
+    )
+    try:
+        log_info("high_auto_plan: requesting refined chapter plan")
+        emit_progress(progress_callback, "high_auto_plan", "Generating high-quality chapter plan")
+        response_text, metadata = generate_text_with_metadata(
+            prompt,
+            request_config,
+            log_context=request_log_context,
+            system_prompt=build_system_prompt("planner"),
+            response_format="json",
+        )
+        update_project_stats(project_path, phase="high_auto_plan", success=True, usage=metadata.get("usage"), metadata=metadata)
+    except Exception as exc:  # pragma: no cover - resilience path
+        update_project_stats(project_path, phase="high_auto_plan", success=False, usage=None)
+        log_warning(f"high_auto_plan: using fallback plan, reason: {exc}")
+        plan = deepcopy(fallback)
+        plan["fallback_reason"] = str(exc)
+    else:
+        try:
+            payload = extract_json_object(response_text, "Could not parse JSON from high auto plan response.")
+            plan = {
+                "title": str(payload.get("title") or fallback.get("title") or "").strip(),
+                "plan_summary": str(payload.get("plan_summary") or payload.get("summary") or fallback.get("plan_summary") or "").strip(),
+                "plan_steps": _normalize_string_list(payload.get("plan_steps") or payload.get("key_events") or fallback.get("plan_steps"), max_items=5),
+                "plan_guidance": str(
+                    payload.get("plan_guidance")
+                    or payload.get("writer_guidance")
+                    or fallback.get("plan_guidance")
+                    or ""
+                ).strip(),
+            }
+        except Exception as exc:  # pragma: no cover - malformed model output fallback
+            save_failed_llm_output(
+                project_path,
+                "high_auto_plan",
+                response_text,
+                error=str(exc),
+                context=request_log_context,
+            )
+            log_warning(f"high_auto_plan: using fallback plan, reason: {exc}")
+            plan = deepcopy(fallback)
+            plan["fallback_reason"] = str(exc)
+    return plan
+
+
 def review_chapter_draft(
     project_path: str,
     prompt_context: dict,
@@ -684,6 +782,7 @@ __all__ = [
     "WRITING_QUALITY_LIGHT",
     "craft_brief_path",
     "generate_craft_brief",
+    "generate_high_auto_plan",
     "normalize_craft_brief",
     "normalize_quality_config",
     "normalize_rewrite_response_text",

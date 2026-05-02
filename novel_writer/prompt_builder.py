@@ -927,9 +927,14 @@ def build_craft_brief_prompt(data: dict) -> str:
         )
     if _has_section(sections, "reader_setup"):
         requirements.append("蓝图要决定哪些读者开卷导语里的公开设定需要在正文中戏剧化呈现，不能安排正文机械复述导语")
+    if _has_section(sections, "continuation_contract"):
+        requirements.append(
+            "本章是续文章节；蓝图必须把“承接状态”改造成具体开场、戏剧问题、互动火花、人物选择和可验证变化"
+        )
     requirements.extend(
         [
             "蓝图必须显式照顾创作风味契约：开章钩子、关系火花、生存细节、感官描写、核心人物身心反应、幽默或温情破局、平淡规避",
+            "高质量蓝图必须给出关系/情绪转折的具体触发点，不能只写“更紧张”“更细腻”“加强互动”等抽象话",
             "`forbidden_repeats` 必须列出需要避开的上一章表层动作、姿态、句式或结尾套路",
             "`fresh_interaction_patterns` 要给出新的互动方式，不要只写“更细腻”“更紧张”这类抽象要求",
             "`success_criteria` 给出 2 到 5 条本章必须兑现的可检查目标，用于写后质检",
@@ -941,6 +946,7 @@ def build_craft_brief_prompt(data: dict) -> str:
         _section_block("作者意图", sections.get("author_intent", "")),
         _section_block("创作风味契约", sections.get("creative_contract", "")),
         _section_block("首章读者入口约束", sections.get("opening_contract", "")),
+        _section_block("续文章节场景化约束", sections.get("continuation_contract", "")),
         _section_block("读者开卷导语（读者可见）", sections.get("reader_setup", "")),
         _section_block("下一章任务卡", sections.get("chapter_task", "")),
         _section_block("当前 live state", sections.get("live_state", "")),
@@ -956,8 +962,47 @@ def build_craft_brief_prompt(data: dict) -> str:
 要求：
 {_numbered_requirements(requirements)}
 
+    输出 JSON 骨架：
+    {{"chapter_hook":"","context_bridge":"","dramatic_question":"","conflict_pressure":"","action_reasoning":"","emotional_turn":"","scene_movement":[],"sensory_palette":[],"fresh_interaction_patterns":[],"forbidden_repeats":[],"success_criteria":[],"focus_notes":""}}
+    """
+
+
+def build_high_auto_plan_prompt(data: dict) -> str:
+    sections = data.get("sections", {}) if isinstance(data, dict) else {}
+    task_card = data.get("task_card") if isinstance(data.get("task_card"), dict) else {}
+    objective = str(task_card.get("objective", "") or task_card.get("goal", "") or "").strip()
+    requirements = [
+        "输出必须是合法 JSON",
+        "只细化当前这一章，不要改变任务卡 objective，不要提前完成后续章节核心情节",
+        "`plan_summary` 写 2 到 5 句，必须包含具体开场、核心压力、人物互动/关系转折、可见结果或代价",
+        "`plan_steps` 给 4 到 5 条真正会发生的场景推进，每条都要有动作、阻力、选择或结果，不要写成抽象清单",
+        "`plan_guidance` 给正文写法重点，必须包含人物声音、感官/动作、互动火花和避免模板化的提醒",
+        "不要输出解释，不要输出 Markdown",
+    ]
+    if _has_section(sections, "continuation_contract"):
+        requirements.append("必须落实续文章节场景化约束：开章具体、互动有火花、行动有选择、结尾有可验证变化")
+    prompt_body = _join_blocks(
+        "你是长篇连载小说的高质量章节规划师。请在不改写 objective 的前提下，把当前章任务卡细化成更可写、更有戏剧性的执行 plan。",
+        _section_block("当前 objective（硬约束）", objective),
+        _section_block("作者意图", sections.get("author_intent", "")),
+        _section_block("创作风味契约", sections.get("creative_contract", "")),
+        _section_block("续文章节场景化约束", sections.get("continuation_contract", "")),
+        _section_block("下一章任务卡基线", sections.get("chapter_task", "")),
+        _section_block("当前 live state", sections.get("live_state", "")),
+        _section_block("世界", sections.get("static_world", "")),
+        _section_block("角色", sections.get("static_characters", "")),
+        _section_block("更早相关记忆", sections.get("retrieved_memory", "")),
+        _section_block("近期写法避让", sections.get("recent_craft_memory", "")),
+        _section_block("最近场景", sections.get("recent_scene", "")),
+        _section_block("补充写作约束", sections.get("style_contract", "")),
+    )
+    return f"""{prompt_body}
+
+要求：
+{_numbered_requirements(requirements)}
+
 输出 JSON 骨架：
-{{"chapter_hook":"","context_bridge":"","dramatic_question":"","conflict_pressure":"","action_reasoning":"","emotional_turn":"","scene_movement":[],"sensory_palette":[],"fresh_interaction_patterns":[],"forbidden_repeats":[],"success_criteria":[],"focus_notes":""}}
+{{"title":"","plan_summary":"","plan_steps":["","","",""],"plan_guidance":""}}
 """
 
 
@@ -994,6 +1039,10 @@ def build_writer_prompt(
             "本章必须产生至少一项新的可验证变化；沿用同一地点、目标或冲突时，也要写出新的信息、代价、决定或结果",
             "严格只写当前这一章。任务卡是当前章节任务的最高优先级来源，不要提前完成下一章或后续章节的大事件",
         ]
+        if _has_section(sections, "continuation_contract"):
+            requirements.append(
+                "本章是续文章节；必须落实续文章节场景化约束，不能写成承接状态、执行步骤和结尾铺垫的清单式章节"
+            )
         if _has_section(sections, "recent_craft_memory") or _has_section(sections, "craft_brief"):
             requirements.append(
                 "避开近期写法避让和本章创作蓝图中列出的表层重复；同类动作只有在产生新功能、新代价或新关系变化时才能使用"
@@ -1020,6 +1069,7 @@ def build_writer_prompt(
             _section_block("作者意图", sections.get("author_intent", "")),
             _section_block("创作风味契约", sections.get("creative_contract", "")),
             _section_block("首章读者入口约束", sections.get("opening_contract", "")),
+            _section_block("续文章节场景化约束", sections.get("continuation_contract", "")),
             _section_block("读者开卷导语（读者可见）", sections.get("reader_setup", "")),
             _section_block("下一章任务卡", sections.get("chapter_task", "")),
             _section_block("当前 live state", sections.get("live_state", "")),
@@ -1145,6 +1195,10 @@ def build_quality_review_prompt(data: dict, draft_text: str, *, strict: bool = F
     ]
     if _has_section(sections, "craft_brief"):
         requirements.append("重点检查“本章创作蓝图”里的验收标准是否兑现；未兑现的必须写入 `blocking_issues` 或 `issues`")
+    if _has_section(sections, "continuation_contract"):
+        requirements.append(
+            "重点检查“续文章节场景化约束”是否兑现；清单式推进、互动稀薄、缺少情绪/关系转折或可验证变化时，应压低平淡度相关分数并给出重写方案"
+        )
     requirements.append(
         "单独检查“平淡度”：开章钩子弱、角色声音泛、场景新鲜度低、互动火花不足、概括性叙述过多，都要压低对应分项并写入 `issues` 或 `nice_to_have`"
     )
@@ -1172,6 +1226,7 @@ def build_quality_review_prompt(data: dict, draft_text: str, *, strict: bool = F
         _section_block("作者意图", sections.get("author_intent", "")),
         _section_block("创作风味契约", sections.get("creative_contract", "")),
         _section_block("首章读者入口约束", sections.get("opening_contract", "")),
+        _section_block("续文章节场景化约束", sections.get("continuation_contract", "")),
         _section_block("读者开卷导语（读者可见）", sections.get("reader_setup", "")),
         _section_block("下一章任务卡", sections.get("chapter_task", "")),
         _section_block("当前 live state", sections.get("live_state", "")),
@@ -1206,6 +1261,10 @@ def build_rewrite_prompt(data: dict, draft_text: str, review_report: dict) -> st
     ]
     if _has_section(sections, "opening_contract"):
         requirements.append("本章是正文第一章；重写时必须补足读者入口，再推进任务卡事件，不要默认读者知道设定文件里的前情")
+    if _has_section(sections, "continuation_contract"):
+        requirements.append(
+            "重写时必须优先修复续文章节的干瘪、模板化和清单式推进：补具体开场、互动火花、情绪/关系转折、行动选择和可验证变化"
+        )
     if _has_section(sections, "reader_setup"):
         requirements.append("重写后要与读者开卷导语公开信息一致；正文仍要独立可读，不能把导语当作已发生正文")
     requirements.extend(
@@ -1221,6 +1280,7 @@ def build_rewrite_prompt(data: dict, draft_text: str, review_report: dict) -> st
         _section_block("作者意图", sections.get("author_intent", "")),
         _section_block("创作风味契约", sections.get("creative_contract", "")),
         _section_block("首章读者入口约束", sections.get("opening_contract", "")),
+        _section_block("续文章节场景化约束", sections.get("continuation_contract", "")),
         _section_block("读者开卷导语（读者可见）", sections.get("reader_setup", "")),
         _section_block("下一章任务卡", sections.get("chapter_task", "")),
         _section_block("当前 live state", sections.get("live_state", "")),

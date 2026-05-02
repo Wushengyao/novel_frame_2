@@ -122,6 +122,23 @@ class QualityManagerTests(unittest.TestCase):
         self.assertTrue(quality_review_needs_rewrite(review, "balanced"))
         self.assertFalse(quality_review_needs_rewrite(review, "light"))
 
+    def test_high_quality_rewrites_borderline_flatness_even_when_review_passes(self) -> None:
+        scores = self._passing_scores()
+        scores["reader_hook"] = 7
+        review = normalize_quality_review(
+            {
+                "scores": scores,
+                "passed": True,
+                "blocking_issues": [],
+                "rewrite_plan": [],
+            }
+        )
+
+        self.assertTrue(review["passed"])
+        self.assertFalse(review["needs_rewrite"])
+        self.assertFalse(quality_review_needs_rewrite(review, "balanced"))
+        self.assertTrue(quality_review_needs_rewrite(review, "high"))
+
     def test_unavailable_review_never_passes(self) -> None:
         review = normalize_quality_review(None, fallback_passed=False, review_unavailable=True)
 

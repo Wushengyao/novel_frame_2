@@ -20,6 +20,7 @@ from console_logger import log_error, log_info, log_success, log_warning
 from context_builder import (
     WRITER_HARD_TOTAL_CHARS,
     WRITER_SOFT_TOTAL_CHARS,
+    build_high_auto_plan_task_card,
     build_writer_context,
     resolve_effective_chapter_task,
 )
@@ -53,6 +54,7 @@ from progression_manager import (
 from prompt_builder import build_system_prompt, build_writer_prompt
 from quality_manager import (
     generate_craft_brief,
+    generate_high_auto_plan,
     normalize_quality_config,
     quality_mode_allows_rewrite,
     quality_mode_uses_craft_brief,
@@ -443,7 +445,39 @@ def run_next_chapter(
         last_chapter,
         user_request=user_request,
         planning_mode=effective_mode,
+        include_continuation_contract=writing_quality_mode == WRITING_QUALITY_HIGH,
     )
+    if (
+        writing_quality_mode == WRITING_QUALITY_HIGH
+        and current_chapter_count > 0
+        and str((prompt_context.get("task_card") or {}).get("source", "") or "").strip() != "high_auto_plan"
+    ):
+        high_plan_payload = generate_high_auto_plan(
+            project_path,
+            prompt_context,
+            config,
+            log_context=log_context_payload,
+            progress_callback=progress_callback,
+        )
+        build_high_auto_plan_task_card(
+            project_path,
+            project_data,
+            next_context,
+            high_plan_payload,
+            prompt_context.get("task_card") or {},
+            workflow_id=workflow_id,
+            planning_mode=effective_mode,
+            persist=True,
+        )
+        prompt_context = build_writer_context(
+            project_path,
+            project_data,
+            next_context,
+            last_chapter,
+            user_request=user_request,
+            planning_mode=effective_mode,
+            include_continuation_contract=True,
+        )
     if quality_mode_uses_craft_brief(writing_quality_mode):
         craft_brief = generate_craft_brief(
             project_path,
@@ -460,6 +494,7 @@ def run_next_chapter(
             user_request=user_request,
             planning_mode=effective_mode,
             craft_brief=craft_brief,
+            include_continuation_contract=writing_quality_mode == WRITING_QUALITY_HIGH,
         )
     prompt = build_writer_prompt(prompt_context)
     record_context_telemetry(

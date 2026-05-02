@@ -19,13 +19,16 @@ from app import (
     run_next_chapters,
 )
 from prompt_builder import build_system_prompt
-from project_manager import ProjectWriteLockError, acquire_project_write_lock
+from project_manager import ProjectWriteLockError, acquire_project_write_lock, normalize_chapter_text, save_json
 from progression_manager import CUSTOM_PROGRESSION_OPTION_ID, generate_progression_options
 
 from tests.test_support import create_test_project, read_json, runtime_config
 
 
 class GuidedFlowTests(unittest.TestCase):
+    def _chapter_body(self, chapter_path: str | Path) -> str:
+        return normalize_chapter_text(Path(chapter_path).read_text(encoding="utf-8"))
+
     def test_cli_quality_model_overrides_are_nested(self) -> None:
         overrides = _quality_model_overrides_from_args(
             Namespace(
@@ -116,6 +119,19 @@ class GuidedFlowTests(unittest.TestCase):
                 "结尾留下新的线索或代价。",
             ],
             "focus_notes": "保持生存压力，同时让互动方式更有变化。",
+        }
+
+    def _high_auto_plan_payload(self) -> dict:
+        return {
+            "title": "更具体的计划",
+            "plan_summary": "从上一章余波中的具体场面开章，让人物在压力下争执并作出选择，最终带回新的线索和代价。",
+            "plan_steps": [
+                "开章呈现上一章结果造成的身体疲惫、环境压力和人物情绪。",
+                "让核心人物围绕行动路线发生短促冲突，并各自给出理由。",
+                "通过新的协作方式推进探索，途中遭遇具体阻力。",
+                "结尾兑现新的资源、关系或危险变化。",
+            ],
+            "plan_guidance": "保留手选推进方案的目标，但把执行过程写成有钩子、互动火花和情绪转折的场景。",
         }
 
     def _review_payload(self, *, passed: bool, score: int = 8) -> dict:
@@ -291,7 +307,7 @@ class GuidedFlowTests(unittest.TestCase):
             mocked_writer_generate.assert_called_once()
             self.assertEqual(mocked_writer_generate.call_args.kwargs["system_prompt"], build_system_prompt("writer"))
             mocked_state_generate.assert_called_once()
-            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "轻量模式正文")
+            self.assertEqual(self._chapter_body(chapter_path), "轻量模式正文")
             self.assertEqual(list((project_path / "craft_briefs").glob("*.json")), [])
             self.assertEqual(list((project_path / "quality_reviews").glob("*.json")), [])
 
@@ -315,7 +331,7 @@ class GuidedFlowTests(unittest.TestCase):
                 )
 
             self.assertEqual(mocked_writer_generate.call_count, 2)
-            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "完整正文")
+            self.assertEqual(self._chapter_body(chapter_path), "完整正文")
             self.assertNotIn("半截正文", Path(chapter_path).read_text(encoding="utf-8"))
 
     def test_expert_mode_reviews_after_summary_without_changing_chapter(self) -> None:
@@ -363,7 +379,7 @@ class GuidedFlowTests(unittest.TestCase):
                     ),
                 )
 
-            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "专家模式正文")
+            self.assertEqual(self._chapter_body(chapter_path), "专家模式正文")
             writer_context = mocked_writer_generate.call_args.kwargs["log_context"]
             summary_context = mocked_state_generate.call_args.kwargs["log_context"]
             expert_context = mocked_expert_generate.call_args.kwargs["log_context"]
@@ -400,7 +416,7 @@ class GuidedFlowTests(unittest.TestCase):
                     ),
                 )
 
-            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "平衡模式正文")
+            self.assertEqual(self._chapter_body(chapter_path), "平衡模式正文")
             mocked_writer_generate.assert_called_once()
             self.assertEqual(mocked_writer_generate.call_args.args[1]["model_name"], "llama3.2")
             self.assertEqual(
@@ -445,7 +461,7 @@ class GuidedFlowTests(unittest.TestCase):
                     runtime_config("chapter", writing_quality_mode="balanced", review_mode="auto"),
                 )
 
-            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "重写后更鲜活的正文")
+            self.assertEqual(self._chapter_body(chapter_path), "重写后更鲜活的正文")
             phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
             self.assertEqual(phases, ["craft_brief", "quality_review", "rewrite", "quality_review"])
             review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")
@@ -484,7 +500,7 @@ class GuidedFlowTests(unittest.TestCase):
                     ),
                 )
 
-            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "重写后的正文")
+            self.assertEqual(self._chapter_body(chapter_path), "重写后的正文")
             phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
             self.assertEqual(
                 [call.args[1]["model_name"] for call in mocked_quality_generate.call_args_list],
@@ -497,6 +513,63 @@ class GuidedFlowTests(unittest.TestCase):
             self.assertFalse(review["passed"])
             self.assertTrue(second_review["passed"])
             self.assertEqual(pre_rewrite.read_text(encoding="utf-8").strip(), "原始正文")
+
+    def test_high_quality_later_chapter_refines_selected_progression_before_craft_brief(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="quality_high_selected", planning_mode="none")
+            project = read_json(project_path / "project.json")
+            project["chapter_count"] = 1
+            save_json(str(project_path / "project.json"), project)
+            (project_path / "chapters" / "chapter_0001.md").write_text("第一章正文", encoding="utf-8")
+            save_json(
+                str(project_path / "task_cards" / "chapter_0002.json"),
+                {
+                    "chapter_number": 2,
+                    "planning_mode": "none",
+                    "source": "progression_selected",
+                    "title": "短程试探",
+                    "objective": "确认外部通道是否安全",
+                    "plan_summary": "两人离开安全区短程试探。",
+                    "plan_steps": ["出门", "观察", "返回"],
+                    "plan_guidance": "谨慎推进。",
+                    "derived_from": {
+                        "session_id": "session_selected",
+                        "option_id": "option_1",
+                        "base_planning_mode": "none",
+                        "baseline_source": "plot_state",
+                    },
+                },
+            )
+
+            with patch(
+                "quality_manager.generate_text_with_metadata",
+                side_effect=[
+                    (json.dumps(self._high_auto_plan_payload(), ensure_ascii=False), {"usage": {}}),
+                    (json.dumps(self._craft_brief_payload(), ensure_ascii=False), {"usage": {}}),
+                    (json.dumps(self._review_payload(passed=True, score=8), ensure_ascii=False), {"usage": {}}),
+                ],
+            ) as mocked_quality_generate, patch(
+                "app.generate_text_with_metadata",
+                return_value=("第二章正文", {"usage": {}}),
+            ) as mocked_writer_generate, patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ):
+                run_next_chapter(
+                    str(project_path),
+                    runtime_config("none", writing_quality_mode="high", review_mode="auto"),
+                )
+
+            phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
+            self.assertEqual(phases, ["high_auto_plan", "craft_brief", "quality_review"])
+            task_card = read_json(project_path / "task_cards" / "chapter_0002.json")
+            self.assertEqual(task_card["source"], "high_auto_plan")
+            self.assertEqual(task_card["derived_from"]["baseline_source"], "progression_selected")
+            self.assertEqual(task_card["derived_from"]["option_id"], "high_auto_plan")
+            self.assertIn("更具体的计划", task_card["title"])
+            writer_prompt = mocked_writer_generate.call_args.args[0]
+            self.assertIn("续文章节场景化约束", writer_prompt)
+            self.assertIn("更具体的计划", writer_prompt)
 
     def test_unavailable_quality_review_does_not_trigger_auto_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -521,7 +594,7 @@ class GuidedFlowTests(unittest.TestCase):
                     runtime_config("chapter", writing_quality_mode="high", review_mode="auto"),
                 )
 
-            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "质检不可用时保留的原始正文")
+            self.assertEqual(self._chapter_body(chapter_path), "质检不可用时保留的原始正文")
             phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
             self.assertEqual(phases, ["craft_brief", "quality_review", "quality_review"])
             review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")
@@ -552,7 +625,7 @@ class GuidedFlowTests(unittest.TestCase):
                     runtime_config("chapter", writing_quality_mode="balanced", review_mode="auto"),
                 )
 
-            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "解析重试后保留的正文")
+            self.assertEqual(self._chapter_body(chapter_path), "解析重试后保留的正文")
             phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
             self.assertEqual(phases, ["craft_brief", "quality_review", "quality_review"])
             review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")
@@ -584,7 +657,7 @@ class GuidedFlowTests(unittest.TestCase):
                     runtime_config("chapter", writing_quality_mode="high", review_mode="manual"),
                 )
 
-            self.assertEqual(Path(chapter_path).read_text(encoding="utf-8").strip(), "人工审稿保留的原始正文")
+            self.assertEqual(self._chapter_body(chapter_path), "人工审稿保留的原始正文")
             phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
             self.assertEqual(phases, ["craft_brief", "quality_review"])
             review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")

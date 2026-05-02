@@ -23,8 +23,10 @@ from prompt_builder import (
     build_batch_chapter_plan_prompt,
     build_chapter_outline_prompt,
     build_craft_brief_prompt,
+    build_high_auto_plan_prompt,
     build_progression_options_prompt,
     build_quality_review_prompt,
+    build_rewrite_prompt,
     build_summary_prompt,
     build_writer_prompt,
 )
@@ -232,6 +234,36 @@ class ContextBuilderTests(unittest.TestCase):
             ):
                 self.assertIn(key, review_prompt)
             self.assertIn("高质量模式", review_prompt)
+
+    def test_high_continuation_contract_is_available_to_later_chapter_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="high_continuation", planning_mode="none")
+            project = load_json(str(project_path / "project.json"))
+            project["chapter_count"] = 1
+            save_json(str(project_path / "project.json"), project)
+            project_data = load_project(str(project_path))
+            next_context = {"volume": {}, "chapter": {}}
+
+            context = build_writer_context(
+                str(project_path),
+                project_data,
+                next_context,
+                "上一章正文",
+                planning_mode="none",
+                include_continuation_contract=True,
+            )
+            writer_prompt = build_writer_prompt(context)
+            auto_plan_prompt = build_high_auto_plan_prompt(context)
+            craft_prompt = build_craft_brief_prompt(context)
+            review_prompt = build_quality_review_prompt(context, "草稿正文", strict=True)
+            rewrite_prompt = build_rewrite_prompt(context, "草稿正文", {"rewrite_plan": ["补强场景"]})
+
+            self.assertIn("续文章节场景化约束", writer_prompt)
+            self.assertIn("续文章节场景化约束", auto_plan_prompt)
+            self.assertIn("续文章节场景化约束", craft_prompt)
+            self.assertIn("续文章节场景化约束", review_prompt)
+            self.assertIn("续文章节场景化约束", rewrite_prompt)
+            self.assertNotIn("首章读者入口约束", writer_prompt)
 
     def test_first_chapter_writer_prompt_requires_opening_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -552,6 +584,9 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertEqual(task_card["goal"], "建立临时安全区")
             self.assertNotEqual(task_card["summary"], task_card["goal"])
             self.assertIn("建立临时安全区", task_card["summary"])
+            self.assertIn("空间站隔离区", task_card["summary"])
+            self.assertTrue(any("开章" in step for step in task_card["plan_steps"]))
+            self.assertTrue(any("可验证变化" in step for step in task_card["plan_steps"]))
 
     def test_progression_selected_task_card_is_highest_priority_and_deduplicates_next_goal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
