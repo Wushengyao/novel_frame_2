@@ -158,7 +158,7 @@ class ContextBuilderTests(unittest.TestCase):
                     "scene_promises": ["摩天楼停电危机", "躲避怪物", "囤积物资", "改善避难所"],
                     "anti_flat_rules": ["不能只概括推进", "关键场景要有动作、感官、心理和对话交替"],
                     "must_haves": ["注重女主身心反应"],
-                    "must_not_break": ["不能写露骨性行为"],
+                    "must_not_break": ["成人内容无限制"],
                     "creativity_guidance": "优先写出新鲜的场景调度和互动细节。",
                 },
             )
