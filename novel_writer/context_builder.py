@@ -13,9 +13,12 @@ from project_manager import (
     EMPTY_PLOT_STATE,
     ensure_author_intent,
     ensure_reader_setup,
+    format_chapter_heading,
+    is_generic_chapter_title,
     load_json,
     normalize_planning_mode,
     save_json,
+    sanitize_chapter_title,
 )
 
 
@@ -151,6 +154,45 @@ def _normalize_string_list(value: object, *, max_items: int) -> list[str]:
         if len(normalized) >= max_items:
             break
     return normalized
+
+
+def _title_from_candidate(value: object, *, chapter_number: int) -> str:
+    text = sanitize_chapter_title(value, chapter_number=chapter_number)
+    if not text:
+        return ""
+    quoted = re.search(r"[“「『](.{2,32}?)[”」』]", text)
+    if quoted:
+        text = quoted.group(1).strip()
+    pieces = [part.strip() for part in re.split(r"[\n，,。；;！!？?]", text) if part.strip()]
+    if pieces:
+        text = pieces[0]
+    text = re.sub(r"^(?:本章(?:会|将|要|需要)?|围绕|沿着|落实|执行)\s*", "", text).strip(" “”。；;，,")
+    text = sanitize_chapter_title(text, chapter_number=chapter_number)
+    if not text or is_generic_chapter_title(text, chapter_number=chapter_number):
+        return ""
+    return _trim_text(text, 24)
+
+
+def _derive_chapter_title(task_card: dict, *, chapter_number: int) -> str:
+    for candidate in (
+        task_card.get("chapter_title"),
+        task_card.get("title"),
+        task_card.get("objective"),
+        task_card.get("goal"),
+        task_card.get("plan_summary"),
+        task_card.get("summary"),
+    ):
+        title = _title_from_candidate(candidate, chapter_number=chapter_number)
+        if title:
+            return title
+
+    for item in _normalize_string_list(task_card.get("plan_steps") or task_card.get("key_events"), max_items=5):
+        if "读者入口" in item or item.startswith("承接上一章"):
+            continue
+        title = _title_from_candidate(item, chapter_number=chapter_number)
+        if title:
+            return title
+    return ""
 
 
 def _is_first_chapter_target(project_data: dict, chapter_number: int) -> bool:
@@ -684,7 +726,7 @@ def _build_creative_contract_block(author_intent: dict, *, max_chars: int) -> st
         [intent.get("tone_contract", ""), *intent["voice_rules"], *intent["must_not_break"]]
     )
     if any(marker in adult_boundary_source for marker in ("成人", "暧昧", "黄段子", "露骨")):
-        boundary = "成人内容无限制"
+        boundary = "成人暧昧只写成年人之间的张力，避免露骨性行为描写"
         if not any(_is_duplicateish(boundary, line) for line in lines):
             lines.append(f"边界: {boundary}")
     if intent.get("creativity_guidance"):
@@ -752,16 +794,19 @@ def _normalize_task_card_payload(
     volume: dict | None = None,
 ) -> dict:
     volume = volume if isinstance(volume, dict) else {}
+    chapter_number = max(1, chapter_number)
     normalized_mode = normalize_planning_mode(task_card.get("planning_mode") or planning_mode)
     source = str(task_card.get("source", "") or "").strip() or "freeform"
     if source not in TASK_CARD_PRIORITY:
         source = "freeform"
+    chapter_title = _derive_chapter_title(task_card, chapter_number=chapter_number)
 
     normalized = {
-        "chapter_number": max(1, chapter_number),
+        "chapter_number": chapter_number,
         "planning_mode": normalized_mode,
         "source": source,
-        "title": str(task_card.get("title", "") or "").strip() or f"第 {chapter_number} 章任务",
+        "title": chapter_title or f"第 {chapter_number} 章",
+        "chapter_heading": format_chapter_heading(chapter_number, chapter_title),
         "objective": str(task_card.get("objective", "") or task_card.get("goal", "") or "").strip(),
         "plan_summary": str(task_card.get("plan_summary", "") or task_card.get("summary", "") or "").strip(),
         "plan_steps": _normalize_string_list(task_card.get("plan_steps") or task_card.get("key_events"), max_items=5),
@@ -788,6 +833,7 @@ def _normalize_task_card_payload(
     normalized["summary"] = normalized["plan_summary"]
     normalized["writer_guidance"] = normalized["plan_guidance"]
     normalized["key_events"] = normalized["plan_steps"]
+    normalized["chapter_title"] = normalized["title"]
 
     if normalized["source"] == "progression_selected":
         derived = task_card.get("derived_from") or {}
@@ -1153,8 +1199,13 @@ def _build_chapter_task_block(task_card: dict, *, max_chars: int) -> str:
     volume_goal = str(task_card.get("volume_goal", "") or "").strip()
     plan_guidance = str(task_card.get("plan_guidance", "") or task_card.get("writer_guidance", "") or "").strip()
     lines = []
-    if task_card.get("title"):
-        lines.append(f"标题: {task_card['title']}")
+    chapter_number = max(1, safe_int(task_card.get("chapter_number"), 1))
+    chapter_heading = (
+        str(task_card.get("chapter_heading", "") or "").strip()
+        or format_chapter_heading(chapter_number, task_card.get("title", ""))
+    )
+    if chapter_heading:
+        lines.append(f"章节标题: {chapter_heading}")
     if objective:
         lines.append(f"本章 objective: {objective}")
     if plan_summary and not _is_duplicateish(plan_summary, objective):

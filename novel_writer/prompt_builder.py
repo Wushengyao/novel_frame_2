@@ -38,6 +38,25 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _prompt_chapter_heading(chapter_number: Any, title: Any = "") -> str:
+    number = max(1, _safe_int(chapter_number, 1))
+    clean_title = str(title or "").strip().strip("# \t\r\n")
+    if clean_title.startswith("第") and ("章" in clean_title or "节" in clean_title or "回" in clean_title):
+        return clean_title
+    return f"第 {number} 章：{clean_title}" if clean_title else f"第 {number} 章"
+
+
+def _first_chapter_heading_from_text(text: str) -> str:
+    for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("第") and ("章" in line or "节" in line or "回" in line):
+            return line
+        return ""
+    return ""
+
+
 def _is_first_chapter_prompt(data: dict, next_context: dict | None = None) -> bool:
     project = data.get("project", {}) if isinstance(data, dict) else {}
     chapter_count = _safe_int(project.get("chapter_count"), 0)
@@ -59,7 +78,7 @@ _SYSTEM_PROMPTS = {
     ),
     "writer": (
         "你负责撰写长篇连载小说正文。保持人物、地点、时间、伏笔、因果和动机线一致；"
-        "只写当前章节，不提前完成后续章节核心情节；输出纯正文，不写说明、标题或 Markdown。"
+        "只写当前章节，不提前完成后续章节核心情节；按任务要求输出章节标题和正文，不写说明或 Markdown。"
     ),
     "craft_brief": (
         "你负责写前创作蓝图。只为当前章节提供可执行建议，强化开章钩子、行动理由、场景推进、"
@@ -952,6 +971,12 @@ def build_writer_prompt(
     if isinstance(data, dict) and isinstance(data.get("sections"), dict):
         sections = data["sections"]
         chapter_count = int(data.get("chapter_count", 0) or 0)
+        task_card = data.get("task_card") if isinstance(data.get("task_card"), dict) else {}
+        chapter_number = _safe_int(task_card.get("chapter_number"), chapter_count + 1)
+        chapter_heading = (
+            str(task_card.get("chapter_heading", "") or "").strip()
+            or _prompt_chapter_heading(chapter_number, task_card.get("title", ""))
+        )
         opening_note = (
             "当前将要写的是第一章。读者没有看过设定文件，不能按续写章节默认前情已知。"
             "读者可能会先看到“读者开卷导语”，但正文仍必须独立可读，不能把导语当成已经写过的正文。"
@@ -984,12 +1009,14 @@ def build_writer_prompt(
             requirements.append("正文要与读者开卷导语保持一致，并用场景、行动、感官、对话和选择重新让读者理解必要设定")
         requirements.extend(
             [
-                "输出纯正文，不要章标题、序号、小标题、Markdown 标题",
+                f"第一行必须是章节标题：{chapter_heading}；如果这个标题只有章号没有题名，请自行补一个短标题，但章号必须保持为第 {chapter_number} 章",
+                "章节标题和正文之间留一个空行；正文内部不要再写小标题、目录、Markdown 标题或创作说明",
                 "字数建议在 3000 字以上、5000 字以下，保持内容丰富且可读",
             ]
         )
         prompt_body = _join_blocks(
             "你是一名长篇小说写作助手。请续写下一章。",
+            _section_block("章节标题", chapter_heading),
             _section_block("作者意图", sections.get("author_intent", "")),
             _section_block("创作风味契约", sections.get("creative_contract", "")),
             _section_block("首章读者入口约束", sections.get("opening_contract", "")),
@@ -1023,6 +1050,8 @@ def build_writer_prompt(
     fallback_goal_block = next_chapter_goal.strip() if not has_chapter_outline else ""
     user_request_block = user_request.strip() if user_request.strip() else "无。请在既有设定下自由发挥，自然推进剧情。"
     chapter_count = int(data.get("project", {}).get("chapter_count", 0) or 0)
+    target_chapter_number = _safe_int((chapter_outline or {}).get("chapter_number"), chapter_count + 1)
+    legacy_chapter_heading = _prompt_chapter_heading(target_chapter_number, (chapter_outline or {}).get("title", ""))
     first_chapter_note = (
         "当前将要写的是第一章。因为正文尚未开始，recent_events、open_threads、foreshadowing、character_updates 此时应为空，"
         "不要把后续章节才会出现的事件总结提前写进当前状态。读者没有看过设定文件，不能按续写章节默认前情已知。"
@@ -1037,8 +1066,8 @@ def build_writer_prompt(
         "人物不能 OOC",
         "不遗忘伏笔、连续性锚点和因果/动机线",
         "循序渐进推进剧情或场景，不能急于结束或完成；关键行动必须有当前原因、人物目标、压力限制和可见结果",
-        "输出纯正文",
-        "不要输出章标题、序号、小标题、Markdown 标题",
+        f"第一行必须是章节标题：{legacy_chapter_heading}；如果这个标题只有章号没有题名，请自行补一个短标题，但章号必须保持为第 {target_chapter_number} 章",
+        "章节标题和正文之间留一个空行；正文内部不要再写小标题、目录、Markdown 标题或创作说明",
     ]
     if user_request.strip():
         requirements.append("用户额外要求已提供；在不破坏既有设定一致性的前提下优先吸收，并柔和兼容用户意图")
@@ -1079,6 +1108,9 @@ def build_writer_prompt(
 
 【本章分章大纲】
 {chapter_outline_block}
+
+【章节标题】
+{legacy_chapter_heading}
 
 【读者开卷导语（读者可见）】
 {reader_setup or "无。"}
@@ -1160,6 +1192,12 @@ def build_quality_review_prompt(data: dict, draft_text: str, *, strict: bool = F
 
 def build_rewrite_prompt(data: dict, draft_text: str, review_report: dict) -> str:
     sections = data.get("sections", {}) if isinstance(data, dict) else {}
+    task_card = data.get("task_card") if isinstance(data.get("task_card"), dict) else {}
+    chapter_number = _safe_int(task_card.get("chapter_number"), 1)
+    chapter_heading = (
+        str(task_card.get("chapter_heading", "") or "").strip()
+        or _prompt_chapter_heading(chapter_number, task_card.get("title", ""))
+    )
     review_block = _to_block(review_report)
     requirements = [
         "保留已经正确完成的剧情目标和连续性",
@@ -1172,12 +1210,14 @@ def build_rewrite_prompt(data: dict, draft_text: str, review_report: dict) -> st
         requirements.append("重写后要与读者开卷导语公开信息一致；正文仍要独立可读，不能把导语当作已发生正文")
     requirements.extend(
         [
-            "不要写改稿说明，不要输出 JSON，不要输出 Markdown 标题",
-            "输出纯正文，字数建议仍在 3000 字以上、5000 字以下",
+            f"第一行必须保留章节标题：{chapter_heading}",
+            "标题和正文之间留一个空行；不要写改稿说明，不要输出 JSON，不要输出 Markdown 标题或正文内小标题",
+            "输出完整章节正文，字数建议仍在 3000 字以上、5000 字以下",
         ]
     )
     prompt_body = _join_blocks(
         "你是一名长篇小说改稿助手。请根据审稿意见重写当前章节，并只输出重写后的完整正文。",
+        _section_block("章节标题", chapter_heading),
         _section_block("作者意图", sections.get("author_intent", "")),
         _section_block("创作风味契约", sections.get("creative_contract", "")),
         _section_block("首章读者入口约束", sections.get("opening_contract", "")),
@@ -1350,6 +1390,12 @@ def build_chapter_polish_prompt(
     directions = polish_directions or ["基础润色"]
     directions_block = "\n".join(f"- {item}" for item in directions if str(item or "").strip()) or "- 基础润色"
     custom_request_block = custom_request.strip() or "无额外自定义要求。"
+    original_heading = _first_chapter_heading_from_text(chapter_text)
+    title_rule = (
+        f"保留原章节标题作为第一行：{original_heading}；标题和正文之间留一个空行"
+        if original_heading
+        else "如果原文已有章节标题，必须保留；不要另写标题说明"
+    )
 
     return f"""你是一名长篇小说章节润色助手。请对用户提供的已完成章节进行润色，并只输出润色后的完整章节正文。
 
@@ -1381,7 +1427,7 @@ def build_chapter_polish_prompt(
 {chapter_text.strip()}
 
 要求：
-1. 只输出润色后的完整章节正文，不要输出解释、标题说明、Markdown 代码块或修改清单
+1. 只输出润色后的完整章节正文，{title_rule}，不要输出解释、Markdown 代码块或修改清单
 2. 保留原章节的核心剧情事实、事件顺序、人物决定、信息结论和后续承接点
 3. 允许轻微补充过渡、动作、表情、环境、内心和对白，让桥段更顺、更有画面感
 4. 不得新增会影响后续剧情状态的事实、线索、设定、角色关系转折或重大道具

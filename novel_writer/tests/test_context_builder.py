@@ -253,6 +253,10 @@ class ContextBuilderTests(unittest.TestCase):
             task_card = context["task_card"]
 
             self.assertIn("当前将要写的是第一章", prompt)
+            self.assertIn("章节标题", prompt)
+            self.assertIn("第 1 章：死寂的隔离区", prompt)
+            self.assertIn("第一行必须是章节标题", prompt)
+            self.assertIn("正文内部不要再写小标题", prompt)
             self.assertIn("首章读者入口约束", prompt)
             self.assertIn("读者开卷导语（读者可见）", prompt)
             self.assertIn("读者没有看过设定文件", prompt)
@@ -265,6 +269,7 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertIn("reader_setup", context["sections"])
             self.assertIn("读者还不知道设定文件里的前情", context["sections"]["opening_contract"])
             self.assertIn("读者开卷导语", context["sections"]["reader_setup"])
+            self.assertEqual(task_card["chapter_heading"], "第 1 章：死寂的隔离区")
             self.assertIn("读者入口", task_card["plan_steps"][0])
 
     def test_first_chapter_progression_prompt_requires_reader_entry_plan_step(self) -> None:
@@ -313,6 +318,8 @@ class ContextBuilderTests(unittest.TestCase):
             self.assertIn("不要把导语当成正文已经完成的交代", prompt)
             self.assertIn("开篇困境", context["sections"]["static_world"])
             self.assertIn("reader_setup", context["sections"])
+            self.assertEqual(context["task_card"]["title"], "建立临时安全区")
+            self.assertEqual(context["task_card"]["chapter_heading"], "第 1 章：建立临时安全区")
             self.assertIn("读者入口", context["task_card"]["plan_steps"][0])
 
     def test_non_first_prompts_skip_first_chapter_branch_instructions(self) -> None:

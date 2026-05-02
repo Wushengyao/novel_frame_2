@@ -71,10 +71,12 @@ from project_manager import (
     create_state_snapshot,
     ensure_state_snapshot,
     export_project_archive,
+    extract_chapter_title,
     get_latest_state_snapshot_chapter,
     get_last_chapter_text,
     import_project_archive,
     init_project,
+    is_generic_chapter_title,
     load_json,
     load_project,
     normalize_chapter_text,
@@ -82,6 +84,7 @@ from project_manager import (
     record_context_telemetry,
     rollback_project,
     save_chapter,
+    sanitize_chapter_title,
     update_project_stats,
 )
 from runtime_config import (
@@ -343,6 +346,17 @@ def _launch_background_illustration_job(
     }
 
 
+def _select_chapter_title(task_card: dict, response_text: str, chapter_number: int) -> str:
+    planned_title = sanitize_chapter_title(task_card.get("title", ""), chapter_number=chapter_number)
+    response_title = extract_chapter_title(response_text, chapter_number=chapter_number)
+    source = str(task_card.get("source", "") or "").strip()
+    if response_title and (not planned_title or source in {"volume_outline", "plot_state", "freeform"}):
+        return response_title
+    if response_title and is_generic_chapter_title(planned_title, chapter_number=chapter_number):
+        return response_title
+    return planned_title or response_title
+
+
 def run_next_chapter(
     project_path: str,
     config: dict,
@@ -504,6 +518,8 @@ def run_next_chapter(
         usage=metadata.get("usage"),
         metadata=metadata,
     )
+    prompt_task_card = prompt_context.get("task_card", {}) if isinstance(prompt_context, dict) else {}
+    chapter_title = _select_chapter_title(prompt_task_card, response_text, int(target_chapter_number))
     chapter_text = normalize_chapter_text(response_text)
     if quality_mode_uses_review(writing_quality_mode):
         review = review_chapter_draft(
@@ -539,6 +555,8 @@ def run_next_chapter(
                     pre_rewrite_path.unlink(missing_ok=True)
                 log_warning(f"rewrite: failed; keeping original draft. reason={exc}")
             else:
+                if not chapter_title:
+                    chapter_title = _select_chapter_title(prompt_task_card, rewritten_text, int(target_chapter_number))
                 chapter_text = normalize_chapter_text(rewritten_text)
                 try:
                     review_chapter_draft(
@@ -554,7 +572,12 @@ def run_next_chapter(
                 except Exception as exc:  # pragma: no cover - keep rewritten draft if post-review persistence fails
                     log_warning(f"post_rewrite_review: failed; keeping rewritten draft. reason={exc}")
     emit_progress(progress_callback, "chapter_save", "Saving chapter file")
-    chapter_path = save_chapter(project_path, chapter_text)
+    chapter_path = save_chapter(
+        project_path,
+        chapter_text,
+        chapter_title=chapter_title,
+        chapter_number=int(target_chapter_number),
+    )
     log_success(f"next_chapter: saved to {chapter_path}")
 
     log_info("next_chapter: updating plot_state")

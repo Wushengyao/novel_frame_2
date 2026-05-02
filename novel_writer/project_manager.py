@@ -95,7 +95,13 @@ STORY_SETUP_SECTION_KEYS = ("world", "characters")
 STORY_SETUP_FILENAME = "story_setup.json"
 READER_SETUP_FILENAME = "reader_setup.md"
 CHAPTER_TITLE_PATTERN = re.compile(
-    r"^\s*(?:#{1,6}\s*)?第[0-9零一二三四五六七八九十百千万两〇]+[章节卷回部篇]\s*[：:.-]?\s*.+$"
+    r"^\s*(?:#{1,6}\s*)?第\s*[0-9零一二三四五六七八九十百千万两〇]+\s*[章节卷回部篇](?:\s*[：:.-]\s*.+|\s+.+)?\s*$"
+)
+CHAPTER_TITLE_PREFIX_PATTERN = re.compile(
+    r"^\s*(?:#{1,6}\s*)?第\s*[0-9零一二三四五六七八九十百千万两〇]+\s*[章节卷回部篇]\s*[：:.\-、]?\s*"
+)
+GENERIC_CHAPTER_TITLE_PATTERN = re.compile(
+    r"^\s*(?:第\s*[0-9零一二三四五六七八九十百千万两〇]+\s*[章节卷回部篇]\s*)?(?:任务|自定义推进)?\s*$"
 )
 STATS_PHASES = (
     "init",
@@ -339,6 +345,57 @@ def normalize_planning_mode(mode: object, default: str = DEFAULT_PLANNING_MODE) 
     if normalized in PLANNING_MODES:
         return normalized
     return default
+
+
+def sanitize_chapter_title(title: object, *, chapter_number: int | None = None) -> str:
+    value = str(title or "").strip()
+    if not value:
+        return ""
+    value = value.strip("# \t\r\n")
+    value = CHAPTER_TITLE_PREFIX_PATTERN.sub("", value).strip()
+    value = value.strip(" ：:.-、\t")
+    if not value:
+        return ""
+    if GENERIC_CHAPTER_TITLE_PATTERN.fullmatch(value):
+        return ""
+    if chapter_number is not None:
+        chapter_label = f"第 {int(chapter_number)} 章"
+        if value.replace(" ", "") == chapter_label.replace(" ", ""):
+            return ""
+    return value
+
+
+def is_generic_chapter_title(title: object, *, chapter_number: int | None = None) -> bool:
+    value = str(title or "").strip()
+    if not value:
+        return True
+    cleaned = sanitize_chapter_title(value, chapter_number=chapter_number)
+    return not cleaned
+
+
+def format_chapter_heading(chapter_number: int, title: object = "") -> str:
+    number = max(1, int(chapter_number or 1))
+    clean_title = sanitize_chapter_title(title, chapter_number=number)
+    base = f"第 {number} 章"
+    return f"{base}：{clean_title}" if clean_title else base
+
+
+def extract_chapter_title(text: str, *, chapter_number: int | None = None) -> str:
+    lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if not lines:
+        return ""
+    first_line = lines[0].strip()
+    if not CHAPTER_TITLE_PATTERN.match(first_line):
+        return ""
+    return sanitize_chapter_title(first_line, chapter_number=chapter_number)
+
+
+def ensure_chapter_heading(text: str, chapter_number: int, title: object = "") -> str:
+    body = normalize_chapter_text(text)
+    heading = format_chapter_heading(chapter_number, title)
+    return "\n\n".join(part for part in (heading, body) if part).strip()
 
 
 def normalize_chapter_text(text: str) -> str:
@@ -2452,7 +2509,7 @@ def delete_project(project_path: str) -> dict[str, object]:
     }
 
 
-def save_chapter(project_path: str, text: str) -> str:
+def save_chapter(project_path: str, text: str, *, chapter_title: str | None = None, chapter_number: int | None = None) -> str:
     base = Path(project_path)
     chapters_dir = base / "chapters"
     chapters_dir.mkdir(parents=True, exist_ok=True)
@@ -2461,7 +2518,14 @@ def save_chapter(project_path: str, text: str) -> str:
     next_index = len(existing) + 1
     chapter_name = f"chapter_{next_index:04d}.md"
     chapter_path = chapters_dir / chapter_name
-    chapter_path.write_text(normalize_chapter_text(text) + "\n", encoding="utf-8")
+    if chapter_title is None:
+        content = normalize_chapter_text(text)
+    else:
+        heading_number = int(chapter_number or next_index)
+        model_title = extract_chapter_title(text, chapter_number=heading_number)
+        title = sanitize_chapter_title(chapter_title, chapter_number=heading_number) or model_title
+        content = ensure_chapter_heading(text, next_index, title)
+    chapter_path.write_text(content + "\n", encoding="utf-8")
 
     project_file = base / "project.json"
     project_data = load_json(str(project_file))

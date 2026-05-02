@@ -19,10 +19,14 @@ from project_manager import (
     acquire_project_write_lock,
     build_reader_setup_text,
     ensure_reader_setup,
+    extract_chapter_title,
     export_project_archive,
+    format_chapter_heading,
     import_project_archive,
+    normalize_chapter_text,
     project_audio_lock_is_active,
     rollback_project,
+    save_chapter,
     save_json,
     update_project_stats,
 )
@@ -32,6 +36,30 @@ from tests.test_support import create_test_project, read_json
 
 
 class ProjectManagerTests(unittest.TestCase):
+    def test_save_chapter_can_persist_chapter_heading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="chapter_title_save")
+
+            chapter_path = Path(save_chapter(str(project_path), "正文第一段。", chapter_title="死寂的隔离区"))
+
+            saved_text = chapter_path.read_text(encoding="utf-8")
+            self.assertTrue(saved_text.startswith("第 1 章：死寂的隔离区\n\n"))
+            self.assertIn("正文第一段。", saved_text)
+            self.assertEqual(extract_chapter_title(saved_text, chapter_number=1), "死寂的隔离区")
+            self.assertEqual(normalize_chapter_text(saved_text), "正文第一段。")
+
+    def test_save_chapter_uses_model_title_when_no_planned_title(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="chapter_title_response")
+
+            chapter_path = Path(save_chapter(str(project_path), "第 1 章：备用灯熄灭\n\n正文。", chapter_title=""))
+
+            self.assertEqual(
+                chapter_path.read_text(encoding="utf-8").strip(),
+                "第 1 章：备用灯熄灭\n\n正文。",
+            )
+            self.assertEqual(format_chapter_heading(2, "第 2 章任务"), "第 2 章")
+
     def test_reader_setup_is_generated_as_reader_facing_opening_guide(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp), project_id="reader_setup")

@@ -12,6 +12,8 @@ from llm_client import generate_text_with_metadata, raise_if_llm_response_trunca
 from progression_manager import mark_active_progression_sessions_stale
 from project_manager import (
     ensure_no_project_audio_lock,
+    ensure_chapter_heading,
+    extract_chapter_title,
     load_json,
     load_project,
     normalize_chapter_text,
@@ -172,6 +174,9 @@ def run_chapter_polish(
     original_text = chapter_file.read_text(encoding="utf-8")
     if not original_text.strip():
         raise ValueError("当前章节正文为空，无法润色。")
+    match = CHAPTER_SLUG_PATTERN.fullmatch(chapter_slug)
+    chapter_number = int(match.group(1)) if match else 0
+    original_title = extract_chapter_title(original_text, chapter_number=chapter_number) if chapter_number else ""
 
     log_info(f"polish_chapter: prepare project={project_path} chapter={chapter_slug}")
     emit_progress(progress_callback, "polish_prepare", "正在准备章节润色")
@@ -217,7 +222,10 @@ def run_chapter_polish(
             system_prompt=build_system_prompt("polish"),
         )
         raise_if_llm_response_truncated(metadata, phase="polish")
-        polished_text = normalize_chapter_text(_strip_wrapping_code_fence(response_text))
+        stripped_response = _strip_wrapping_code_fence(response_text)
+        polished_text = normalize_chapter_text(stripped_response)
+        if original_title:
+            polished_text = ensure_chapter_heading(polished_text, chapter_number, original_title)
         _validate_polished_text(original_text, polished_text)
     except Exception:
         update_project_stats(project_path, phase="polish", success=False, usage=None)
