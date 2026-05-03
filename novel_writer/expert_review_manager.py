@@ -444,12 +444,19 @@ def run_expert_review_for_chapter(
                     system_prompt="你是负责审计小说生成工程的顶级写作质量诊断专家。输出严格 JSON。",
                     response_format="json",
                 )
-                update_project_stats(project_path, phase="expert_review", success=True, usage=metadata.get("usage"), metadata=metadata)
+                update_project_stats(
+                    project_path,
+                    phase="expert_review",
+                    success=True,
+                    usage=metadata.get("usage"),
+                    metadata=metadata,
+                    chapter_number=chapter_number,
+                )
                 report = normalize_expert_review(
                     extract_json_object(response_text, "Could not parse JSON from expert review response.")
                 )
             except Exception as exc:  # pragma: no cover - external model resilience
-                update_project_stats(project_path, phase="expert_review", success=False, usage=None)
+                update_project_stats(project_path, phase="expert_review", success=False, usage=None, chapter_number=chapter_number)
                 log_warning(f"expert_review: model diagnosis unavailable index={index}, reason={exc}")
                 report = _fallback_report(str(exc))
             report = _decorate_report(
@@ -511,12 +518,19 @@ def run_expert_review_for_chapter(
                 system_prompt="你是专家审查委员会主审。输出严格 JSON。",
                 response_format="json",
             )
-            update_project_stats(project_path, phase="expert_review", success=True, usage=metadata.get("usage"), metadata=metadata)
+            update_project_stats(
+                project_path,
+                phase="expert_review",
+                success=True,
+                usage=metadata.get("usage"),
+                metadata=metadata,
+                chapter_number=chapter_number,
+            )
             aggregate = normalize_expert_review(
                 extract_json_object(response_text, "Could not parse JSON from expert aggregate response.")
             )
         except Exception as exc:  # pragma: no cover - external model resilience
-            update_project_stats(project_path, phase="expert_review", success=False, usage=None)
+            update_project_stats(project_path, phase="expert_review", success=False, usage=None, chapter_number=chapter_number)
             log_warning(f"expert_review: aggregate unavailable, reason={exc}")
             aggregate = _aggregate_from_successful_report(reports[available_index], str(exc))
             aggregate["model_reports"] = reports

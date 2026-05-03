@@ -371,6 +371,7 @@ def generate_auto_chapter_objective(
             success=True,
             usage=metadata.get("usage"),
             metadata=metadata,
+            chapter_number=target_chapter_number,
         )
         objective_payload = extract_json_object(
             response_text,
@@ -380,7 +381,7 @@ def generate_auto_chapter_objective(
         if not objective:
             raise ValueError("auto objective response missing objective")
     except Exception:
-        update_project_stats(project_path, phase="outline", success=False, usage=None)
+        update_project_stats(project_path, phase="outline", success=False, usage=None, chapter_number=target_chapter_number)
         raise
 
     return override_task_card_objective(base_task, objective).get("objective", "")
@@ -480,6 +481,7 @@ def generate_progression_options(
             success=True,
             usage=metadata.get("usage"),
             metadata=metadata,
+            chapter_number=target_chapter_number,
         )
         parsed_payload = extract_json_object(response_text, "Could not parse JSON from progression options response.")
         normalized = normalize_progression_options_response(parsed_payload, count)
@@ -491,7 +493,7 @@ def generate_progression_options(
             error=str(exc),
             context=log_context,
         )
-        update_project_stats(project_path, phase="outline", success=False, usage=None)
+        update_project_stats(project_path, phase="outline", success=False, usage=None, chapter_number=target_chapter_number)
         raise
 
     current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)

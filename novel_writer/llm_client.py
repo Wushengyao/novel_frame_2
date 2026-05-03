@@ -118,6 +118,18 @@ DEEPSEEK_THINKING_INACTIVE_FIELDS = (
     "presence_penalty",
     "frequency_penalty",
 )
+INPUT_TOKEN_LIMIT_CONFIG_KEYS = (
+    "input_token_limit",
+    "max_input_tokens",
+    "prompt_token_limit",
+    "max_prompt_tokens",
+)
+CONTEXT_WINDOW_CONFIG_KEYS = (
+    "context_window_tokens",
+    "max_context_tokens",
+    "model_context_tokens",
+    "context_window",
+)
 
 
 def _coerce_llm_log_enabled(value: object) -> bool:
@@ -538,6 +550,33 @@ def _coerce_float(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _coerce_positive_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _configured_token_limit(config: dict[str, Any], keys: tuple[str, ...]) -> int:
+    for key in keys:
+        value = _coerce_positive_int(config.get(key))
+        if value > 0:
+            return value
+    return 0
+
+
+def _request_limit_metadata(config: dict[str, Any], max_output_tokens: object) -> dict[str, int]:
+    output_limit = _coerce_positive_int(max_output_tokens)
+    input_limit = _configured_token_limit(config, INPUT_TOKEN_LIMIT_CONFIG_KEYS)
+    context_window = _configured_token_limit(config, CONTEXT_WINDOW_CONFIG_KEYS)
+    if input_limit <= 0 and context_window > 0:
+        input_limit = max(0, context_window - output_limit) if output_limit > 0 else context_window
+    return {
+        "input_token_limit": input_limit,
+        "max_output_tokens": output_limit,
+    }
 
 
 def _is_json_response_format(response_format: str = "") -> bool:
@@ -965,6 +1004,7 @@ def generate_text_with_metadata(
             "finish_reason": _extract_openai_finish_reason(payload or {}),
             "truncated": _is_truncated_finish_reason(provider, _extract_openai_finish_reason(payload or {})),
             "usage": _extract_openai_usage(payload),
+            **_request_limit_metadata(config, body.get("max_tokens")),
         }
         if should_log:
             _append_log_entry(
@@ -1068,6 +1108,7 @@ def generate_text_with_metadata(
             "finish_reason": _extract_gemini_finish_reason(payload or {}),
             "truncated": _is_truncated_finish_reason(provider, _extract_gemini_finish_reason(payload or {})),
             "usage": _extract_gemini_usage(payload),
+            **_request_limit_metadata(config, body.get("generationConfig", {}).get("maxOutputTokens")),
         }
         if should_log:
             _append_log_entry(

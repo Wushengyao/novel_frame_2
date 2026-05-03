@@ -1248,6 +1248,152 @@ def _pricing_status_label(status: object) -> str:
     return mapping.get(str(status or "").strip(), "未知")
 
 
+def _format_token_budget(used: object, limit: object) -> str:
+    used_count = _stats_int(used)
+    limit_count = _stats_int(limit)
+    if limit_count <= 0:
+        return f"{_format_tokens(used_count)} / 未知"
+    percent = min(999, round(used_count * 100 / max(1, limit_count)))
+    return f"{_format_tokens(used_count)} / {_format_tokens(limit_count)} ({percent}%)"
+
+
+def _limit_status_label(usage: dict, kind: str) -> str:
+    hit_count = _stats_int(usage.get(f"{kind}_limit_hits"))
+    near_count = _stats_int(usage.get(f"{kind}_near_limit_hits"))
+    limit_count = _stats_int(usage.get(f"{kind}_token_limit"))
+    if hit_count:
+        return f"触达 {hit_count}"
+    if near_count:
+        return f"接近 {near_count}"
+    if limit_count:
+        return "未触达"
+    return "未知"
+
+
+def _chapter_number_from_stats_key(value: object) -> int:
+    match = re.fullmatch(r"chapter_(\d{4})", str(value or "").strip())
+    if not match:
+        return 0
+    return _stats_int(match.group(1))
+
+
+def _chapter_stats_entries(stats: dict | None) -> list[dict]:
+    stats = stats if isinstance(stats, dict) else {}
+    by_chapter = stats.get("by_chapter") if isinstance(stats.get("by_chapter"), dict) else {}
+    entries = []
+    for slug, raw_entry in by_chapter.items():
+        if not isinstance(raw_entry, dict):
+            continue
+        chapter_number = _stats_int(raw_entry.get("chapter_number")) or _chapter_number_from_stats_key(slug)
+        if chapter_number <= 0:
+            continue
+        entry = dict(raw_entry)
+        entry["chapter_number"] = chapter_number
+        entry["chapter_slug"] = str(raw_entry.get("chapter_slug") or f"chapter_{chapter_number:04d}")
+        entries.append(entry)
+    return sorted(entries, key=lambda item: _stats_int(item.get("chapter_number")))
+
+
+def _chapter_quality_summary(project_path: Path | None, chapter_number: int) -> str:
+    if project_path is None or chapter_number <= 0:
+        return "n/a"
+    try:
+        artifacts = list_quality_artifacts(str(project_path), chapter_number)
+    except Exception:
+        return "n/a"
+    reports = artifacts.get("reports") if isinstance(artifacts, dict) else []
+    if not reports:
+        return "n/a"
+    latest = reports[-1].get("report", {}) if isinstance(reports[-1], dict) else {}
+    if not isinstance(latest, dict) or not latest:
+        return "n/a"
+    score = latest.get("average_score")
+    score_text = f"{_stats_float(score):.1f}" if score not in (None, "") else "n/a"
+    return f"{_quality_status_label(latest)} / {score_text}"
+
+
+def _render_project_chapter_token_rows(stats: dict | None, *, project_id: str = "", project_path: Path | None = None) -> str:
+    rows = []
+    for entry in _chapter_stats_entries(stats):
+        usage = entry.get("total") if isinstance(entry.get("total"), dict) else {}
+        chapter_number = _stats_int(entry.get("chapter_number"))
+        chapter_slug = str(entry.get("chapter_slug") or f"chapter_{chapter_number:04d}")
+        chapter_label = escape(chapter_slug)
+        if project_id:
+            chapter_label = f'<a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}">{chapter_label}</a>'
+        rows.append(
+            f"""
+            <tr>
+              <td>{chapter_label}</td>
+              <td>{_format_tokens(usage.get("requests"))}</td>
+              <td>{_format_tokens(usage.get("prompt_tokens"))}</td>
+              <td>{_format_tokens(usage.get("completion_tokens"))}</td>
+              <td>{_format_tokens(usage.get("total_tokens"))}</td>
+              <td>{_format_token_budget(usage.get("completion_tokens"), usage.get("output_token_limit"))}</td>
+              <td>{escape(_limit_status_label(usage, "output"))}</td>
+              <td>{escape(_chapter_quality_summary(project_path, chapter_number))}</td>
+            </tr>
+            """
+        )
+    if not rows:
+        rows.append('<tr><td colspan="8" class="muted">暂无章节 token 统计。</td></tr>')
+    return "".join(rows)
+
+
+def _render_chapter_token_stats_panel(stats: dict | None, chapter_number: int | None) -> str:
+    if not chapter_number:
+        return ""
+    slug = f"chapter_{int(chapter_number):04d}"
+    stats = stats if isinstance(stats, dict) else {}
+    by_chapter = stats.get("by_chapter") if isinstance(stats.get("by_chapter"), dict) else {}
+    entry = by_chapter.get(slug) if isinstance(by_chapter.get(slug), dict) else {}
+    if not entry:
+        return """
+        <section class="panel">
+          <h2>章节 Token 统计</h2>
+          <p class="muted">暂无本章 token 统计。</p>
+        </section>
+        """
+
+    total = entry.get("total") if isinstance(entry.get("total"), dict) else {}
+    phase_rows = []
+    by_phase = entry.get("by_phase") if isinstance(entry.get("by_phase"), dict) else {}
+    for phase in sorted(by_phase):
+        usage = by_phase.get(phase) if isinstance(by_phase.get(phase), dict) else {}
+        if _stats_int(usage.get("requests")) == 0 and _stats_int(usage.get("total_tokens")) == 0:
+            continue
+        phase_rows.append(
+            f"""
+            <tr>
+              <td>{escape(str(phase))}</td>
+              <td>{_format_tokens(usage.get("requests"))}</td>
+              <td>{_format_token_budget(usage.get("prompt_tokens"), usage.get("input_token_limit"))}</td>
+              <td>{_format_token_budget(usage.get("completion_tokens"), usage.get("output_token_limit"))}</td>
+              <td>{_format_tokens(usage.get("total_tokens"))}</td>
+              <td>{escape(_limit_status_label(usage, "input"))}</td>
+              <td>{escape(_limit_status_label(usage, "output"))}</td>
+            </tr>
+            """
+        )
+    if not phase_rows:
+        phase_rows.append('<tr><td colspan="7" class="muted">暂无阶段 token 统计。</td></tr>')
+
+    return f"""
+        <section class="panel">
+          <h2>章节 Token 统计</h2>
+          <p><strong>Total：</strong>{_format_tokens(total.get("total_tokens"))}</p>
+          <p><strong>Prompt：</strong>{_format_tokens(total.get("prompt_tokens"))} / <strong>Output：</strong>{_format_tokens(total.get("completion_tokens"))}</p>
+          <p><strong>Output 上限：</strong>{_format_token_budget(total.get("completion_tokens"), total.get("output_token_limit"))} · {escape(_limit_status_label(total, "output"))}</p>
+          <table class="quality-table">
+            <thead>
+              <tr><th>阶段</th><th>请求</th><th>Prompt / 输入上限</th><th>Output / 输出上限</th><th>Total</th><th>输入状态</th><th>输出状态</th></tr>
+            </thead>
+            <tbody>{''.join(phase_rows)}</tbody>
+          </table>
+        </section>
+    """
+
+
 def _render_sidebar_usage_stats(stats: dict | None) -> str:
     summary = _usage_cost_summary(stats)
     total = summary["total"]
@@ -1265,7 +1411,7 @@ def _render_sidebar_usage_stats(stats: dict | None) -> str:
     """
 
 
-def _render_token_cost_panel(stats: dict | None) -> str:
+def _render_token_cost_panel(stats: dict | None, *, project_id: str = "", project_path: Path | None = None) -> str:
     stats = stats if isinstance(stats, dict) else {}
     by_phase = stats.get("by_phase") if isinstance(stats.get("by_phase"), dict) else {}
     cost = stats.get("cost") if isinstance(stats.get("cost"), dict) else {}
@@ -1336,6 +1482,13 @@ def _render_token_cost_panel(stats: dict | None) -> str:
                   <tr><th>阶段</th><th>请求</th><th>Prompt</th><th>Output</th><th>Cached</th><th>Total</th><th>估算费用</th><th>未定价</th></tr>
                 </thead>
                 <tbody>{''.join(phase_rows)}</tbody>
+              </table>
+              <h3>按章节</h3>
+              <table class="quality-table">
+                <thead>
+                  <tr><th>章节</th><th>请求</th><th>Prompt</th><th>Output</th><th>Total</th><th>Output / 上限</th><th>输出状态</th><th>质量</th></tr>
+                </thead>
+                <tbody>{_render_project_chapter_token_rows(stats, project_id=project_id, project_path=project_path)}</tbody>
               </table>
               <h3>按模型</h3>
               <table class="quality-table">
@@ -5898,6 +6051,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             else {"model_reports": [], "aggregate": {}, "aggregate_error": ""}
         )
         quality_panel_html = _render_chapter_quality_panel(project_id, chapter_slug, quality_artifacts)
+        chapter_token_panel_html = _render_chapter_token_stats_panel(project.get("stats") or {}, chapter_number)
         expert_panel_html = _render_chapter_expert_panel(
             project_id,
             chapter_slug,
@@ -5998,6 +6152,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <button class="ghost-button" type="submit"{destructive_busy_attr}>回滚到本章并从这里继续写</button>
             </form>
           </section>
+          {chapter_token_panel_html}
           {quality_panel_html}
           {expert_panel_html}
           {busy_notice}
@@ -7075,7 +7230,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <h2>最近一章</h2>
               <div class="chapter-view">{latest_chapter_text}</div>
             </section>
-            {_render_token_cost_panel(project_stats)}
+            {_render_token_cost_panel(project_stats, project_id=project_id, project_path=project_path)}
             <section class="panel">
               {effective_task_html}
             </section>

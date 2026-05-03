@@ -56,9 +56,17 @@ def _update_project_stats_threadsafe(
     success: bool,
     usage: dict | None = None,
     metadata: dict | None = None,
+    chapter_slug: str = "",
 ) -> None:
     with PROJECT_STATS_LOCK:
-        update_project_stats(project_path, phase=phase, success=success, usage=usage, metadata=metadata)
+        update_project_stats(
+            project_path,
+            phase=phase,
+            success=success,
+            usage=usage,
+            metadata=metadata,
+            chapter_slug=chapter_slug,
+        )
 
 
 def _coerce_worker_count(requested_workers: Any, task_count: int) -> int:
@@ -787,6 +795,7 @@ def _generate_prompt_payload(
     llm_config: dict | None,
     runtime_config: dict,
     user_request: str = "",
+    chapter_slug: str = "",
     progress_callback=None,
 ) -> dict:
     project_data = load_project(project_path)
@@ -802,6 +811,7 @@ def _generate_prompt_payload(
             response_text, metadata = generate_text_with_metadata(
                 prompt,
                 llm_config,
+                log_context={"phase": "illustration_prompt", "chapter_slug": chapter_slug},
                 system_prompt=build_system_prompt("illustration"),
                 response_format="json",
             )
@@ -811,6 +821,7 @@ def _generate_prompt_payload(
                 success=True,
                 usage=metadata.get("usage"),
                 metadata=metadata,
+                chapter_slug=chapter_slug,
             )
             payload = extract_json_object(response_text, "Could not parse JSON from illustration prompt response.")
             llm_positive_prompt = _normalize_prompt_text(str(payload.get("positive_prompt", "") or ""), limit=1200)
@@ -832,7 +843,13 @@ def _generate_prompt_payload(
                     "prompt_source": "llm",
                 }
         except Exception:
-            _update_project_stats_threadsafe(project_path, phase="illustration_prompt", success=False, usage=None)
+            _update_project_stats_threadsafe(
+                project_path,
+                phase="illustration_prompt",
+                success=False,
+                usage=None,
+                chapter_slug=chapter_slug,
+            )
 
     emit_progress(progress_callback, "illustration_prompt_fallback", "插图提示词回退到本地规则生成")
     return _default_prompt_payload(project_data, chapter_text, runtime_config, user_request)
@@ -1359,6 +1376,7 @@ def illustrate_chapter(
         llm_config,
         resolved_runtime,
         user_request=user_request,
+        chapter_slug=chapter_slug,
         progress_callback=progress_callback,
     )
 

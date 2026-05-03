@@ -536,7 +536,13 @@ def run_next_chapter(
             break
         except Exception as exc:
             response_text = ""
-            update_project_stats(project_path, phase="writer", success=False, usage=None)
+            update_project_stats(
+                project_path,
+                phase="writer",
+                success=False,
+                usage=None,
+                chapter_number=int(target_chapter_number),
+            )
             last_writer_error = exc
             log_warning(f"next_chapter: writer request failed attempt={request_attempt}, reason={exc}")
 
@@ -552,6 +558,7 @@ def run_next_chapter(
         success=True,
         usage=metadata.get("usage"),
         metadata=metadata,
+        chapter_number=int(target_chapter_number),
     )
     prompt_task_card = prompt_context.get("task_card", {}) if isinstance(prompt_context, dict) else {}
     chapter_title = _select_chapter_title(prompt_task_card, response_text, int(target_chapter_number))

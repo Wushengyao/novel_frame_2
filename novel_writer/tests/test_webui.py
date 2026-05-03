@@ -378,6 +378,23 @@ class WebUiGuidedFlowTests(unittest.TestCase):
                     }
                 },
             },
+            "by_chapter": {
+                "chapter_0001": {
+                    "chapter_number": 1,
+                    "chapter_slug": "chapter_0001",
+                    "total": {
+                        "requests": 2,
+                        "successes": 2,
+                        "failures": 0,
+                        "prompt_tokens": 3200,
+                        "completion_tokens": 1900,
+                        "total_tokens": 5100,
+                        "output_token_limit": 2000,
+                        "output_limit_hits": 1,
+                    },
+                    "by_phase": {},
+                }
+            },
         }
         save_json(str(project_file), project)
 
@@ -392,6 +409,50 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("Token / 费用统计", project_page.body)
         self.assertIn("deepseek-v4-flash", project_page.body)
         self.assertIn("DeepSeek Models &amp; Pricing", project_page.body)
+        self.assertIn("chapter_0001", project_page.body)
+        self.assertIn("1,900 / 2,000", project_page.body)
+
+    def test_chapter_page_shows_stage_token_statistics(self) -> None:
+        project_file = self.project_path / "project.json"
+        project = load_json(str(project_file))
+        project["chapter_count"] = 1
+        project["stats"] = {
+            "total": {},
+            "by_phase": {},
+            "by_chapter": {
+                "chapter_0001": {
+                    "chapter_number": 1,
+                    "chapter_slug": "chapter_0001",
+                    "total": {
+                        "requests": 1,
+                        "prompt_tokens": 3200,
+                        "completion_tokens": 1900,
+                        "total_tokens": 5100,
+                        "output_token_limit": 2000,
+                        "output_near_limit_hits": 1,
+                    },
+                    "by_phase": {
+                        "writer": {
+                            "requests": 1,
+                            "prompt_tokens": 3200,
+                            "completion_tokens": 1900,
+                            "total_tokens": 5100,
+                            "output_token_limit": 2000,
+                            "output_near_limit_hits": 1,
+                        }
+                    },
+                }
+            },
+        }
+        save_json(str(project_file), project)
+        (self.project_path / "chapters" / "chapter_0001.md").write_text("第一章正文。\n", encoding="utf-8")
+
+        chapter_page = self._get("/project/web/chapter/chapter_0001")
+
+        self.assertEqual(chapter_page.status, 200)
+        self.assertIn("章节 Token 统计", chapter_page.body)
+        self.assertIn("writer", chapter_page.body)
+        self.assertIn("1,900 / 2,000", chapter_page.body)
 
     def test_project_import_and_export_controls_render(self) -> None:
         projects_page = self._get("/projects")

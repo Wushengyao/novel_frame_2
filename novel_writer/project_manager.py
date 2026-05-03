@@ -424,6 +424,14 @@ def _empty_usage_stats() -> dict:
         "cached_tokens": 0,
         "reasoning_tokens": 0,
         "thought_tokens": 0,
+        "input_token_limit": 0,
+        "output_token_limit": 0,
+        "max_input_token_limit": 0,
+        "max_output_token_limit": 0,
+        "input_near_limit_hits": 0,
+        "input_limit_hits": 0,
+        "output_near_limit_hits": 0,
+        "output_limit_hits": 0,
     }
 
 
@@ -431,6 +439,7 @@ def _build_project_stats() -> dict:
     return {
         "total": _empty_usage_stats(),
         "by_phase": {phase: _empty_usage_stats() for phase in STATS_PHASES},
+        "by_chapter": {},
         "cost": _empty_cost_stats(),
         "context_telemetry": {
             "recent_runs": [],
@@ -470,6 +479,91 @@ def _merge_usage_stats(target: dict, success: bool, usage: dict | None) -> None:
         "thought_tokens",
     ):
         target[key] = int(target.get(key, 0)) + int(usage.get(key, 0) or 0)
+
+
+def _positive_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _metadata_positive_int(metadata: dict | None, *keys: str) -> int:
+    if not isinstance(metadata, dict):
+        return 0
+    for key in keys:
+        value = _positive_int(metadata.get(key))
+        if value > 0:
+            return value
+    limits = metadata.get("limits") if isinstance(metadata.get("limits"), dict) else {}
+    for key in keys:
+        value = _positive_int(limits.get(key))
+        if value > 0:
+            return value
+    return 0
+
+
+def _metadata_output_limit(metadata: dict | None) -> int:
+    return _metadata_positive_int(
+        metadata,
+        "max_output_tokens",
+        "output_token_limit",
+        "max_tokens",
+        "maxOutputTokens",
+    )
+
+
+def _metadata_input_limit(metadata: dict | None) -> int:
+    return _metadata_positive_int(
+        metadata,
+        "input_token_limit",
+        "prompt_token_limit",
+        "max_input_tokens",
+        "max_prompt_tokens",
+    )
+
+
+def _metadata_finish_reason(metadata: dict | None) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get("finish_reason") or "").strip().lower()
+
+
+def _merge_usage_limit_stats(target: dict, usage: dict | None, metadata: dict | None) -> None:
+    if not usage:
+        return
+    prompt_tokens = _positive_int(usage.get("prompt_tokens"))
+    completion_tokens = _positive_int(usage.get("completion_tokens"))
+    input_limit = _metadata_input_limit(metadata)
+    output_limit = _metadata_output_limit(metadata)
+    output_hit = bool((metadata or {}).get("truncated")) or _metadata_finish_reason(metadata) in {
+        "length",
+        "max_tokens",
+        "max_output_tokens",
+    }
+
+    if input_limit > 0:
+        target["input_token_limit"] = _positive_int(target.get("input_token_limit")) + input_limit
+        target["max_input_token_limit"] = max(_positive_int(target.get("max_input_token_limit")), input_limit)
+        if prompt_tokens >= input_limit:
+            target["input_limit_hits"] = _positive_int(target.get("input_limit_hits")) + 1
+        elif prompt_tokens >= int(input_limit * 0.9):
+            target["input_near_limit_hits"] = _positive_int(target.get("input_near_limit_hits")) + 1
+
+    if output_limit > 0:
+        target["output_token_limit"] = _positive_int(target.get("output_token_limit")) + output_limit
+        target["max_output_token_limit"] = max(_positive_int(target.get("max_output_token_limit")), output_limit)
+        if completion_tokens >= output_limit or output_hit:
+            target["output_limit_hits"] = _positive_int(target.get("output_limit_hits")) + 1
+        elif completion_tokens >= int(output_limit * 0.9):
+            target["output_near_limit_hits"] = _positive_int(target.get("output_near_limit_hits")) + 1
+    elif output_hit:
+        target["output_limit_hits"] = _positive_int(target.get("output_limit_hits")) + 1
+
+
+def _merge_usage_stats_with_metadata(target: dict, success: bool, usage: dict | None, metadata: dict | None = None) -> None:
+    _merge_usage_stats(target, success=success, usage=usage)
+    _merge_usage_limit_stats(target, usage=usage, metadata=metadata)
 
 
 def _cost_float(value: object) -> float:
@@ -560,13 +654,106 @@ def _merge_model_cost_stats(stats: dict, phase: str, success: bool, metadata: di
     stats["cost"] = cost
 
 
-def _merge_project_stats(stats: dict, phase: str, success: bool, usage: dict | None = None, metadata: dict | None = None) -> None:
+def _chapter_number_from_stats_slug(value: object) -> int:
+    match = re.fullmatch(r"chapter_(\d{4})", str(value or "").strip())
+    if not match:
+        return 0
+    return _positive_int(match.group(1))
+
+
+def _resolve_stats_chapter_number(
+    chapter_number: int | None = None,
+    chapter_slug: str | None = None,
+    metadata: dict | None = None,
+) -> int:
+    direct = _positive_int(chapter_number)
+    if direct > 0:
+        return direct
+    slug_number = _chapter_number_from_stats_slug(chapter_slug)
+    if slug_number > 0:
+        return slug_number
+    if isinstance(metadata, dict):
+        for key in ("chapter_number", "target_chapter_number", "chapter_count"):
+            value = _positive_int(metadata.get(key))
+            if value > 0:
+                return value
+        context = metadata.get("log_context") if isinstance(metadata.get("log_context"), dict) else {}
+        for key in ("chapter_number", "target_chapter_number", "chapter_count"):
+            value = _positive_int(context.get(key))
+            if value > 0:
+                return value
+        slug_number = _chapter_number_from_stats_slug(context.get("chapter_slug") or metadata.get("chapter_slug"))
+        if slug_number > 0:
+            return slug_number
+    return 0
+
+
+def _chapter_stats_entry(stats: dict, chapter_number: int) -> dict:
+    slug = f"chapter_{chapter_number:04d}"
+    by_chapter = stats.setdefault("by_chapter", {})
+    entry = by_chapter.setdefault(
+        slug,
+        {
+            "chapter_number": chapter_number,
+            "chapter_slug": slug,
+            "total": _empty_usage_stats(),
+            "by_phase": {},
+        },
+    )
+    entry["chapter_number"] = chapter_number
+    entry["chapter_slug"] = slug
+    entry.setdefault("total", _empty_usage_stats())
+    entry.setdefault("by_phase", {})
+    return entry
+
+
+def _merge_chapter_stats(
+    stats: dict,
+    phase: str,
+    success: bool,
+    usage: dict | None = None,
+    metadata: dict | None = None,
+    chapter_number: int | None = None,
+    chapter_slug: str | None = None,
+) -> None:
+    resolved_chapter_number = _resolve_stats_chapter_number(
+        chapter_number=chapter_number,
+        chapter_slug=chapter_slug,
+        metadata=metadata,
+    )
+    if resolved_chapter_number <= 0:
+        return
+    entry = _chapter_stats_entry(stats, resolved_chapter_number)
+    entry["by_phase"].setdefault(phase, _empty_usage_stats())
+    _merge_usage_stats_with_metadata(entry["total"], success=success, usage=usage, metadata=metadata)
+    _merge_usage_stats_with_metadata(entry["by_phase"][phase], success=success, usage=usage, metadata=metadata)
+
+
+def _merge_project_stats(
+    stats: dict,
+    phase: str,
+    success: bool,
+    usage: dict | None = None,
+    metadata: dict | None = None,
+    chapter_number: int | None = None,
+    chapter_slug: str | None = None,
+) -> None:
     stats.setdefault("total", _empty_usage_stats())
     stats.setdefault("by_phase", {})
+    stats.setdefault("by_chapter", {})
     stats["by_phase"].setdefault(phase, _empty_usage_stats())
     stats["cost"] = _normalize_cost_stats(stats)
-    _merge_usage_stats(stats["total"], success=success, usage=usage)
-    _merge_usage_stats(stats["by_phase"][phase], success=success, usage=usage)
+    _merge_usage_stats_with_metadata(stats["total"], success=success, usage=usage, metadata=metadata)
+    _merge_usage_stats_with_metadata(stats["by_phase"][phase], success=success, usage=usage, metadata=metadata)
+    _merge_chapter_stats(
+        stats,
+        phase,
+        success,
+        usage=usage,
+        metadata=metadata,
+        chapter_number=chapter_number,
+        chapter_slug=chapter_slug,
+    )
     _merge_model_cost_stats(stats, phase=phase, success=success, metadata=metadata)
 
 
@@ -576,6 +763,8 @@ def update_project_stats(
     success: bool,
     usage: dict | None = None,
     metadata: dict | None = None,
+    chapter_number: int | None = None,
+    chapter_slug: str | None = None,
 ) -> None:
     project_file = Path(project_path) / "project.json"
     project_data = load_json(str(project_file))
@@ -588,7 +777,15 @@ def update_project_stats(
         },
     )
 
-    _merge_project_stats(stats, phase=phase, success=success, usage=usage, metadata=metadata)
+    _merge_project_stats(
+        stats,
+        phase=phase,
+        success=success,
+        usage=usage,
+        metadata=metadata,
+        chapter_number=chapter_number,
+        chapter_slug=chapter_slug,
+    )
 
     project_data["stats"] = stats
     project_data["updated_at"] = utc_now()
@@ -2439,6 +2636,25 @@ def _update_project_chapter_count(project_path: str, chapter_count: int) -> None
     save_json(str(project_file), project_data)
 
 
+def _delete_future_chapter_stats(project_path: str, keep_chapter_count: int) -> list[str]:
+    project_file = Path(project_path) / "project.json"
+    project_data = load_json(str(project_file))
+    stats = project_data.get("stats") if isinstance(project_data.get("stats"), dict) else {}
+    by_chapter = stats.get("by_chapter") if isinstance(stats.get("by_chapter"), dict) else {}
+    removed = []
+    for slug in list(by_chapter.keys()):
+        chapter_number = _chapter_number_from_stats_slug(slug)
+        if chapter_number > keep_chapter_count:
+            by_chapter.pop(slug, None)
+            removed.append(slug)
+    if removed:
+        stats["by_chapter"] = by_chapter
+        project_data["stats"] = stats
+        project_data["updated_at"] = utc_now()
+        save_json(str(project_file), project_data)
+    return removed
+
+
 def rollback_project(project_path: str, to_chapter: int) -> dict:
     base = Path(project_path)
     project_file = base / "project.json"
@@ -2478,6 +2694,7 @@ def rollback_project(project_path: str, to_chapter: int) -> dict:
 
     from outline_manager import sync_outline_progress
 
+    removed["chapter_stats"] = _delete_future_chapter_stats(project_path, target_count)
     sync_outline_progress(project_path)
     snapshot_path = create_state_snapshot(project_path, chapter_count=target_count, note="post-rollback state")
     return {

@@ -524,6 +524,41 @@ class ProjectManagerTests(unittest.TestCase):
             self.assertEqual(stats["cost"]["unpriced_tokens"], 280)
             self.assertEqual(model_entry["pricing_status"], "unpriced")
 
+    def test_update_project_stats_records_chapter_phase_token_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="chapter_tokens")
+            metadata = {
+                "provider": "ollama",
+                "model": "llama3.2",
+                "usage": {
+                    "prompt_tokens": 900,
+                    "completion_tokens": 1000,
+                    "total_tokens": 1900,
+                },
+                "max_output_tokens": 1000,
+                "input_token_limit": 1000,
+                "finish_reason": "length",
+                "truncated": True,
+            }
+
+            update_project_stats(
+                str(project_path),
+                phase="writer",
+                success=True,
+                usage=metadata["usage"],
+                metadata=metadata,
+                chapter_number=1,
+            )
+
+            stats = read_json(project_path / "project.json")["stats"]
+            chapter_stats = stats["by_chapter"]["chapter_0001"]
+            writer_stats = chapter_stats["by_phase"]["writer"]
+            self.assertEqual(chapter_stats["total"]["prompt_tokens"], 900)
+            self.assertEqual(writer_stats["completion_tokens"], 1000)
+            self.assertEqual(writer_stats["input_near_limit_hits"], 1)
+            self.assertEqual(writer_stats["output_limit_hits"], 1)
+            self.assertEqual(writer_stats["output_token_limit"], 1000)
+
     def test_init_prompt_limits_supporting_characters_to_opening_cast(self) -> None:
         prompt = build_init_prompt(
             {

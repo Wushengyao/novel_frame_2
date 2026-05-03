@@ -130,6 +130,7 @@ def update_plot_state(
     summaries_dir.mkdir(parents=True, exist_ok=True)
 
     project_data = load_project(project_path)
+    chapter_number = safe_int(project_data.get("project", {}).get("chapter_count"), 0)
     current_state = normalize_live_plot_state(load_json(str(plot_state_path)))
     prompt_context = build_summary_context(project_path, project_data, new_text)
     prompt = build_summary_prompt(prompt_context, new_text)
@@ -139,7 +140,7 @@ def update_plot_state(
         prompt_chars=len(prompt),
         section_chars=prompt_context.get("section_chars"),
         planning_mode=config.get("planning_mode", ""),
-        extra={"target_chapter_number": safe_int(project_data.get("project", {}).get("chapter_count"), 0)},
+        extra={"target_chapter_number": chapter_number},
     )
 
     summary = None
@@ -166,7 +167,7 @@ def update_plot_state(
                 response_format="json",
             )
         except Exception as exc:  # pragma: no cover - intentional resilience path
-            update_project_stats(project_path, phase="summary", success=False, usage=None)
+            update_project_stats(project_path, phase="summary", success=False, usage=None, chapter_number=chapter_number)
             last_error = exc
             log_warning(f"剧情状态更新: 第 {attempt + 1} 次请求失败，原因: {exc}")
             continue
@@ -178,6 +179,7 @@ def update_plot_state(
                 success=True,
                 usage=metadata.get("usage"),
                 metadata=metadata,
+                chapter_number=chapter_number,
             )
             summary = _normalize_summary(
                 extract_json_object(response_text, "Could not parse JSON from summary response."),

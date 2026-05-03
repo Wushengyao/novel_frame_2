@@ -534,9 +534,16 @@ def generate_craft_brief(
             system_prompt=build_system_prompt("craft_brief"),
             response_format="json",
         )
-        update_project_stats(project_path, phase="craft_brief", success=True, usage=metadata.get("usage"), metadata=metadata)
+        update_project_stats(
+            project_path,
+            phase="craft_brief",
+            success=True,
+            usage=metadata.get("usage"),
+            metadata=metadata,
+            chapter_number=chapter_number,
+        )
     except Exception as exc:  # pragma: no cover - resilience path
-        update_project_stats(project_path, phase="craft_brief", success=False, usage=None)
+        update_project_stats(project_path, phase="craft_brief", success=False, usage=None, chapter_number=chapter_number)
         log_warning(f"craft_brief: using fallback brief, reason: {exc}")
         brief = deepcopy(fallback)
         brief["fallback_reason"] = str(exc)
@@ -590,9 +597,16 @@ def generate_high_auto_plan(
             system_prompt=build_system_prompt("planner"),
             response_format="json",
         )
-        update_project_stats(project_path, phase="high_auto_plan", success=True, usage=metadata.get("usage"), metadata=metadata)
+        update_project_stats(
+            project_path,
+            phase="high_auto_plan",
+            success=True,
+            usage=metadata.get("usage"),
+            metadata=metadata,
+            chapter_number=chapter_number,
+        )
     except Exception as exc:  # pragma: no cover - resilience path
-        update_project_stats(project_path, phase="high_auto_plan", success=False, usage=None)
+        update_project_stats(project_path, phase="high_auto_plan", success=False, usage=None, chapter_number=chapter_number)
         log_warning(f"high_auto_plan: using fallback plan, reason: {exc}")
         plan = deepcopy(fallback)
         plan["fallback_reason"] = str(exc)
@@ -664,9 +678,16 @@ def review_chapter_draft(
                 system_prompt=build_system_prompt("quality_review"),
                 response_format="json",
             )
-            update_project_stats(project_path, phase="quality_review", success=True, usage=metadata.get("usage"), metadata=metadata)
+            update_project_stats(
+                project_path,
+                phase="quality_review",
+                success=True,
+                usage=metadata.get("usage"),
+                metadata=metadata,
+                chapter_number=chapter_number,
+            )
         except Exception as exc:  # pragma: no cover - resilience path
-            update_project_stats(project_path, phase="quality_review", success=False, usage=None)
+            update_project_stats(project_path, phase="quality_review", success=False, usage=None, chapter_number=chapter_number)
             last_error = str(exc)
             log_warning(f"quality_review: request failed attempt={attempt} request_attempt={request_attempt}, reason: {exc}")
             continue
@@ -733,7 +754,7 @@ def rewrite_chapter_draft(
             )
             raise_if_llm_response_truncated(metadata, phase="rewrite")
         except Exception as exc:
-            update_project_stats(project_path, phase="rewrite", success=False, usage=None)
+            update_project_stats(project_path, phase="rewrite", success=False, usage=None, chapter_number=chapter_number)
             last_error = str(exc)
             log_warning(f"rewrite: request failed request_attempt={request_attempt}, reason: {exc}")
             continue
@@ -741,12 +762,26 @@ def rewrite_chapter_draft(
         try:
             rewritten_text = normalize_rewrite_response_text(response_text)
         except Exception as exc:
-            update_project_stats(project_path, phase="rewrite", success=False, usage=metadata.get("usage"), metadata=metadata)
+            update_project_stats(
+                project_path,
+                phase="rewrite",
+                success=False,
+                usage=metadata.get("usage"),
+                metadata=metadata,
+                chapter_number=chapter_number,
+            )
             last_error = str(exc)
             log_warning(f"rewrite: response parse failed request_attempt={request_attempt}, reason: {exc}")
             continue
 
-        update_project_stats(project_path, phase="rewrite", success=True, usage=metadata.get("usage"), metadata=metadata)
+        update_project_stats(
+            project_path,
+            phase="rewrite",
+            success=True,
+            usage=metadata.get("usage"),
+            metadata=metadata,
+            chapter_number=chapter_number,
+        )
         return rewritten_text
 
     raise RuntimeError(f"rewrite failed after retry: {last_error}")

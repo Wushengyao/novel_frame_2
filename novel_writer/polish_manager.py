@@ -228,7 +228,7 @@ def run_chapter_polish(
             polished_text = ensure_chapter_heading(polished_text, chapter_number, original_title)
         _validate_polished_text(original_text, polished_text)
     except Exception:
-        update_project_stats(project_path, phase="polish", success=False, usage=None)
+        update_project_stats(project_path, phase="polish", success=False, usage=None, chapter_number=chapter_number)
         log_error("polish_chapter: polish request or validation failed")
         raise
 
@@ -238,6 +238,7 @@ def run_chapter_polish(
         success=True,
         usage=metadata.get("usage"),
         metadata=metadata,
+        chapter_number=chapter_number,
     )
     emit_progress(progress_callback, "polish_backup", "正在备份原章节正文")
     backup_path, metadata_path = _backup_original_chapter(

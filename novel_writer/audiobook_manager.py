@@ -1058,6 +1058,7 @@ def _parse_segments_with_llm(
     *,
     llm_config: dict,
     split_config: dict,
+    chapter_slug: str = "",
 ) -> tuple[list[dict], dict]:
     units = _build_segment_units(chapter_text, characters)
     if not units:
@@ -1068,7 +1069,12 @@ def _parse_segments_with_llm(
         response_text, metadata = generate_text_with_metadata(
             _build_audiobook_segment_prompt(batch, characters),
             llm_config,
-            log_context={"phase": "audiobook", "task": "segment_classification", "batch_index": batch_index},
+            log_context={
+                "phase": "audiobook",
+                "task": "segment_classification",
+                "batch_index": batch_index,
+                "chapter_slug": chapter_slug,
+            },
             system_prompt=(
                 "你只输出 JSON，不输出解释。你擅长中文小说文本中旁白、台词、心理活动、引号引用的精确归类。"
             ),
@@ -1096,7 +1102,13 @@ def _parse_segments_with_llm(
     ), _merge_llm_metadata(metadata_items)
 
 
-def _update_audiobook_llm_stats(project_path: str | Path | None, *, success: bool, metadata: dict | None = None) -> None:
+def _update_audiobook_llm_stats(
+    project_path: str | Path | None,
+    *,
+    success: bool,
+    metadata: dict | None = None,
+    chapter_slug: str = "",
+) -> None:
     if not project_path:
         return
     try:
@@ -1106,6 +1118,7 @@ def _update_audiobook_llm_stats(project_path: str | Path | None, *, success: boo
             success=success,
             usage=(metadata or {}).get("usage") if isinstance(metadata, dict) else None,
             metadata=metadata,
+            chapter_slug=chapter_slug,
         )
     except Exception:
         return
@@ -1131,6 +1144,7 @@ def parse_chapter_segments(
     llm_config: dict | None = None,
     progress_callback=None,
     project_path: str | Path | None = None,
+    chapter_slug: str = "",
 ) -> list[dict]:
     config = dict(DEFAULT_SPLIT_CONFIG)
     config.update(split_config or {})
@@ -1147,12 +1161,13 @@ def parse_chapter_segments(
                 characters,
                 llm_config=segment_llm_config or {},
                 split_config=config,
+                chapter_slug=chapter_slug,
             )
-            _update_audiobook_llm_stats(project_path, success=True, metadata=metadata)
+            _update_audiobook_llm_stats(project_path, success=True, metadata=metadata, chapter_slug=chapter_slug)
             if segments:
                 return segments
         except Exception:
-            _update_audiobook_llm_stats(project_path, success=False, metadata=None)
+            _update_audiobook_llm_stats(project_path, success=False, metadata=None, chapter_slug=chapter_slug)
             emit_progress(progress_callback, "audiobook_segment_rules", "LLM 识别失败，已回退到本地规则分辨")
 
     return _parse_chapter_segments_by_rules(chapter_text, characters, split_config=config)
@@ -2092,6 +2107,7 @@ def _prepare_audiobook_chapter(
         llm_config=llm_config,
         progress_callback=progress_callback,
         project_path=project_path,
+        chapter_slug=chapter_slug,
     )
     if not segments:
         raise RuntimeError("章节中没有可合成的文本片段。")
