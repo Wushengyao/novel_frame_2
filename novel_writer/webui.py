@@ -72,6 +72,8 @@ from project_manager import (
     PLANNING_MODE_NONE,
     PLANNING_MODE_VOLUME,
     ensure_reader_setup,
+    extract_chapter_title,
+    format_chapter_heading,
     get_latest_state_snapshot_chapter,
     delete_project,
     export_project_archive,
@@ -82,6 +84,7 @@ from project_manager import (
     normalize_planning_mode,
     project_audio_lock_is_active,
     rollback_project,
+    sanitize_chapter_title,
 )
 from runtime_config import (
     DEFAULT_REVIEW_MODE,
@@ -1321,7 +1324,7 @@ def _render_project_chapter_token_rows(stats: dict | None, *, project_id: str = 
         usage = entry.get("total") if isinstance(entry.get("total"), dict) else {}
         chapter_number = _stats_int(entry.get("chapter_number"))
         chapter_slug = str(entry.get("chapter_slug") or f"chapter_{chapter_number:04d}")
-        chapter_label = escape(chapter_slug)
+        chapter_label = escape(_chapter_display_name(project_path, chapter_slug))
         if project_id:
             chapter_label = f'<a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}">{chapter_label}</a>'
         rows.append(
@@ -2464,26 +2467,91 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_cal
         Path(tmp_path).unlink(missing_ok=True)
 
 
-def _read_chapters(project_path: Path) -> list[dict]:
-    chapters_dir = project_path / "chapters"
-    chapters = []
-    for chapter_file in sorted(chapters_dir.glob("chapter_*.md")):
-        text = chapter_file.read_text(encoding="utf-8")
-        chapters.append(
-            {
-                "name": chapter_file.name,
-                "slug": chapter_file.stem,
-                "text": text,
-            }
-        )
-    return chapters
-
-
 def _chapter_number_from_slug(chapter_slug: str) -> int | None:
     match = re.fullmatch(r"chapter_(\d{4})", (chapter_slug or "").strip())
     if not match:
         return None
     return int(match.group(1))
+
+
+def _chapter_title_from_task_card(project_path: Path, chapter_number: int | None) -> str:
+    if chapter_number is None:
+        return ""
+    task_card_path = project_path / "task_cards" / f"chapter_{chapter_number:04d}.json"
+    if not task_card_path.exists():
+        return ""
+    try:
+        task_card = load_json(str(task_card_path))
+    except Exception:
+        return ""
+    for key in ("chapter_title", "title"):
+        title = sanitize_chapter_title(task_card.get(key), chapter_number=chapter_number)
+        if title:
+            return title
+    return ""
+
+
+def _chapter_title_from_outline(project_path: Path, chapter_number: int | None) -> str:
+    if chapter_number is None:
+        return ""
+    outlines_path = project_path / "outlines.json"
+    if not outlines_path.exists():
+        return ""
+    try:
+        outlines = load_json(str(outlines_path))
+    except Exception:
+        return ""
+    for volume in outlines.get("volumes") or []:
+        if not isinstance(volume, dict):
+            continue
+        for chapter in volume.get("chapters") or []:
+            if not isinstance(chapter, dict):
+                continue
+            try:
+                outline_number = int(chapter.get("chapter_number") or 0)
+            except (TypeError, ValueError):
+                outline_number = 0
+            if outline_number == chapter_number:
+                return sanitize_chapter_title(chapter.get("title"), chapter_number=chapter_number)
+    return ""
+
+
+def _chapter_display_name(project_path: Path | None, chapter_slug: str, text: str | None = None) -> str:
+    chapter_number = _chapter_number_from_slug(chapter_slug)
+    title = ""
+    if text:
+        title = extract_chapter_title(text, chapter_number=chapter_number)
+    if project_path is not None and not title:
+        title = _chapter_title_from_task_card(project_path, chapter_number)
+    if project_path is not None and not title:
+        title = _chapter_title_from_outline(project_path, chapter_number)
+    if chapter_number is not None:
+        return format_chapter_heading(chapter_number, title)
+    return title or chapter_slug
+
+
+def _chapter_name_map(project_path: Path, chapters: list[dict] | None = None) -> dict[str, str]:
+    chapter_items = chapters if chapters is not None else _read_chapters(project_path)
+    return {str(chapter.get("slug", "")): str(chapter.get("name", "")) for chapter in chapter_items}
+
+
+def _read_chapters(project_path: Path) -> list[dict]:
+    chapters_dir = project_path / "chapters"
+    chapters = []
+    for chapter_file in sorted(chapters_dir.glob("chapter_*.md")):
+        text = chapter_file.read_text(encoding="utf-8")
+        chapter_slug = chapter_file.stem
+        chapter_number = _chapter_number_from_slug(chapter_slug)
+        chapters.append(
+            {
+                "file_name": chapter_file.name,
+                "name": _chapter_display_name(project_path, chapter_slug, text),
+                "number": chapter_number,
+                "slug": chapter_slug,
+                "text": text,
+            }
+        )
+    return chapters
 
 
 def _audiobook_chapter_slugs(project_path: Path) -> list[str]:
@@ -2544,9 +2612,9 @@ def _resolve_audiobook_chapter_refs(project_path: Path, form: dict[str, str]) ->
     raise RuntimeError("不支持的有声章节生成范围。")
 
 
-def _audiobook_refs_label(chapter_refs: list[str]) -> str:
+def _audiobook_refs_label(chapter_refs: list[str], project_path: Path | None = None) -> str:
     if len(chapter_refs) == 1:
-        return "最新章节" if chapter_refs[0] == "latest" else chapter_refs[0]
+        return "最新章节" if chapter_refs[0] == "latest" else _chapter_display_name(project_path, chapter_refs[0])
     return f"{len(chapter_refs)} 个章节"
 
 
@@ -3049,7 +3117,7 @@ def _render_audiobook_player(project_id: str, record: dict | None) -> str:
     """
 
 
-def _render_audiobook_records(project_id: str, records: list[dict]) -> str:
+def _render_audiobook_records(project_id: str, records: list[dict], project_path: Path | None = None) -> str:
     if not records:
         return "<p>当前还没有有声章节。</p>"
     items = []
@@ -3058,10 +3126,11 @@ def _render_audiobook_records(project_id: str, records: list[dict]) -> str:
         audio_url = _audiobook_audio_url(project_id, record)
         if not chapter_slug or not audio_url:
             continue
+        chapter_name = _chapter_display_name(project_path, chapter_slug)
         items.append(
             f"""
             <div class="audio-record">
-              <div><strong>{escape(chapter_slug)}</strong></div>
+              <div><strong>{escape(chapter_name)}</strong></div>
               <audio controls src="{escape(audio_url)}"></audio>
               <div class="muted">{escape(str(record.get("segment_count", len(record.get("segments", [])) or 0)))} 个片段</div>
               <a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}">打开章节</a>
@@ -5902,6 +5971,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         )
         effective_task_html = _render_effective_task_summary(effective_task)
         chapters = _read_chapters(project_path)
+        chapter_names = _chapter_name_map(project_path, chapters)
         latest_snapshot = get_latest_state_snapshot_chapter(str(project_path))
         project_stats = project.get("stats") or {}
         stats = project_stats.get("total", {})
@@ -5933,6 +6003,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             images = record.get("images") or []
             if not chapter_slug or not images:
                 continue
+            chapter_name = chapter_names.get(chapter_slug) or _chapter_display_name(project_path, chapter_slug)
             image = images[0]
             image_url = (
                 f"/project/{urllib.parse.quote(project_id)}/illustration-file/"
@@ -5941,8 +6012,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             illustration_cards.append(
                 f"""
                 <div class="thumb">
-                  <a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}"><img src="{image_url}" alt="{escape(chapter_slug)}"></a>
-                  <div><strong>{escape(chapter_slug)}</strong></div>
+                  <a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}"><img src="{image_url}" alt="{escape(chapter_name)}"></a>
+                  <div><strong>{escape(chapter_name)}</strong></div>
                   <div class="muted">{escape(record.get('scene_summary', '') or '已生成插图')}</div>
                 </div>
                 """
@@ -6143,6 +6214,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         project_name = _repair_display_text(project.get("name", project_id))
         chapters = _read_chapters(project_path)
         chapter_text = chapter_file.read_text(encoding="utf-8")
+        chapter_name = _chapter_display_name(project_path, chapter_slug, chapter_text)
         chapter_number = _chapter_number_from_slug(chapter_slug)
         reader_setup_panel_html = ""
         if chapter_number == 1:
@@ -6226,7 +6298,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 cards.append(
                     f"""
                     <div class="thumb">
-                      <a href="{image_url}"><img src="{image_url}" alt="{escape(chapter_slug)}"></a>
+                      <a href="{image_url}"><img src="{image_url}" alt="{escape(chapter_name)}"></a>
                       <div class="muted">{escape(illustration_record.get('scene_summary', '') or '章节插图')}</div>
                     </div>
                     """
@@ -6248,7 +6320,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
           {reader_setup_panel_html}
           <section class="panel">
             <a href="/project/{escape(project_id)}">返回项目</a>
-            <h2>{escape(chapter_file.name)}</h2>
+            <h2>{escape(chapter_name)}</h2>
             <div class="chapter-view">{escape(chapter_text)}</div>
             <div class="chapter-nav">
               {previous_link}
@@ -6347,7 +6419,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         """
         self._write_html(
             _render_page(
-                f"{project_name} - {chapter_file.name}",
+                f"{project_name} - {chapter_name}",
                 body,
                 notice=notice,
                 error=error,
@@ -6371,6 +6443,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
 
         project = load_json(str(project_path / "project.json"))
         project_name = _repair_display_text(project.get("name", project_id))
+        chapter_name = _chapter_display_name(project_path, chapter_slug)
         artifacts = list_quality_artifacts(str(project_path), chapter_number)
         report_sections = []
         for item in artifacts.get("reports") or []:
@@ -6415,7 +6488,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         <div class="stack">
           <section class="panel">
             <a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}">返回章节</a>
-            <h2>{escape(chapter_slug)} 质量报告</h2>
+            <h2>{escape(chapter_name)} 质量报告</h2>
             <p class="muted">这里展示本章所有审稿 attempt，包含自动重写后的二审报告。</p>
           </section>
           {''.join(report_sections)}
@@ -6423,7 +6496,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         """
         self._write_html(
             _render_page(
-                f"{project_name} - {chapter_slug} 质量报告",
+                f"{project_name} - {chapter_name} 质量报告",
                 body,
                 notice=notice,
                 error=error,
@@ -6447,6 +6520,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
 
         project = load_json(str(project_path / "project.json"))
         project_name = _repair_display_text(project.get("name", project_id))
+        chapter_name = _chapter_display_name(project_path, chapter_slug)
         artifacts = list_expert_review_artifacts(str(project_path), chapter_number)
         sections = []
         aggregate = artifacts.get("aggregate") if isinstance(artifacts.get("aggregate"), dict) else {}
@@ -6514,7 +6588,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         <div class="stack">
           <section class="panel">
             <a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}">返回章节</a>
-            <h2>{escape(chapter_slug)} 专家诊断</h2>
+            <h2>{escape(chapter_name)} 专家诊断</h2>
             <p class="muted">这里展示专家模型组对章节质量、提示词、模型能力和工作流问题的追因报告。</p>
           </section>
           {''.join(sections)}
@@ -6522,7 +6596,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         """
         self._write_html(
             _render_page(
-                f"{project_name} - {chapter_slug} 专家诊断",
+                f"{project_name} - {chapter_name} 专家诊断",
                 body,
                 notice=notice,
                 error=error,
@@ -6546,6 +6620,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
 
         project = load_json(str(project_path / "project.json"))
         project_name = _repair_display_text(project.get("name", project_id))
+        chapter_name = _chapter_display_name(project_path, chapter_slug)
         artifacts = list_quality_artifacts(str(project_path), chapter_number)
         draft_sections = []
         for item in artifacts.get("pre_rewrite_drafts") or []:
@@ -6582,7 +6657,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         <div class="stack">
           <section class="panel">
             <a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}">返回章节</a>
-            <h2>{escape(chapter_slug)} 重写前文本</h2>
+            <h2>{escape(chapter_name)} 重写前文本</h2>
             <p class="muted">这些文本来自高质量自动审稿失败后、执行重写前保存的草稿。</p>
           </section>
           {''.join(draft_sections)}
@@ -6590,7 +6665,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         """
         self._write_html(
             _render_page(
-                f"{project_name} - {chapter_slug} 重写前文本",
+                f"{project_name} - {chapter_name} 重写前文本",
                 body,
                 notice=notice,
                 error=error,
@@ -7042,6 +7117,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         )
         effective_task_html = _render_effective_task_summary(effective_task)
         chapters = _read_chapters(project_path)
+        chapter_names = _chapter_name_map(project_path, chapters)
         latest_snapshot = get_latest_state_snapshot_chapter(str(project_path))
         project_stats = project.get("stats") or {}
         stats = project_stats.get("total", {})
@@ -7128,6 +7204,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             images = record.get("images") or []
             if not chapter_slug or not images:
                 continue
+            chapter_name = chapter_names.get(chapter_slug) or _chapter_display_name(project_path, chapter_slug)
             image = images[0]
             image_url = (
                 f"/project/{urllib.parse.quote(project_id)}/illustration-file/"
@@ -7136,14 +7213,14 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             illustration_cards.append(
                 f"""
                 <div class="thumb">
-                  <a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}"><img src="{image_url}" alt="{escape(chapter_slug)}"></a>
-                  <div><strong>{escape(chapter_slug)}</strong></div>
+                  <a href="/project/{escape(project_id)}/chapter/{escape(chapter_slug)}"><img src="{image_url}" alt="{escape(chapter_name)}"></a>
+                  <div><strong>{escape(chapter_name)}</strong></div>
                   <div class="muted">{escape(record.get('scene_summary', '') or '已生成插图')}</div>
                 </div>
                 """
             )
         illustration_gallery = "".join(illustration_cards) or "<p>当前还没有章节插图。</p>"
-        audiobook_gallery = _render_audiobook_records(project_id, audiobook_records)
+        audiobook_gallery = _render_audiobook_records(project_id, audiobook_records, project_path)
         audiobook_mode_options_html = _render_audiobook_mode_options(project_path)
         narrator_options_html = _render_narrator_preset_options(project_path)
         character_voice_options_html = _render_character_voice_options(project_path)
@@ -7738,9 +7815,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             preset_ids = _polish_preset_ids_from_form(form)
             custom_request = (form.get("polish_custom_request") or "").strip()
             cancel_checkpoint = ProjectTreeCheckpoint(project_path)
+            chapter_name = _chapter_display_name(project_path, chapter_slug)
             job = JOB_REGISTRY.create_job(
                 kind="polish_chapter",
-                title=f"润色章节：{chapter_slug}",
+                title=f"润色章节：{chapter_name}",
                 project_id=project_id,
                 project_path=str(project_path.resolve()),
             )
@@ -7826,7 +7904,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             cancel_checkpoint = ProjectSubtreeCheckpoint(project_path, ["audiobook"])
             job = JOB_REGISTRY.create_job(
                 kind="audiobook",
-                title=f"生成有声章节：{_audiobook_refs_label(chapter_refs)}",
+                title=f"生成有声章节：{_audiobook_refs_label(chapter_refs, project_path)}",
                 project_id=project_id,
                 project_path=str(project_path.resolve()),
                 blocks_project=False,
@@ -7917,9 +7995,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             except Exception:
                 llm_runtime_config = None
             cancel_checkpoint = ProjectSubtreeCheckpoint(project_path, ["illustrations"])
+            chapter_name = "最新章节" if chapter_slug == "latest" else _chapter_display_name(project_path, chapter_slug)
             job = JOB_REGISTRY.create_job(
                 kind="illustrate",
-                title=f"生成插图：{chapter_slug}",
+                title=f"生成插图：{chapter_name}",
                 project_id=project_id,
                 project_path=str(project_path.resolve()),
                 blocks_project=False,
