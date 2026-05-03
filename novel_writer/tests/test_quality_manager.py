@@ -10,6 +10,7 @@ from common_utils import extract_json_object
 from project_manager import load_json
 from project_manager import save_json
 from quality_manager import (
+    REWRITE_REQUEST_ATTEMPTS,
     list_quality_artifacts,
     normalize_craft_brief,
     normalize_quality_review,
@@ -249,6 +250,43 @@ class QualityManagerTests(unittest.TestCase):
 
         self.assertEqual(text, "完整重写正文。")
         self.assertEqual(mocked_generate.call_count, 2)
+
+    def test_rewrite_fails_after_request_retry_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="rewrite_retry_limit")
+            config = load_json(str(project_path / "project.json"))["llm_config"]
+            prompt_context = {
+                "task_card": {"chapter_number": 1},
+                "sections": {},
+                "section_chars": {},
+            }
+
+            with patch(
+                "quality_manager.generate_text_with_metadata",
+                side_effect=[
+                    (json.dumps({"note": f"missing body {index}"}, ensure_ascii=False), {"usage": {}})
+                    for index in range(REWRITE_REQUEST_ATTEMPTS)
+                ],
+            ) as mocked_generate:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    rf"rewrite failed after {REWRITE_REQUEST_ATTEMPTS} attempts",
+                ):
+                    rewrite_chapter_draft(
+                        str(project_path),
+                        prompt_context,
+                        "original draft",
+                        {"rewrite_plan": ["add tension"]},
+                        config,
+                        log_context={"phase": "writer"},
+                    )
+
+            self.assertEqual(mocked_generate.call_count, REWRITE_REQUEST_ATTEMPTS)
+            project = load_json(str(project_path / "project.json"))
+            rewrite_stats = project["stats"]["by_phase"]["rewrite"]
+            self.assertEqual(rewrite_stats["requests"], REWRITE_REQUEST_ATTEMPTS)
+            self.assertEqual(rewrite_stats["failures"], REWRITE_REQUEST_ATTEMPTS)
+            self.assertEqual(rewrite_stats["successes"], 0)
 
 
 if __name__ == "__main__":

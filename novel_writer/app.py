@@ -729,7 +729,7 @@ def run_next_chapter(
                 if rewrite_allowed and review_needs_rewrite and completed_rewrites >= rewrite_limit:
                     message = (
                         "Quality rewrite limit reached: "
-                        f"{completed_rewrites}/{rewrite_limit}; keeping latest draft."
+                        f"{completed_rewrites}/{rewrite_limit}; latest draft still needs rewrite."
                     )
                     log_warning(message)
                     emit_progress(
@@ -742,8 +742,10 @@ def run_next_chapter(
                             "completed_rewrites": completed_rewrites,
                             "review_attempt": review_attempt,
                             "reasons": _quality_review_reason_items(review),
+                            "abort": True,
                         },
                     )
+                    raise RuntimeError(message)
                 break
 
             rewrite_attempt = completed_rewrites + 1
@@ -783,11 +785,11 @@ def run_next_chapter(
                     log_context=log_context_payload,
                     progress_callback=progress_callback,
                 )
-            except Exception as exc:  # pragma: no cover - keep original draft if rewrite fails
+            except Exception as exc:
                 if pre_rewrite_path is not None:
                     pre_rewrite_path.unlink(missing_ok=True)
-                message = f"Rewrite {rewrite_attempt}/{rewrite_limit} failed; keeping current draft. Reason: {exc}"
-                log_warning(f"rewrite: failed; keeping current draft. reason={exc}")
+                message = f"Rewrite {rewrite_attempt}/{rewrite_limit} failed after retries; aborting chapter task. Reason: {exc}"
+                log_warning(f"rewrite: failed after retries; aborting chapter task. reason={exc}")
                 emit_progress(
                     progress_callback,
                     "rewrite_failed",
@@ -797,9 +799,10 @@ def run_next_chapter(
                         "rewrite_attempt": rewrite_attempt,
                         "rewrite_limit": rewrite_limit,
                         "reason": str(exc),
+                        "abort": True,
                     },
                 )
-                break
+                raise RuntimeError(message) from exc
             else:
                 if not chapter_title:
                     chapter_title = _select_chapter_title(prompt_task_card, rewritten_text, int(target_chapter_number))

@@ -32,7 +32,7 @@ from runtime_config import (
 CRAFT_BRIEF_DIR_NAME = "craft_briefs"
 QUALITY_REVIEW_DIR_NAME = "quality_reviews"
 QUALITY_DRAFT_DIR_NAME = "quality_drafts"
-REWRITE_REQUEST_ATTEMPTS = 2
+REWRITE_REQUEST_ATTEMPTS = 4
 DEFAULT_QUALITY_REWRITE_LIMIT = 1
 HIGH_QUALITY_REWRITE_LIMIT = 5
 REWRITE_TEXT_KEYS = (
@@ -786,7 +786,7 @@ def rewrite_chapter_draft(
         )
         return rewritten_text
 
-    raise RuntimeError(f"rewrite failed after retry: {last_error}")
+    raise RuntimeError(f"rewrite failed after {REWRITE_REQUEST_ATTEMPTS} attempts: {last_error}")
 
 
 def quality_mode_uses_craft_brief(mode: object) -> bool:

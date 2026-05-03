@@ -20,6 +20,7 @@ from app import (
 )
 from prompt_builder import build_system_prompt
 from project_manager import ProjectWriteLockError, acquire_project_write_lock, normalize_chapter_text, save_json
+from quality_manager import REWRITE_REQUEST_ATTEMPTS
 from progression_manager import CUSTOM_PROGRESSION_OPTION_ID, generate_progression_options
 
 from tests.test_support import create_test_project, read_json, runtime_config
@@ -568,6 +569,99 @@ class GuidedFlowTests(unittest.TestCase):
             self.assertEqual(review_status_events[0]["event_details"]["next_rewrite_attempt"], 1)
             self.assertEqual(review_status_events[-1]["event_details"]["passed"], True)
             self.assertEqual(review_status_events[-1]["event_details"]["completed_rewrites"], 5)
+
+    def test_rewrite_limit_exhaustion_fails_chapter_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="quality_rewrite_limit_exhausted")
+            failing_review = self._review_payload(passed=False, score=4)
+            quality_responses = [
+                (json.dumps(self._craft_brief_payload(), ensure_ascii=False), {"usage": {}}),
+                (json.dumps(failing_review, ensure_ascii=False), {"usage": {}}),
+            ]
+            for rewrite_index in range(1, 6):
+                quality_responses.append((f"rewrite {rewrite_index} body", {"usage": {}}))
+                quality_responses.append((json.dumps(failing_review, ensure_ascii=False), {"usage": {}}))
+            progress_events: list[dict] = []
+
+            with patch(
+                "quality_manager.generate_text_with_metadata",
+                side_effect=quality_responses,
+            ) as mocked_quality_generate, patch(
+                "app.generate_text_with_metadata",
+                return_value=("original body", {"usage": {}}),
+            ), patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ) as mocked_summary_generate:
+                with self.assertRaisesRegex(RuntimeError, "Quality rewrite limit reached: 5/5"):
+                    run_next_chapter(
+                        str(project_path),
+                        runtime_config("chapter", writing_quality_mode="high", review_mode="auto"),
+                        progress_callback=progress_events.append,
+                    )
+
+            phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
+            self.assertEqual(phases.count("rewrite"), 5)
+            self.assertEqual(phases.count("quality_review"), 6)
+            mocked_summary_generate.assert_not_called()
+            self.assertFalse((project_path / "chapters" / "chapter_0001.md").exists())
+            self.assertTrue((project_path / "quality_drafts" / "chapter_0001_before_rewrite_5.md").exists())
+
+            stages = [event.get("stage") for event in progress_events]
+            self.assertIn("rewrite_limit_reached", stages)
+            self.assertNotIn("chapter_save", stages)
+            limit_event = [event for event in progress_events if event.get("stage") == "rewrite_limit_reached"][-1]
+            self.assertTrue(limit_event["event_details"]["abort"])
+            self.assertEqual(limit_event["event_details"]["completed_rewrites"], 5)
+
+    def test_rewrite_retry_exhaustion_fails_chapter_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="quality_rewrite_retry_exhausted")
+            quality_responses = [
+                (json.dumps(self._craft_brief_payload(), ensure_ascii=False), {"usage": {}}),
+                (json.dumps(self._review_payload(passed=False, score=4), ensure_ascii=False), {"usage": {}}),
+                *[
+                    (json.dumps({"note": f"missing body {index}"}, ensure_ascii=False), {"usage": {}})
+                    for index in range(REWRITE_REQUEST_ATTEMPTS)
+                ],
+            ]
+            progress_events: list[dict] = []
+
+            with patch(
+                "quality_manager.generate_text_with_metadata",
+                side_effect=quality_responses,
+            ) as mocked_quality_generate, patch(
+                "app.generate_text_with_metadata",
+                return_value=("original body", {"usage": {}}),
+            ), patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ) as mocked_summary_generate:
+                with self.assertRaisesRegex(RuntimeError, "Rewrite 1/5 failed after retries"):
+                    run_next_chapter(
+                        str(project_path),
+                        runtime_config("chapter", writing_quality_mode="high", review_mode="auto"),
+                        progress_callback=progress_events.append,
+                    )
+
+            phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
+            self.assertEqual(phases.count("rewrite"), REWRITE_REQUEST_ATTEMPTS)
+            self.assertEqual(phases[:2], ["craft_brief", "quality_review"])
+            mocked_summary_generate.assert_not_called()
+            self.assertFalse((project_path / "chapters" / "chapter_0001.md").exists())
+            self.assertFalse((project_path / "quality_drafts" / "chapter_0001_before_rewrite_1.md").exists())
+
+            review = read_json(project_path / "quality_reviews" / "chapter_0001_attempt_1.json")
+            self.assertFalse(review["passed"])
+            stages = [event.get("stage") for event in progress_events]
+            self.assertIn("rewrite_failed", stages)
+            self.assertNotIn("chapter_save", stages)
+            rewrite_failed = [event for event in progress_events if event.get("stage") == "rewrite_failed"][-1]
+            self.assertTrue(rewrite_failed["event_details"]["abort"])
+            self.assertIn(
+                f"rewrite failed after {REWRITE_REQUEST_ATTEMPTS} attempts",
+                rewrite_failed["event_details"]["reason"],
+            )
 
     def test_high_quality_later_chapter_refines_selected_progression_before_craft_brief(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
