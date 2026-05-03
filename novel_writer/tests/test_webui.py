@@ -454,6 +454,29 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("writer", chapter_page.body)
         self.assertIn("1,900 / 2,000", chapter_page.body)
 
+    def test_frontend_displays_chapter_title_instead_of_file_slug(self) -> None:
+        (self.project_path / "chapters" / "chapter_0001.md").write_text(
+            "第一章正文。\n",
+            encoding="utf-8",
+        )
+        save_json(
+            str(self.project_path / "task_cards" / "chapter_0001.json"),
+            {"chapter_number": 1, "title": "锁门后的灯"},
+        )
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 1
+        save_json(str(self.project_path / "project.json"), project)
+
+        project_page = self._get("/project/web")
+        chapter_page = self._get("/project/web/chapter/chapter_0001")
+
+        self.assertEqual(project_page.status, 200)
+        self.assertEqual(chapter_page.status, 200)
+        self.assertIn("第 1 章：锁门后的灯", project_page.body)
+        self.assertIn("<h2>第 1 章：锁门后的灯</h2>", chapter_page.body)
+        self.assertNotIn(">chapter_0001.md<", project_page.body)
+        self.assertNotIn("<h2>chapter_0001.md</h2>", chapter_page.body)
+
     def test_project_import_and_export_controls_render(self) -> None:
         projects_page = self._get("/projects")
         project_page = self._get("/project/web")
@@ -696,6 +719,40 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("任务已加入队列", page.body)
         self.assertIn("后台任务已启动", page.body)
         self.assertIn("正在写第 1 章", page.body)
+
+    def test_job_page_renders_quality_rewrite_event_details(self) -> None:
+        job = webui.JOB_REGISTRY.create_job(
+            kind="continue",
+            title="background continue",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+        )
+        webui.JOB_REGISTRY.progress(
+            job["id"],
+            {
+                "stage": "quality_review_status",
+                "message": "Quality review 1: failed. Reason: weak hook",
+                "event_details": {
+                    "type": "quality_review",
+                    "passed": False,
+                    "needs_rewrite": True,
+                    "review_attempt": 1,
+                    "next_rewrite_attempt": 1,
+                    "rewrite_limit": 5,
+                    "reasons": ["weak hook", "lowest scores: reader_hook=4"],
+                },
+            },
+        )
+
+        page = self._get(f"/job/{job['id']}")
+
+        self.assertEqual(page.status, 200)
+        self.assertIn("Quality review 1: failed", page.body)
+        self.assertIn("passed: no", page.body)
+        self.assertIn("needs_rewrite: yes", page.body)
+        self.assertIn("next_rewrite_attempt: 1", page.body)
+        self.assertIn("rewrite_limit: 5", page.body)
+        self.assertIn("reasons: weak hook; lowest scores: reader_hook=4", page.body)
 
     def test_failed_job_page_renders_error_on_first_load(self) -> None:
         job = webui.JOB_REGISTRY.create_job(
@@ -2408,7 +2465,7 @@ class WebUiGuidedFlowTests(unittest.TestCase):
 
         self.assertEqual(page.status, 200)
         setup_pos = page.body.find("读者开卷导语")
-        chapter_pos = page.body.find("<h2>chapter_0001.md</h2>")
+        chapter_pos = page.body.find("<h2>第 1 章：死寂的隔离区</h2>")
         self.assertGreater(setup_pos, -1)
         self.assertGreater(chapter_pos, -1)
         self.assertLess(setup_pos, chapter_pos)

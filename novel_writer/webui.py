@@ -232,15 +232,16 @@ class BackgroundJobRegistry:
             return job
         return None
 
-    def _append_event_locked(self, job: dict, stage: str, message: str) -> None:
+    def _append_event_locked(self, job: dict, stage: str, message: str, details: object = None) -> None:
         events = job.setdefault("events", [])
-        events.append(
-            {
-                "time": utc_now(),
-                "stage": stage,
-                "message": message,
-            }
-        )
+        event = {
+            "time": utc_now(),
+            "stage": stage,
+            "message": message,
+        }
+        if details not in (None, "", [], {}):
+            event["details"] = details
+        events.append(event)
         if len(events) > 40:
             del events[:-40]
 
@@ -257,6 +258,7 @@ class BackgroundJobRegistry:
             stage = fields.pop("stage", None)
             message = fields.pop("message", None)
             event = fields.pop("event", True)
+            event_details = fields.pop("event_details", None)
             if stage is not None:
                 job["stage"] = stage
             if message is not None:
@@ -266,7 +268,7 @@ class BackgroundJobRegistry:
                     job[key] = value
             job["updated_at"] = utc_now()
             if event and (stage is not None or message is not None):
-                self._append_event_locked(job, job.get("stage", ""), job.get("message", ""))
+                self._append_event_locked(job, job.get("stage", ""), job.get("message", ""), event_details)
 
     def mark_running(self, job_id: str, message: str = "后台任务已启动") -> None:
         if self.is_cancel_requested(job_id):
@@ -280,6 +282,7 @@ class BackgroundJobRegistry:
             message=payload.get("message"),
             current=payload.get("current"),
             total=payload.get("total"),
+            event_details=payload.get("event_details") or payload.get("details"),
         )
 
     def finish_success(
@@ -3445,6 +3448,68 @@ def _render_external_service_panel() -> str:
     """
 
 
+def _format_job_event_detail_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, list):
+        return "; ".join(str(item) for item in value if str(item).strip())
+    if isinstance(value, dict):
+        return ", ".join(
+            f"{key}={item}"
+            for key, item in value.items()
+            if item not in (None, "", [], {})
+        )
+    return str(value or "").strip()
+
+
+def _render_job_event_details(details: object) -> str:
+    if not isinstance(details, dict) or not details:
+        return ""
+    labels = {
+        "status": "status",
+        "passed": "passed",
+        "available": "review_available",
+        "needs_rewrite": "needs_rewrite",
+        "review_attempt": "review_attempt",
+        "completed_rewrites": "completed_rewrites",
+        "next_rewrite_attempt": "next_rewrite_attempt",
+        "rewrite_attempt": "rewrite_attempt",
+        "rewrite_limit": "rewrite_limit",
+        "average_score": "average_score",
+        "reason": "reason",
+        "reasons": "reasons",
+    }
+    preferred = [
+        "status",
+        "passed",
+        "available",
+        "needs_rewrite",
+        "review_attempt",
+        "completed_rewrites",
+        "next_rewrite_attempt",
+        "rewrite_attempt",
+        "rewrite_limit",
+        "average_score",
+        "reason",
+        "reasons",
+    ]
+    keys = preferred + sorted(key for key in details if key not in preferred and key != "type")
+    parts = []
+    for key in keys:
+        if key not in details:
+            continue
+        value = details.get(key)
+        if value in (None, "", [], {}):
+            continue
+        formatted = _format_job_event_detail_value(value)
+        if not formatted:
+            continue
+        parts.append(f"{labels.get(key, key)}: {formatted}")
+    if not parts:
+        return ""
+    return f'<div class="job-event-details">{escape(" | ".join(parts))}</div>'
+
+
 def _render_job_events(events: object) -> str:
     if not isinstance(events, list) or not events:
         return '<li class="muted">暂无任务日志。</li>'
@@ -3456,8 +3521,9 @@ def _render_job_events(events: object) -> str:
         stage = str(item.get("stage") or "").strip()
         message = str(item.get("message") or stage or "").strip()
         stage_html = f' <span class="pill">{escape(stage)}</span>' if stage else ""
+        details_html = _render_job_event_details(item.get("details"))
         rows.append(
-            f'<li><span class="mono">{escape(event_time)}</span>{stage_html} {escape(message)}</li>'
+            f'<li><span class="mono">{escape(event_time)}</span>{stage_html} {escape(message)}{details_html}</li>'
         )
     return "".join(rows) or '<li class="muted">暂无任务日志。</li>'
 
@@ -4272,6 +4338,12 @@ def _render_page(
     .login-card {{
       display: grid;
       gap: 14px;
+    }}
+    .job-event-details {{
+      margin-top: 4px;
+      font-size: 13px;
+      color: var(--ink);
+      opacity: 0.78;
     }}
     .mono {{
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -5616,13 +5688,52 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             const percent = Math.max(0, Math.min(100, Math.round(current * 100 / total)));
             return `<div class="job-progress"><div class="job-progress-bar" style="width:${{percent}}%"></div></div><div class="muted">进度：${{current}}/${{total}}</div>`;
           }};
+          const formatDetailValue = (value) => {{
+            if (Array.isArray(value)) return value.filter((item) => String(item ?? "").trim()).join("; ");
+            if (typeof value === "boolean") return value ? "yes" : "no";
+            if (value && typeof value === "object") {{
+              return Object.entries(value)
+                .filter(([, item]) => item !== null && item !== "" && !(Array.isArray(item) && !item.length))
+                .map(([key, item]) => `${{key}}=${{item}}`)
+                .join(", ");
+            }}
+            return String(value ?? "").trim();
+          }};
+          const renderDetails = (details) => {{
+            if (!details || typeof details !== "object") return "";
+            const labels = {{
+              status: "status",
+              passed: "passed",
+              available: "review_available",
+              needs_rewrite: "needs_rewrite",
+              review_attempt: "review_attempt",
+              completed_rewrites: "completed_rewrites",
+              next_rewrite_attempt: "next_rewrite_attempt",
+              rewrite_attempt: "rewrite_attempt",
+              rewrite_limit: "rewrite_limit",
+              average_score: "average_score",
+              reason: "reason",
+              reasons: "reasons",
+            }};
+            const preferred = ["status", "passed", "available", "needs_rewrite", "review_attempt", "completed_rewrites", "next_rewrite_attempt", "rewrite_attempt", "rewrite_limit", "average_score", "reason", "reasons"];
+            const keys = [...preferred, ...Object.keys(details).filter((key) => !preferred.includes(key) && key !== "type").sort()];
+            const parts = [];
+            for (const key of keys) {{
+              if (!(key in details)) continue;
+              const value = details[key];
+              if (value === null || value === "" || (Array.isArray(value) && !value.length)) continue;
+              const formatted = formatDetailValue(value);
+              if (formatted) parts.push(`${{labels[key] || key}}: ${{formatted}}`);
+            }}
+            return parts.length ? `<div class="job-event-details">${{escapeHtml(parts.join(" | "))}}</div>` : "";
+          }};
           const renderEvents = (events) => {{
             const items = Array.isArray(events) ? events : [];
             if (!items.length) return '<li class="muted">暂无任务日志。</li>';
             return items.map((item) => {{
               const stage = item.stage ? ` <span class="pill">${{escapeHtml(item.stage)}}</span>` : "";
               const message = item.message || item.stage || "";
-              return `<li><span class="mono">${{escapeHtml(item.time || "")}}</span>${{stage}} ${{escapeHtml(message)}}</li>`;
+              return `<li><span class="mono">${{escapeHtml(item.time || "")}}</span>${{stage}} ${{escapeHtml(message)}}${{renderDetails(item.details)}}</li>`;
             }}).join("");
           }};
           const update = async () => {{
@@ -6787,13 +6898,52 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             if (ch === '"') return "&quot;";
             return "&#39;";
           }});
+          const formatDetailValue = (value) => {{
+            if (Array.isArray(value)) return value.filter((item) => String(item ?? "").trim()).join("; ");
+            if (typeof value === "boolean") return value ? "yes" : "no";
+            if (value && typeof value === "object") {{
+              return Object.entries(value)
+                .filter(([, item]) => item !== null && item !== "" && !(Array.isArray(item) && !item.length))
+                .map(([key, item]) => `${{key}}=${{item}}`)
+                .join(", ");
+            }}
+            return String(value ?? "").trim();
+          }};
+          const renderDetails = (details) => {{
+            if (!details || typeof details !== "object") return "";
+            const labels = {{
+              status: "status",
+              passed: "passed",
+              available: "review_available",
+              needs_rewrite: "needs_rewrite",
+              review_attempt: "review_attempt",
+              completed_rewrites: "completed_rewrites",
+              next_rewrite_attempt: "next_rewrite_attempt",
+              rewrite_attempt: "rewrite_attempt",
+              rewrite_limit: "rewrite_limit",
+              average_score: "average_score",
+              reason: "reason",
+              reasons: "reasons",
+            }};
+            const preferred = ["status", "passed", "available", "needs_rewrite", "review_attempt", "completed_rewrites", "next_rewrite_attempt", "rewrite_attempt", "rewrite_limit", "average_score", "reason", "reasons"];
+            const keys = [...preferred, ...Object.keys(details).filter((key) => !preferred.includes(key) && key !== "type").sort()];
+            const parts = [];
+            for (const key of keys) {{
+              if (!(key in details)) continue;
+              const value = details[key];
+              if (value === null || value === "" || (Array.isArray(value) && !value.length)) continue;
+              const formatted = formatDetailValue(value);
+              if (formatted) parts.push(`${{labels[key] || key}}: ${{formatted}}`);
+            }}
+            return parts.length ? `<div class="job-event-details">${{escapeHtml(parts.join(" | "))}}</div>` : "";
+          }};
           const renderEvents = (events) => {{
             const items = Array.isArray(events) ? events : [];
             if (!items.length) return '<li class="muted">暂无任务日志。</li>';
             return items.map((item) => {{
               const stage = item.stage ? ` <span class="pill">${{escapeHtml(item.stage)}}</span>` : "";
               const message = item.message || item.stage || "";
-              return `<li><span class="mono">${{escapeHtml(item.time || "")}}</span>${{stage}} ${{escapeHtml(message)}}</li>`;
+              return `<li><span class="mono">${{escapeHtml(item.time || "")}}</span>${{stage}} ${{escapeHtml(message)}}${{renderDetails(item.details)}}</li>`;
             }}).join("");
           }};
           const renderActions = (job) => {{

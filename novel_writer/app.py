@@ -57,10 +57,12 @@ from quality_manager import (
     generate_high_auto_plan,
     normalize_quality_config,
     quality_mode_allows_rewrite,
+    quality_mode_rewrite_limit,
     quality_mode_uses_craft_brief,
     quality_mode_uses_review,
     quality_review_available,
     quality_review_needs_rewrite,
+    quality_review_passed,
     review_chapter_draft,
     rewrite_chapter_draft,
     save_pre_rewrite_draft,
@@ -359,6 +361,134 @@ def _select_chapter_title(task_card: dict, response_text: str, chapter_number: i
     return planned_title or response_title
 
 
+def _short_quality_text(value: object, *, limit: int = 180) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _quality_issue_summary(issue: object) -> str:
+    if isinstance(issue, dict):
+        category = str(issue.get("category") or "").strip()
+        severity = str(issue.get("severity") or "").strip()
+        text = str(issue.get("issue") or issue.get("description") or issue.get("summary") or "").strip()
+        evidence = str(issue.get("evidence") or issue.get("example") or "").strip()
+        fix = str(issue.get("fix") or issue.get("guidance") or issue.get("recommendation") or "").strip()
+        prefix = " ".join(part for part in (severity, category) if part).strip()
+        details = text
+        if evidence:
+            details += f" evidence: {evidence}"
+        if fix:
+            details += f" fix: {fix}"
+        return _short_quality_text(f"{prefix}: {details}" if prefix else details)
+    return _short_quality_text(issue)
+
+
+def _quality_review_reason_items(review: dict, *, max_items: int = 4) -> list[str]:
+    if not isinstance(review, dict):
+        return []
+    reasons: list[str] = []
+    if bool(review.get("review_unavailable")):
+        fallback_reason = str(review.get("fallback_reason") or "").strip()
+        reasons.append(_short_quality_text(fallback_reason or "review unavailable"))
+    for issue in review.get("blocking_issues") or []:
+        summary = _quality_issue_summary(issue)
+        if summary:
+            reasons.append(summary)
+        if len(reasons) >= max_items:
+            return reasons[:max_items]
+    for issue in review.get("issues") or []:
+        summary = _quality_issue_summary(issue)
+        if summary:
+            reasons.append(summary)
+        if len(reasons) >= max_items:
+            return reasons[:max_items]
+    flatness = [str(item).strip() for item in (review.get("flatness_issues") or []) if str(item).strip()]
+    if flatness:
+        reasons.append("flatness below threshold: " + ", ".join(flatness[:4]))
+    scores = review.get("scores") if isinstance(review.get("scores"), dict) else {}
+    if scores:
+        score_items = []
+        for key, value in scores.items():
+            try:
+                score_items.append((float(value), str(key)))
+            except (TypeError, ValueError):
+                continue
+        score_items.sort()
+        if score_items:
+            reasons.append(
+                "lowest scores: "
+                + ", ".join(f"{key}={score:g}" for score, key in score_items[:3])
+            )
+    score_reasons = review.get("score_reasons") if isinstance(review.get("score_reasons"), dict) else {}
+    for key, value in score_reasons.items():
+        text = _short_quality_text(value)
+        if text:
+            reasons.append(f"{key}: {text}")
+        if len(reasons) >= max_items:
+            return reasons[:max_items]
+    revision_guidance = _short_quality_text(review.get("revision_guidance"))
+    if revision_guidance:
+        reasons.append(f"guidance: {revision_guidance}")
+    seen = set()
+    deduped = []
+    for reason in reasons:
+        if not reason or reason in seen:
+            continue
+        seen.add(reason)
+        deduped.append(reason)
+        if len(deduped) >= max_items:
+            break
+    return deduped
+
+
+def _emit_quality_review_status(
+    progress_callback,
+    review: dict,
+    *,
+    review_attempt: int,
+    rewrite_limit: int,
+    completed_rewrites: int,
+    needs_rewrite: bool,
+    next_rewrite_attempt: int = 0,
+) -> None:
+    available = quality_review_available(review)
+    passed = quality_review_passed(review)
+    if not available:
+        status = "unavailable"
+    elif passed and needs_rewrite:
+        status = "passed; rewrite requested"
+    elif passed:
+        status = "passed"
+    else:
+        status = "failed"
+    reasons = _quality_review_reason_items(review)
+    message = f"Quality review {review_attempt}: {status}"
+    if reasons:
+        message += f". Reason: {reasons[0]}"
+    if next_rewrite_attempt:
+        message += f". Next rewrite {next_rewrite_attempt}/{rewrite_limit}"
+    emit_progress(
+        progress_callback,
+        "quality_review_status",
+        message,
+        event_details={
+            "type": "quality_review",
+            "review_attempt": review_attempt,
+            "status": status,
+            "passed": passed,
+            "available": available,
+            "needs_rewrite": bool(needs_rewrite),
+            "rewrite_limit": rewrite_limit,
+            "completed_rewrites": completed_rewrites,
+            "next_rewrite_attempt": next_rewrite_attempt,
+            "average_score": review.get("average_score"),
+            "reasons": reasons,
+        },
+    )
+
+
 def run_next_chapter(
     project_path: str,
     config: dict,
@@ -564,25 +694,85 @@ def run_next_chapter(
     chapter_title = _select_chapter_title(prompt_task_card, response_text, int(target_chapter_number))
     chapter_text = normalize_chapter_text(response_text)
     if quality_mode_uses_review(writing_quality_mode):
+        rewrite_allowed = quality_mode_allows_rewrite(writing_quality_mode, review_mode)
+        rewrite_limit = quality_mode_rewrite_limit(writing_quality_mode) if rewrite_allowed else 0
+        review_attempt = 1
+        completed_rewrites = 0
         review = review_chapter_draft(
             project_path,
             prompt_context,
             chapter_text,
             config,
-            attempt=1,
+            attempt=review_attempt,
             strict=writing_quality_mode == WRITING_QUALITY_HIGH,
             log_context=log_context_payload,
             progress_callback=progress_callback,
         )
-        if (
-            quality_mode_allows_rewrite(writing_quality_mode, review_mode)
-            and quality_review_needs_rewrite(review, writing_quality_mode)
-            and quality_review_available(review)
-        ):
+        while True:
+            review_needs_rewrite = (
+                quality_review_available(review)
+                and quality_review_needs_rewrite(review, writing_quality_mode)
+            )
+            can_rewrite = bool(rewrite_allowed and review_needs_rewrite and completed_rewrites < rewrite_limit)
+            next_rewrite_attempt = completed_rewrites + 1 if can_rewrite else 0
+            _emit_quality_review_status(
+                progress_callback,
+                review,
+                review_attempt=review_attempt,
+                rewrite_limit=rewrite_limit,
+                completed_rewrites=completed_rewrites,
+                needs_rewrite=review_needs_rewrite,
+                next_rewrite_attempt=next_rewrite_attempt,
+            )
+            if not can_rewrite:
+                if rewrite_allowed and review_needs_rewrite and completed_rewrites >= rewrite_limit:
+                    message = (
+                        "Quality rewrite limit reached: "
+                        f"{completed_rewrites}/{rewrite_limit}; keeping latest draft."
+                    )
+                    log_warning(message)
+                    emit_progress(
+                        progress_callback,
+                        "rewrite_limit_reached",
+                        message,
+                        event_details={
+                            "type": "rewrite_limit_reached",
+                            "rewrite_limit": rewrite_limit,
+                            "completed_rewrites": completed_rewrites,
+                            "review_attempt": review_attempt,
+                            "reasons": _quality_review_reason_items(review),
+                        },
+                    )
+                break
+
+            rewrite_attempt = completed_rewrites + 1
             pre_rewrite_path = None
             try:
-                pre_rewrite_path = save_pre_rewrite_draft(project_path, int(target_chapter_number), 1, chapter_text)
+                emit_progress(
+                    progress_callback,
+                    "rewrite_prepare",
+                    f"Preparing rewrite {rewrite_attempt}/{rewrite_limit}",
+                    event_details={
+                        "type": "rewrite_prepare",
+                        "rewrite_attempt": rewrite_attempt,
+                        "rewrite_limit": rewrite_limit,
+                        "review_attempt": review_attempt,
+                        "reasons": _quality_review_reason_items(review),
+                    },
+                )
+                pre_rewrite_path = save_pre_rewrite_draft(project_path, int(target_chapter_number), rewrite_attempt, chapter_text)
                 log_info(f"rewrite: saved pre-rewrite draft to {pre_rewrite_path}")
+                emit_progress(
+                    progress_callback,
+                    "rewrite",
+                    f"Running rewrite {rewrite_attempt}/{rewrite_limit}",
+                    event_details={
+                        "type": "rewrite",
+                        "rewrite_attempt": rewrite_attempt,
+                        "rewrite_limit": rewrite_limit,
+                        "source_review_attempt": review_attempt,
+                    },
+                )
                 rewritten_text = rewrite_chapter_draft(
                     project_path,
                     prompt_context,
@@ -595,24 +785,61 @@ def run_next_chapter(
             except Exception as exc:  # pragma: no cover - keep original draft if rewrite fails
                 if pre_rewrite_path is not None:
                     pre_rewrite_path.unlink(missing_ok=True)
-                log_warning(f"rewrite: failed; keeping original draft. reason={exc}")
+                message = f"Rewrite {rewrite_attempt}/{rewrite_limit} failed; keeping current draft. Reason: {exc}"
+                log_warning(f"rewrite: failed; keeping current draft. reason={exc}")
+                emit_progress(
+                    progress_callback,
+                    "rewrite_failed",
+                    message,
+                    event_details={
+                        "type": "rewrite_failed",
+                        "rewrite_attempt": rewrite_attempt,
+                        "rewrite_limit": rewrite_limit,
+                        "reason": str(exc),
+                    },
+                )
+                break
             else:
                 if not chapter_title:
                     chapter_title = _select_chapter_title(prompt_task_card, rewritten_text, int(target_chapter_number))
                 chapter_text = normalize_chapter_text(rewritten_text)
+                completed_rewrites = rewrite_attempt
+                emit_progress(
+                    progress_callback,
+                    "rewrite_done",
+                    f"Rewrite {rewrite_attempt}/{rewrite_limit} completed; reviewing rewritten draft",
+                    event_details={
+                        "type": "rewrite_done",
+                        "rewrite_attempt": rewrite_attempt,
+                        "rewrite_limit": rewrite_limit,
+                    },
+                )
                 try:
-                    review_chapter_draft(
+                    review_attempt += 1
+                    review = review_chapter_draft(
                         project_path,
                         prompt_context,
                         chapter_text,
                         config,
-                        attempt=2,
+                        attempt=review_attempt,
                         strict=True,
                         log_context=log_context_payload,
                         progress_callback=progress_callback,
                     )
                 except Exception as exc:  # pragma: no cover - keep rewritten draft if post-review persistence fails
                     log_warning(f"post_rewrite_review: failed; keeping rewritten draft. reason={exc}")
+                    emit_progress(
+                        progress_callback,
+                        "quality_review_failed",
+                        f"Post-rewrite review {review_attempt} failed; keeping rewritten draft. Reason: {exc}",
+                        event_details={
+                            "type": "quality_review_failed",
+                            "review_attempt": review_attempt,
+                            "rewrite_attempt": rewrite_attempt,
+                            "reason": str(exc),
+                        },
+                    )
+                    break
     emit_progress(progress_callback, "chapter_save", "Saving chapter file")
     chapter_path = save_chapter(
         project_path,

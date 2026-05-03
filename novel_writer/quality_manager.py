@@ -33,6 +33,8 @@ CRAFT_BRIEF_DIR_NAME = "craft_briefs"
 QUALITY_REVIEW_DIR_NAME = "quality_reviews"
 QUALITY_DRAFT_DIR_NAME = "quality_drafts"
 REWRITE_REQUEST_ATTEMPTS = 2
+DEFAULT_QUALITY_REWRITE_LIMIT = 1
+HIGH_QUALITY_REWRITE_LIMIT = 5
 REWRITE_TEXT_KEYS = (
     "rewritten_text",
     "chapter_text",
@@ -802,6 +804,15 @@ def quality_mode_allows_rewrite(mode: object, review_mode: object) -> bool:
     )
 
 
+def quality_mode_rewrite_limit(mode: object) -> int:
+    normalized_mode = normalize_writing_quality_mode(mode)
+    if normalized_mode == WRITING_QUALITY_HIGH:
+        return HIGH_QUALITY_REWRITE_LIMIT
+    if normalized_mode == WRITING_QUALITY_BALANCED:
+        return DEFAULT_QUALITY_REWRITE_LIMIT
+    return 0
+
+
 def normalize_quality_config(config: dict) -> tuple[str, str]:
     return (
         normalize_writing_quality_mode(config.get("writing_quality_mode")),
@@ -822,6 +833,7 @@ __all__ = [
     "normalize_quality_config",
     "normalize_rewrite_response_text",
     "quality_mode_allows_rewrite",
+    "quality_mode_rewrite_limit",
     "quality_mode_uses_craft_brief",
     "quality_mode_uses_review",
     "quality_review_available",

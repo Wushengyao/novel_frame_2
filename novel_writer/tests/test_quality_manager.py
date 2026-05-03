@@ -14,6 +14,7 @@ from quality_manager import (
     normalize_craft_brief,
     normalize_quality_review,
     normalize_rewrite_response_text,
+    quality_mode_rewrite_limit,
     quality_review_needs_rewrite,
     quality_review_passed,
     rewrite_chapter_draft,
@@ -138,6 +139,11 @@ class QualityManagerTests(unittest.TestCase):
         self.assertFalse(review["needs_rewrite"])
         self.assertFalse(quality_review_needs_rewrite(review, "balanced"))
         self.assertTrue(quality_review_needs_rewrite(review, "high"))
+
+    def test_high_quality_mode_allows_five_rewrite_iterations(self) -> None:
+        self.assertEqual(quality_mode_rewrite_limit("balanced"), 1)
+        self.assertEqual(quality_mode_rewrite_limit("high"), 5)
+        self.assertEqual(quality_mode_rewrite_limit("light"), 0)
 
     def test_unavailable_review_never_passes(self) -> None:
         review = normalize_quality_review(None, fallback_passed=False, review_unavailable=True)

@@ -514,6 +514,61 @@ class GuidedFlowTests(unittest.TestCase):
             self.assertTrue(second_review["passed"])
             self.assertEqual(pre_rewrite.read_text(encoding="utf-8").strip(), "原始正文")
 
+    def test_high_quality_mode_can_rewrite_up_to_five_times(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="quality_high_five")
+            failing_review = self._review_payload(passed=False, score=4)
+            passing_review = self._review_payload(passed=True, score=8)
+            quality_responses = [
+                (json.dumps(self._craft_brief_payload(), ensure_ascii=False), {"usage": {}}),
+                (json.dumps(failing_review, ensure_ascii=False), {"usage": {}}),
+            ]
+            for rewrite_index in range(1, 6):
+                quality_responses.append((f"rewrite {rewrite_index} body", {"usage": {}}))
+                review_payload = passing_review if rewrite_index == 5 else failing_review
+                quality_responses.append((json.dumps(review_payload, ensure_ascii=False), {"usage": {}}))
+
+            progress_events: list[dict] = []
+
+            with patch(
+                "quality_manager.generate_text_with_metadata",
+                side_effect=quality_responses,
+            ) as mocked_quality_generate, patch(
+                "app.generate_text_with_metadata",
+                return_value=("original body", {"usage": {}}),
+            ), patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ):
+                chapter_path = run_next_chapter(
+                    str(project_path),
+                    runtime_config("chapter", writing_quality_mode="high", review_mode="auto"),
+                    progress_callback=progress_events.append,
+                )
+
+            self.assertEqual(self._chapter_body(chapter_path), "rewrite 5 body")
+            phases = [call.kwargs["log_context"]["phase"] for call in mocked_quality_generate.call_args_list]
+            self.assertEqual(phases.count("rewrite"), 5)
+            self.assertEqual(phases.count("quality_review"), 6)
+            self.assertFalse(read_json(project_path / "quality_reviews" / "chapter_0001_attempt_5.json")["passed"])
+            self.assertTrue(read_json(project_path / "quality_reviews" / "chapter_0001_attempt_6.json")["passed"])
+            self.assertEqual(
+                (project_path / "quality_drafts" / "chapter_0001_before_rewrite_1.md").read_text(encoding="utf-8").strip(),
+                "original body",
+            )
+            self.assertEqual(
+                (project_path / "quality_drafts" / "chapter_0001_before_rewrite_5.md").read_text(encoding="utf-8").strip(),
+                "rewrite 4 body",
+            )
+            review_status_events = [
+                event for event in progress_events if event.get("stage") == "quality_review_status"
+            ]
+            self.assertEqual(len(review_status_events), 6)
+            self.assertEqual(review_status_events[0]["event_details"]["passed"], False)
+            self.assertEqual(review_status_events[0]["event_details"]["next_rewrite_attempt"], 1)
+            self.assertEqual(review_status_events[-1]["event_details"]["passed"], True)
+            self.assertEqual(review_status_events[-1]["event_details"]["completed_rewrites"], 5)
+
     def test_high_quality_later_chapter_refines_selected_progression_before_craft_brief(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp), project_id="quality_high_selected", planning_mode="none")
