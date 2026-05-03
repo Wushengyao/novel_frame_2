@@ -454,7 +454,36 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("temperature", request_body)
         self.assertEqual(metadata["usage"]["reasoning_tokens"], 2)
 
-    def test_deepseek_v4_explicit_non_thinking_clamps_high_creative_temperature(self) -> None:
+    def test_deepseek_v4_non_thinking_writer_uses_creative_temperature_default(self) -> None:
+        config = {
+            "model_provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "secret-key",
+            "temperature": 0.9,
+            "max_tokens": 4000,
+            "timeout": 120,
+            "request_options": {"thinking": {"type": "disabled"}},
+        }
+        response_payload = {
+            "choices": [{"message": {"content": "chapter text"}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        }
+
+        with patch(
+            "llm_client._request_json",
+            return_value=(response_payload, 1),
+        ) as mocked_request:
+            generate_text_with_metadata(
+                "write a chapter",
+                config,
+                log_context={"phase": "writer"},
+            )
+
+        request_body = mocked_request.call_args.args[2]
+        self.assertEqual(request_body["thinking"], {"type": "disabled"})
+        self.assertEqual(request_body["temperature"], 1.5)
+
+    def test_deepseek_v4_non_thinking_respects_valid_explicit_temperature(self) -> None:
         config = {
             "model_provider": "deepseek",
             "model": "deepseek-v4-flash",
@@ -481,7 +510,7 @@ class LLMClientTests(unittest.TestCase):
 
         request_body = mocked_request.call_args.args[2]
         self.assertEqual(request_body["thinking"], {"type": "disabled"})
-        self.assertEqual(request_body["temperature"], 0.8)
+        self.assertEqual(request_body["temperature"], 1.6)
 
     def test_deepseek_v4_pro_writer_uses_thinking_even_with_high_temperature_override(self) -> None:
         config = {
@@ -549,7 +578,7 @@ class LLMClientTests(unittest.TestCase):
             {"thinkingLevel": "minimal"},
         )
 
-    def test_gemini_31_pro_alias_uses_preview_model_low_thinking_and_pro_temperature(self) -> None:
+    def test_gemini_31_pro_alias_uses_preview_model_low_thinking_and_default_temperature(self) -> None:
         config = {
             "model_provider": "gemini",
             "model": "gemini-3.1-pro",
@@ -578,11 +607,42 @@ class LLMClientTests(unittest.TestCase):
         request_body = mocked_request.call_args.args[2]
         self.assertIn("/models/gemini-3.1-pro-preview:generateContent", endpoint)
         self.assertEqual(metadata["model"], "gemini-3.1-pro-preview")
-        self.assertEqual(request_body["generationConfig"]["temperature"], 0.8)
+        self.assertEqual(request_body["generationConfig"]["temperature"], 1.0)
         self.assertEqual(
             request_body["generationConfig"]["thinkingConfig"],
             {"thinkingLevel": "low"},
         )
+
+    def test_gemini_31_pro_quality_review_keeps_default_temperature(self) -> None:
+        config = {
+            "model_provider": "gemini",
+            "model": "gemini-3.1-pro",
+            "api_key": "secret-key",
+            "api_base": "https://generativelanguage.googleapis.com/v1beta",
+            "temperature": 0.8,
+            "max_tokens": 4000,
+            "timeout": 120,
+        }
+        response_payload = {
+            "candidates": [{"content": {"parts": [{"text": "{\"passed\": true}"}]}}],
+            "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 4, "totalTokenCount": 7},
+        }
+
+        with patch(
+            "llm_client._request_json",
+            return_value=(response_payload, 1),
+        ) as mocked_request:
+            generate_text_with_metadata(
+                "review chapter",
+                config,
+                log_context={"phase": "quality_review"},
+                response_format="json",
+            )
+
+        generation_config = mocked_request.call_args.args[2]["generationConfig"]
+        self.assertEqual(generation_config["temperature"], 1.0)
+        self.assertEqual(generation_config["responseMimeType"], "application/json")
+        self.assertEqual(generation_config["thinkingConfig"], {"thinkingLevel": "high"})
 
     def test_gemini_25_pro_json_task_uses_dynamic_thinking_and_low_temperature(self) -> None:
         config = {

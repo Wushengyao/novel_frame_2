@@ -89,26 +89,19 @@ LEGACY_DEFAULT_TEMPERATURES = {0.8, 0.9, 1.0}
 GEMINI_MODEL_ALIASES = {
     "gemini-3.1-pro": "gemini-3.1-pro-preview",
 }
-GEMINI_31_PRO_CREATIVE_TEMPERATURES = {
-    "writer": 0.8,
-    "rewrite": 0.7,
-    "polish": 0.65,
-    "illustration_prompt": 0.6,
-}
+GEMINI_3_DEFAULT_TEMPERATURE = 1.0
 DEEPSEEK_V4_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
-DEEPSEEK_NON_THINKING_TEMPERATURES_BY_MODEL = {
-    "deepseek-v4-flash": {
-        "writer": 0.8,
-        "rewrite": 0.7,
-        "polish": 0.65,
-        "illustration_prompt": 0.6,
-    },
-    "deepseek-v4-pro": {
-        "writer": 0.8,
-        "rewrite": 0.75,
-        "polish": 0.65,
-        "illustration_prompt": 0.6,
-    },
+DEEPSEEK_REASONING_MODELS = {"deepseek-reasoner"}
+DEEPSEEK_NON_THINKING_TEMPERATURES = {
+    "init": 1.0,
+    "outline": 1.0,
+    "craft_brief": 1.0,
+    "quality_review": 1.0,
+    "summary": 1.0,
+    "writer": 1.5,
+    "rewrite": 1.5,
+    "polish": 1.5,
+    "illustration_prompt": 1.5,
 }
 DEEPSEEK_MAX_REASONING_PHASES = {"quality_review"}
 DEEPSEEK_THINKING_MIN_TIMEOUT_SECONDS = 300
@@ -633,13 +626,12 @@ def _apply_gemini_temperature_defaults(
 
     normalized_phase = str(phase or "").strip().lower()
     next_temperature: float | None = None
-    if _phase_uses_structured_defaults(normalized_phase, response_format):
+    if _gemini_model_family(model) == "gemini-3":
+        next_temperature = GEMINI_3_DEFAULT_TEMPERATURE
+    elif _phase_uses_structured_defaults(normalized_phase, response_format):
         next_temperature = PROVIDER_STRUCTURED_TEMPERATURES["gemini"]
     elif _phase_uses_creative_defaults(normalized_phase):
-        if _canonical_gemini_model_id(model) == "gemini-3.1-pro-preview":
-            next_temperature = GEMINI_31_PRO_CREATIVE_TEMPERATURES.get(normalized_phase)
-        else:
-            next_temperature = PROVIDER_CREATIVE_TEMPERATURES["gemini"].get(normalized_phase)
+        next_temperature = PROVIDER_CREATIVE_TEMPERATURES["gemini"].get(normalized_phase)
 
     if next_temperature is None:
         return config
@@ -854,16 +846,26 @@ def _apply_llama_cpp_defaults(
     return optimized
 
 
-def _apply_deepseek_v4_defaults(
+def _deepseek_non_thinking_temperature(phase: str, response_format: str) -> float | None:
+    normalized_phase = str(phase or "").strip().lower()
+    if normalized_phase in DEEPSEEK_NON_THINKING_TEMPERATURES:
+        return DEEPSEEK_NON_THINKING_TEMPERATURES[normalized_phase]
+    if _phase_uses_structured_defaults(normalized_phase, response_format):
+        return DEEPSEEK_NON_THINKING_TEMPERATURES["quality_review"]
+    if _phase_uses_creative_defaults(normalized_phase):
+        return DEEPSEEK_NON_THINKING_TEMPERATURES["writer"]
+    return None
+
+
+def _apply_deepseek_defaults(
     config: dict[str, Any],
     *,
     phase: str,
     response_format: str,
 ) -> dict[str, Any]:
     model = _normalize_model_id(config.get("model") or config.get("model_name"))
-    if model not in DEEPSEEK_V4_MODELS:
-        return config
-
+    v4_model = model in DEEPSEEK_V4_MODELS
+    reasoning_model = model in DEEPSEEK_REASONING_MODELS
     optimized = dict(config)
     request_options = (
         dict(config.get("request_options") or {})
@@ -878,41 +880,42 @@ def _apply_deepseek_v4_defaults(
         explicit_thinking = _coerce_thinking(config.get("thinking"))
 
     if explicit_thinking is None:
-        thinking = {"type": "enabled"}
+        thinking = {"type": "enabled"} if v4_model else None
     else:
         thinking = explicit_thinking
-    request_options["thinking"] = thinking
+    if thinking is not None:
+        request_options["thinking"] = thinking
 
-    if thinking["type"] == "enabled":
+    if reasoning_model or (thinking is not None and thinking["type"] == "enabled"):
         json_task = _is_json_response_format(response_format)
         if json_task:
             request_options.setdefault("response_format", {"type": "json_object"})
-        if not _is_nonempty(request_options.get("reasoning_effort")) and not _is_nonempty(
-            config.get("reasoning_effort")
-        ):
-            request_options["reasoning_effort"] = (
-                "max" if normalized_phase in DEEPSEEK_MAX_REASONING_PHASES else "high"
-            )
-        elif _is_nonempty(config.get("reasoning_effort")) and not _is_nonempty(
-            request_options.get("reasoning_effort")
-        ):
-            request_options["reasoning_effort"] = str(config.get("reasoning_effort")).strip()
+        if v4_model:
+            if not _is_nonempty(request_options.get("reasoning_effort")) and not _is_nonempty(
+                config.get("reasoning_effort")
+            ):
+                request_options["reasoning_effort"] = (
+                    "max" if normalized_phase in DEEPSEEK_MAX_REASONING_PHASES else "high"
+                )
+            elif _is_nonempty(config.get("reasoning_effort")) and not _is_nonempty(
+                request_options.get("reasoning_effort")
+            ):
+                request_options["reasoning_effort"] = str(config.get("reasoning_effort")).strip()
         omit_fields.update(DEEPSEEK_THINKING_INACTIVE_FIELDS)
         for field in DEEPSEEK_THINKING_INACTIVE_FIELDS:
             request_options.pop(field, None)
         optimized["timeout"] = max(_resolve_timeout(optimized, "deepseek"), DEEPSEEK_THINKING_MIN_TIMEOUT_SECONDS)
     else:
         request_options.pop("reasoning_effort", None)
-        model_temperatures = DEEPSEEK_NON_THINKING_TEMPERATURES_BY_MODEL.get(model, {})
-        default_temperature = model_temperatures.get(normalized_phase, 1.0)
+        default_temperature = _deepseek_non_thinking_temperature(normalized_phase, response_format)
         custom_temperature = _coerce_float(config.get("temperature"))
         if (
             custom_temperature is not None
             and not _is_legacy_default_temperature(config.get("temperature"))
-            and 0.0 <= custom_temperature <= 1.0
+            and 0.0 <= custom_temperature <= 2.0
         ):
             optimized["temperature"] = custom_temperature
-        else:
+        elif default_temperature is not None:
             optimized["temperature"] = default_temperature
 
     optimized["request_options"] = request_options
@@ -1145,7 +1148,7 @@ def generate_text_with_metadata(
         deepseek_config["api_base"] = (
             deepseek_config.get("api_base", "").strip() or "https://api.deepseek.com/v1"
         )
-        deepseek_config = _apply_deepseek_v4_defaults(
+        deepseek_config = _apply_deepseek_defaults(
             deepseek_config,
             phase=phase,
             response_format=response_format,
