@@ -788,6 +788,37 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(page.status, 200)
         self.assertIn("unit-test-lock", page.body)
         self.assertIn(".project_write.lock", page.body)
+        self.assertIn('/project/web/locks/unlock', page.body)
+        self.assertIn('name="lock_kind" value="write"', page.body)
+        self.assertIn("强制解锁", page.body)
+
+    def test_project_lock_can_be_force_unlocked(self) -> None:
+        lock_path = self.project_path / ".project_audio.lock"
+        save_json(
+            str(lock_path),
+            {
+                "pid": os.getpid(),
+                "owner": "unit-test-audio-lock",
+                "created_at": "2026-05-03T00:00:00+00:00",
+                "project_path": str(self.project_path),
+                "token": "test-token",
+            },
+        )
+
+        page = self._get("/project/web")
+        self.assertEqual(page.status, 200)
+        self.assertIn("unit-test-audio-lock", page.body)
+        self.assertIn('name="lock_kind" value="audio"', page.body)
+
+        response = self._post("/project/web/locks/unlock", "lock_kind=audio")
+
+        self.assertEqual(response.status, 303)
+        self.assertIn("/project/web?notice=", response.getheader("Location") or "")
+        self.assertFalse(lock_path.exists())
+
+        page = self._get("/project/web")
+        self.assertEqual(page.status, 200)
+        self.assertNotIn("unit-test-audio-lock", page.body)
 
     def test_failed_job_remains_visible_until_user_opens_it(self) -> None:
         job = webui.JOB_REGISTRY.create_job(

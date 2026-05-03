@@ -78,6 +78,7 @@ from project_manager import (
     delete_project,
     describe_project_locks,
     export_project_archive,
+    force_release_project_lock,
     import_project_archive,
     init_project,
     load_json,
@@ -3754,7 +3755,13 @@ def _render_lock_status_inline(lock_status: object) -> str:
     return f'<div class="job-event-details">锁状态：{escape(" | ".join(parts))}</div>'
 
 
-def _render_lock_status_panel(lock_status: object, *, empty_text: str = "当前没有项目锁。") -> str:
+def _render_lock_status_panel(
+    lock_status: object,
+    *,
+    empty_text: str = "当前没有项目锁。",
+    project_id: str = "",
+    allow_unlock: bool = False,
+) -> str:
     if not isinstance(lock_status, list) or not lock_status:
         return f'<p class="muted">{escape(empty_text)}</p>'
     rows = []
@@ -3778,6 +3785,15 @@ def _render_lock_status_panel(lock_status: object, *, empty_text: str = "当前�
         if item.get("error"):
             detail_parts.append(f"error: {item.get('error')}")
         detail = " | ".join(part for part in detail_parts if part)
+        unlock_html = ""
+        kind = str(item.get("kind") or "").strip()
+        if allow_unlock and project_id and exists and kind in {"write", "audio"}:
+            unlock_html = f"""
+              <form class="inline-form" method="post" action="/project/{escape(project_id)}/locks/unlock" onsubmit="return confirm('强制解锁会直接删除该锁文件。请先确认没有对应后台任务正在写入项目，确定继续吗？')">
+                <input type="hidden" name="lock_kind" value="{escape(kind)}">
+                <button class="danger-button" type="submit">强制解锁</button>
+              </form>
+            """
         rows.append(
             f"""
             <div class="job-card">
@@ -3786,6 +3802,7 @@ def _render_lock_status_panel(lock_status: object, *, empty_text: str = "当前�
                 <span class="status-pill {escape(_lock_status_class(status))}">{escape(_lock_status_label(status))}</span>
               </div>
               <div class="muted">{escape(detail)}</div>
+              {unlock_html}
             </div>
             """
         )
@@ -5219,6 +5236,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "delete":
             self._handle_delete_project(parts[1], form)
             return
+        if len(parts) == 4 and parts[0] == "project" and parts[2] == "locks" and parts[3] == "unlock":
+            self._handle_project_lock_unlock(parts[1], form)
+            return
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "rollback":
             self._handle_rollback(parts[1], form)
             return
@@ -5277,6 +5297,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", location)
         self._send_standard_headers()
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def _write_html(self, html: str, *, status: HTTPStatus = HTTPStatus.OK, extra_headers: dict[str, str] | None = None) -> None:
@@ -5870,7 +5891,11 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             lock_panel_html = f"""
           <section class="panel">
             <h3>锁状态</h3>
-            {_render_lock_status_panel(job.get("lock_status"))}
+            {_render_lock_status_panel(
+                job.get("lock_status"),
+                project_id=str(job.get("project_id") or ""),
+                allow_unlock=True,
+            )}
           </section>
             """
 
@@ -7107,6 +7132,35 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 + urllib.parse.quote(str(exc))
             )
 
+    def _handle_project_lock_unlock(self, project_id: str, form: dict[str, str]) -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+        lock_kind = (form.get("lock_kind") or "").strip()
+        try:
+            result = force_release_project_lock(project_path, lock_kind)
+            label = str(result.get("label") or lock_kind or "项目锁")
+            lock_path = str(result.get("lock_path") or "")
+            notice = (
+                f"已强制解锁{label}：{lock_path}"
+                if result.get("released")
+                else f"{label}当前没有需要解锁的锁文件。"
+            )
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?notice="
+                + urllib.parse.quote(notice)
+            )
+        except Exception as exc:
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote(str(exc))
+            )
+
     def _handle_job_page(self, job_id: str, notice: str = "", error: str = "") -> None:
         job = JOB_REGISTRY.mark_viewed(job_id)
         if job is None:
@@ -7120,7 +7174,11 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             lock_panel_html = f"""
           <section class="panel">
             <h3>锁状态</h3>
-            {_render_lock_status_panel(job.get("lock_status"))}
+            {_render_lock_status_panel(
+                job.get("lock_status"),
+                project_id=str(job.get("project_id") or ""),
+                allow_unlock=True,
+            )}
           </section>
             """
 
@@ -7337,7 +7395,11 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         active_jobs_html = _render_job_cards(_jobs_with_lock_status(active_jobs), "当前没有运行中的后台任务。")
         external_service_panel_html = _render_external_service_panel()
         lock_status = _project_lock_statuses(project_path)
-        lock_status_html = _render_lock_status_panel(lock_status)
+        lock_status_html = _render_lock_status_panel(
+            lock_status,
+            project_id=project_id,
+            allow_unlock=True,
+        )
         reader_setup_panel_html = _render_reader_setup_panel(
             reader_setup_text,
             intro="这份内容面向读者，提供非剧透的开卷入口；第一章仍会在正文里自然交代必要信息。",

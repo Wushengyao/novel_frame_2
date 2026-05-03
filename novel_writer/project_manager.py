@@ -2295,6 +2295,70 @@ def describe_project_locks(project_path: str | Path) -> list[dict]:
     return descriptions
 
 
+def force_release_project_lock(project_path: str | Path, lock_kind: str) -> dict:
+    base = Path(project_path).resolve()
+    lock_definitions = {
+        "write": (PROJECT_WRITE_LOCK_FILENAME, "写作锁"),
+        "audio": (PROJECT_AUDIO_LOCK_FILENAME, "有声锁"),
+    }
+    normalized_kind = str(lock_kind or "").strip().lower()
+    if normalized_kind not in lock_definitions:
+        raise ValueError(f"未知项目锁类型：{lock_kind}")
+
+    lock_filename, label = lock_definitions[normalized_kind]
+    lock_path = base / lock_filename
+    status_before = next(
+        (
+            item
+            for item in describe_project_locks(base)
+            if item.get("kind") == normalized_kind
+        ),
+        {
+            "kind": normalized_kind,
+            "label": label,
+            "lock_filename": lock_filename,
+            "lock_path": str(lock_path),
+            "exists": lock_path.exists(),
+            "status": "idle",
+        },
+    )
+    if not lock_path.exists():
+        return {
+            "kind": normalized_kind,
+            "label": label,
+            "lock_filename": lock_filename,
+            "lock_path": str(lock_path),
+            "released": False,
+            "existed": False,
+            "status_before": status_before,
+        }
+
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        return {
+            "kind": normalized_kind,
+            "label": label,
+            "lock_filename": lock_filename,
+            "lock_path": str(lock_path),
+            "released": False,
+            "existed": False,
+            "status_before": status_before,
+        }
+    except OSError as exc:
+        raise RuntimeError(f"无法强制解锁 {label}：{exc}") from exc
+
+    return {
+        "kind": normalized_kind,
+        "label": label,
+        "lock_filename": lock_filename,
+        "lock_path": str(lock_path),
+        "released": True,
+        "existed": True,
+        "status_before": status_before,
+    }
+
+
 def ensure_no_project_audio_lock(project_path: str | Path, action: str) -> None:
     if project_audio_lock_is_active(project_path):
         raise ProjectWriteLockError(f"有声章节正在生成中，可以继续续写，但暂时不能{action}。请等音频任务完成后再试。")

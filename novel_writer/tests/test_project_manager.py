@@ -21,6 +21,7 @@ from project_manager import (
     ensure_reader_setup,
     extract_chapter_title,
     export_project_archive,
+    force_release_project_lock,
     format_chapter_heading,
     import_project_archive,
     normalize_chapter_text,
@@ -270,6 +271,34 @@ class ProjectManagerTests(unittest.TestCase):
                     self.assertTrue(write_lock.lock_path.exists())
 
             self.assertFalse((project_path / ".project_audio.lock").exists())
+
+    def test_force_release_project_lock_removes_only_requested_known_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="force_lock")
+            write_lock = project_path / ".project_write.lock"
+            audio_lock = project_path / ".project_audio.lock"
+            for lock_path, owner in ((write_lock, "writer"), (audio_lock, "audio")):
+                save_json(
+                    str(lock_path),
+                    {
+                        "pid": 999999999,
+                        "owner": owner,
+                        "created_at": "2026-05-03T00:00:00+00:00",
+                        "project_path": str(project_path),
+                        "token": owner,
+                    },
+                )
+
+            result = force_release_project_lock(project_path, "audio")
+
+            self.assertTrue(result["released"])
+            self.assertEqual(result["kind"], "audio")
+            self.assertTrue(write_lock.exists())
+            self.assertFalse(audio_lock.exists())
+
+            with self.assertRaises(ValueError):
+                force_release_project_lock(project_path, "../.project_write.lock")
+            self.assertTrue(write_lock.exists())
 
     def test_rollback_rejects_active_audio_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
