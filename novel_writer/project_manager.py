@@ -317,7 +317,11 @@ def _process_exists(pid: int) -> bool:
 
 
 def _read_process_cmdline(pid: int) -> str | None:
+    if os.name == "nt":
+        return None
     proc_cmdline = Path("/proc") / str(pid) / "cmdline"
+    if not proc_cmdline.exists():
+        return None
     try:
         raw = proc_cmdline.read_bytes()
     except OSError:
@@ -2234,6 +2238,61 @@ def _project_lock_is_active(project_path: Path) -> bool:
 
 def project_audio_lock_is_active(project_path: str | Path) -> bool:
     return _project_file_lock_is_active(Path(project_path), PROJECT_AUDIO_LOCK_FILENAME)
+
+
+def describe_project_locks(project_path: str | Path) -> list[dict]:
+    base = Path(project_path).resolve()
+    descriptions = []
+    for lock_filename, kind, label in (
+        (PROJECT_WRITE_LOCK_FILENAME, "write", "写作锁"),
+        (PROJECT_AUDIO_LOCK_FILENAME, "audio", "有声锁"),
+    ):
+        lock_path = base / lock_filename
+        description = {
+            "kind": kind,
+            "label": label,
+            "lock_filename": lock_filename,
+            "lock_path": str(lock_path),
+            "exists": lock_path.exists(),
+            "active": False,
+            "stale": False,
+            "readable": True,
+            "owner": "",
+            "pid": "",
+            "created_at": "",
+            "project_path": str(base),
+            "status": "idle",
+        }
+        if not lock_path.exists():
+            descriptions.append(description)
+            continue
+        try:
+            lock_data = load_json(str(lock_path))
+        except Exception as exc:
+            description.update(
+                {
+                    "active": True,
+                    "readable": False,
+                    "status": "unreadable",
+                    "error": str(exc),
+                }
+            )
+            descriptions.append(description)
+            continue
+        active = _lock_owner_process_still_active(lock_data)
+        description.update(
+            {
+                "active": active,
+                "stale": not active,
+                "owner": str(lock_data.get("owner", "") or ""),
+                "pid": str(lock_data.get("pid", "") or ""),
+                "created_at": str(lock_data.get("created_at", "") or ""),
+                "token": str(lock_data.get("token", "") or ""),
+                "status": "active" if active else "stale",
+            }
+        )
+        descriptions.append(description)
+    return descriptions
 
 
 def ensure_no_project_audio_lock(project_path: str | Path, action: str) -> None:

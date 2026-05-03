@@ -76,6 +76,7 @@ from project_manager import (
     format_chapter_heading,
     get_latest_state_snapshot_chapter,
     delete_project,
+    describe_project_locks,
     export_project_archive,
     import_project_archive,
     init_project,
@@ -203,6 +204,7 @@ class BackgroundJobRegistry:
                 "blocks_project": blocks_project,
                 "created_at": utc_now(),
                 "updated_at": utc_now(),
+                "viewed_at": "",
                 "current": 0,
                 "total": 0,
                 "result_url": "",
@@ -358,12 +360,38 @@ class BackgroundJobRegistry:
             job = self._jobs.get(job_id)
             return None if job is None else self._copy_job(job)
 
+    def mark_viewed(self, job_id: str) -> dict | None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            if job.get("status") == "failed" and not job.get("viewed_at"):
+                job["viewed_at"] = utc_now()
+                job["updated_at"] = utc_now()
+            return self._copy_job(job)
+
+    def list_unviewed_failed_jobs(
+        self,
+        *,
+        project_id: str = "",
+        project_path: str = "",
+        limit: int = 20,
+    ) -> list[dict]:
+        return self.list_jobs(
+            project_id=project_id,
+            project_path=project_path,
+            failed_unviewed_only=True,
+            limit=limit,
+        )
+
     def list_jobs(
         self,
         *,
         project_id: str = "",
         project_path: str = "",
         active_only: bool = False,
+        include_unviewed_failed: bool = False,
+        failed_unviewed_only: bool = False,
         blocking_only: bool = False,
         kinds: set[str] | None = None,
         limit: int = 8,
@@ -376,8 +404,12 @@ class BackgroundJobRegistry:
                     continue
                 if normalized_path and job.get("project_path") != normalized_path:
                     continue
-                if active_only and job.get("status") not in JOB_ACTIVE_STATUSES:
+                is_unviewed_failed = job.get("status") == "failed" and not job.get("viewed_at")
+                if failed_unviewed_only and not is_unviewed_failed:
                     continue
+                if active_only and job.get("status") not in JOB_ACTIVE_STATUSES:
+                    if not (include_unviewed_failed and is_unviewed_failed):
+                        continue
                 if blocking_only and not bool(job.get("blocks_project", True)):
                     continue
                 if kinds and job.get("kind") not in kinds:
@@ -3628,6 +3660,138 @@ def _render_job_error_box(job: dict) -> str:
     )
 
 
+def _job_is_unviewed_failure(job: dict) -> bool:
+    return job.get("status") == "failed" and not job.get("viewed_at")
+
+
+def _lock_status_label(status: str) -> str:
+    mapping = {
+        "active": "占用中",
+        "stale": "疑似遗留",
+        "unreadable": "无法读取",
+        "idle": "未占用",
+    }
+    return mapping.get(status, status or "未知")
+
+
+def _lock_status_class(status: str) -> str:
+    mapping = {
+        "active": "status-running",
+        "stale": "status-failed",
+        "unreadable": "status-failed",
+        "idle": "status-neutral",
+    }
+    return mapping.get(status, "status-neutral")
+
+
+def _project_lock_statuses(project_path: str | Path) -> list[dict]:
+    try:
+        return describe_project_locks(project_path)
+    except Exception as exc:
+        return [
+            {
+                "kind": "unknown",
+                "label": "项目锁",
+                "status": "unreadable",
+                "exists": True,
+                "active": True,
+                "readable": False,
+                "error": str(exc),
+                "lock_path": str(Path(project_path)),
+            }
+        ]
+
+
+def _job_with_lock_status(job: dict | None) -> dict | None:
+    if job is None:
+        return None
+    enriched = dict(job)
+    project_path = str(enriched.get("project_path") or "").strip()
+    if project_path:
+        enriched["lock_status"] = _project_lock_statuses(project_path)
+    return enriched
+
+
+def _jobs_with_lock_status(jobs: list[dict]) -> list[dict]:
+    enriched = []
+    for job in jobs:
+        item = _job_with_lock_status(job)
+        if item is not None:
+            enriched.append(item)
+    return enriched
+
+
+def _merge_job_lists(*job_lists: list[dict], limit: int | None = None) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for jobs in job_lists:
+        for job in jobs:
+            job_id = str(job.get("id") or "").strip()
+            if not job_id or job_id in merged:
+                continue
+            merged[job_id] = job
+    result = sorted(merged.values(), key=lambda item: item.get("created_at", ""), reverse=True)
+    return result if limit is None else result[:limit]
+
+
+def _render_lock_status_inline(lock_status: object) -> str:
+    if not isinstance(lock_status, list) or not lock_status:
+        return ""
+    active_locks = [
+        item
+        for item in lock_status
+        if isinstance(item, dict) and item.get("exists") and item.get("status") != "idle"
+    ]
+    if not active_locks:
+        return ""
+    parts = []
+    for item in active_locks:
+        label = str(item.get("label") or item.get("kind") or "lock")
+        status = str(item.get("status") or "")
+        owner = str(item.get("owner") or "").strip()
+        pid = str(item.get("pid") or "").strip()
+        detail = ", ".join(part for part in (f"owner={owner}" if owner else "", f"pid={pid}" if pid else "") if part)
+        parts.append(f"{label}: {_lock_status_label(status)}" + (f" ({detail})" if detail else ""))
+    return f'<div class="job-event-details">锁状态：{escape(" | ".join(parts))}</div>'
+
+
+def _render_lock_status_panel(lock_status: object, *, empty_text: str = "当前没有项目锁。") -> str:
+    if not isinstance(lock_status, list) or not lock_status:
+        return f'<p class="muted">{escape(empty_text)}</p>'
+    rows = []
+    for item in lock_status:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "idle")
+        exists = bool(item.get("exists"))
+        detail_parts = []
+        for key, label in (
+            ("owner", "owner"),
+            ("pid", "pid"),
+            ("created_at", "created_at"),
+            ("lock_path", "file"),
+        ):
+            value = str(item.get(key) or "").strip()
+            if value:
+                detail_parts.append(f"{label}: {value}")
+        if not exists:
+            detail_parts = [str(item.get("lock_path") or "")]
+        if item.get("error"):
+            detail_parts.append(f"error: {item.get('error')}")
+        detail = " | ".join(part for part in detail_parts if part)
+        rows.append(
+            f"""
+            <div class="job-card">
+              <div class="job-card-head">
+                <strong>{escape(str(item.get('label') or item.get('kind') or 'lock'))}</strong>
+                <span class="status-pill {escape(_lock_status_class(status))}">{escape(_lock_status_label(status))}</span>
+              </div>
+              <div class="muted">{escape(detail)}</div>
+            </div>
+            """
+        )
+    return "".join(rows) or f'<p class="muted">{escape(empty_text)}</p>'
+
+
 def _job_can_cancel(job: dict) -> bool:
     return job.get("status") in JOB_ACTIVE_STATUSES
 
@@ -3663,6 +3827,11 @@ def _render_job_cards(jobs: list[dict], empty_text: str) -> str:
     cards = []
     for job in jobs:
         action = f'<div class="button-row">{_render_job_actions(job)}</div>'
+        attention_html = (
+            '<span class="status-pill status-failed">未查看</span>'
+            if _job_is_unviewed_failure(job)
+            else ""
+        )
         progress = ""
         current = int(job.get("current") or 0)
         total = int(job.get("total") or 0)
@@ -3680,15 +3849,17 @@ def _render_job_cards(jobs: list[dict], empty_text: str) -> str:
             if error_summary
             else ""
         )
+        lock_html = _render_lock_status_inline(job.get("lock_status"))
         cards.append(
             f"""
             <div class="job-card">
               <div class="job-card-head">
                 <a href="/job/{escape(job['id'])}"><strong>{escape(job.get('title', job['id']))}</strong></a>
-                <span class="status-pill {escape(_job_status_class(job.get('status', '')))}">{escape(_job_status_label(job.get('status', '')))}</span>
+                <span><span class="status-pill {escape(_job_status_class(job.get('status', '')))}">{escape(_job_status_label(job.get('status', '')))}</span>{attention_html}</span>
               </div>
               <div class="muted">{escape(job.get('message', '') or '等待状态更新')}</div>
               {error_html}
+              {lock_html}
               {progress}
               <div class="muted">更新时间：{escape(job.get('updated_at', ''))}</div>
               {action}
@@ -5664,7 +5835,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if job is None:
             self._write_json({"error": "job not found"}, status=HTTPStatus.NOT_FOUND)
             return
-        self._write_json(job)
+        self._write_json(_job_with_lock_status(job) or job)
 
     def _handle_job_cancel(self, job_id: str) -> None:
         job = JOB_REGISTRY.request_cancel(job_id)
@@ -5691,8 +5862,17 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if job is None:
             self.send_error(HTTPStatus.NOT_FOUND, "任务不存在")
             return
+        job = _job_with_lock_status(job) or job
         auth_settings = self._current_auth_settings()
         authenticated = self._is_authenticated(auth_settings)
+        lock_panel_html = ""
+        if job.get("lock_status"):
+            lock_panel_html = f"""
+          <section class="panel">
+            <h3>锁状态</h3>
+            {_render_lock_status_panel(job.get("lock_status"))}
+          </section>
+            """
 
         action_html = _render_job_actions(job)
 
@@ -5723,6 +5903,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               {_render_job_events(job.get("events"))}
             </ol>
           </section>
+          {lock_panel_html}
         </div>
         <script>
         (() => {{
@@ -5884,6 +6065,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             project_id = str(item["project_id"])
             delete_disabled = _project_has_active_job(item["path"])
             delete_disabled_attr = " disabled" if delete_disabled else ""
+            project_lock_inline = _render_lock_status_inline(_project_lock_statuses(item["path"]))
             cards.append(
                 f"""
                 <div class="project-card">
@@ -5895,6 +6077,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                     <span class="pill">{escape(item['updated_at'] or '')}</span>
                   </div>
                   {_render_cost_meta(item.get("stats") or {})}
+                  {project_lock_inline}
                   <form method="post" action="/project/{escape(project_id)}/delete" onsubmit="return confirm('删除后将永久移除项目的全部数据，且无法恢复。确定继续吗？')">
                     <input type="hidden" name="confirm_delete" value="1">
                     <button class="ghost-button" type="submit"{delete_disabled_attr}>{'项目运行中，暂不可删除' if delete_disabled else '删除项目'}</button>
@@ -5903,8 +6086,12 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 """
             )
         project_html = "".join(cards) or "<p>当前还没有项目。可以新建小说，或导入已有项目包。</p>"
-        recent_jobs_html = _render_job_cards(
+        recent_jobs = _merge_job_lists(
+            JOB_REGISTRY.list_unviewed_failed_jobs(limit=20),
             JOB_REGISTRY.list_jobs(limit=6),
+        )
+        recent_jobs_html = _render_job_cards(
+            _jobs_with_lock_status(recent_jobs),
             "当前还没有后台任务。",
         )
         body = f"""
@@ -6921,12 +7108,21 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             )
 
     def _handle_job_page(self, job_id: str, notice: str = "", error: str = "") -> None:
-        job = JOB_REGISTRY.get(job_id)
+        job = JOB_REGISTRY.mark_viewed(job_id)
         if job is None:
             self.send_error(HTTPStatus.NOT_FOUND, "任务不存在")
             return
+        job = _job_with_lock_status(job) or job
         auth_settings = self._current_auth_settings()
         authenticated = self._is_authenticated(auth_settings)
+        lock_panel_html = ""
+        if job.get("lock_status"):
+            lock_panel_html = f"""
+          <section class="panel">
+            <h3>锁状态</h3>
+            {_render_lock_status_panel(job.get("lock_status"))}
+          </section>
+            """
 
         body = f"""
         <div class="status-shell">
@@ -6955,6 +7151,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               {_render_job_events(job.get("events"))}
             </ol>
           </section>
+          {lock_panel_html}
         </div>
         <script>
         (() => {{
@@ -7127,15 +7324,34 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         stats = project_stats.get("total", {})
         illustration_records = list_illustration_records(str(project_path))
         audiobook_records = list_audiobook_records(str(project_path))
-        active_jobs = JOB_REGISTRY.list_jobs(project_id=project_id, active_only=True, limit=8)
-        active_jobs_html = _render_job_cards(active_jobs, "当前没有运行中的后台任务。")
+        active_jobs = JOB_REGISTRY.list_jobs(
+            project_id=project_id,
+            active_only=True,
+            include_unviewed_failed=True,
+            limit=12,
+        )
+        active_jobs = _merge_job_lists(
+            active_jobs,
+            JOB_REGISTRY.list_unviewed_failed_jobs(project_id=project_id, limit=20),
+        )
+        active_jobs_html = _render_job_cards(_jobs_with_lock_status(active_jobs), "当前没有运行中的后台任务。")
         external_service_panel_html = _render_external_service_panel()
+        lock_status = _project_lock_statuses(project_path)
+        lock_status_html = _render_lock_status_panel(lock_status)
         reader_setup_panel_html = _render_reader_setup_panel(
             reader_setup_text,
             intro="这份内容面向读者，提供非剧透的开卷入口；第一章仍会在正文里自然交代必要信息。",
         )
-        blocking_jobs = [job for job in active_jobs if job.get("blocks_project", True)]
-        progression_jobs = [job for job in active_jobs if job.get("kind") in PROGRESSION_JOB_KINDS]
+        blocking_jobs = [
+            job
+            for job in active_jobs
+            if job.get("status") in JOB_ACTIVE_STATUSES and job.get("blocks_project", True)
+        ]
+        progression_jobs = [
+            job
+            for job in active_jobs
+            if job.get("status") in JOB_ACTIVE_STATUSES and job.get("kind") in PROGRESSION_JOB_KINDS
+        ]
         project_busy = bool(blocking_jobs)
         audiobook_busy = _active_audiobook_job(project_path) is not None
         illustration_busy = _active_illustration_job(project_path) is not None
@@ -7329,6 +7545,10 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             <section class="panel">
               <h3>后台任务</h3>
               {active_jobs_html}
+            </section>
+            <section class="panel">
+              <h3>锁状态</h3>
+              {lock_status_html}
             </section>
             {external_service_panel_html}
             {busy_notice}

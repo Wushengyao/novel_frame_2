@@ -771,6 +771,68 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertIn("当前项目已有写作任务正在运行", page.body)
         self.assertIn("Traceback line", page.body)
 
+    def test_project_page_displays_lock_status(self) -> None:
+        save_json(
+            str(self.project_path / ".project_write.lock"),
+            {
+                "pid": os.getpid(),
+                "owner": "unit-test-lock",
+                "created_at": "2026-05-03T00:00:00+00:00",
+                "project_path": str(self.project_path),
+                "token": "test-token",
+            },
+        )
+
+        page = self._get("/project/web")
+
+        self.assertEqual(page.status, 200)
+        self.assertIn("unit-test-lock", page.body)
+        self.assertIn(".project_write.lock", page.body)
+
+    def test_failed_job_remains_visible_until_user_opens_it(self) -> None:
+        job = webui.JOB_REGISTRY.create_job(
+            kind="continue",
+            title="unseen failure job",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+        )
+        webui.JOB_REGISTRY.finish_failure(job["id"], "boom failure\n\ntraceback")
+
+        page = self._get("/project/web")
+
+        self.assertEqual(page.status, 200)
+        self.assertIn("unseen failure job", page.body)
+        self.assertIn("boom failure", page.body)
+        self.assertIn("未查看", page.body)
+
+        job_page = self._get(f"/job/{job['id']}")
+        self.assertEqual(job_page.status, 200)
+        self.assertIn("boom failure", job_page.body)
+
+        page = self._get("/project/web")
+        self.assertEqual(page.status, 200)
+        self.assertNotIn("unseen failure job", page.body)
+
+    def test_job_viewed_before_failure_still_requires_failed_view(self) -> None:
+        job = webui.JOB_REGISTRY.create_job(
+            kind="continue",
+            title="later failure job",
+            project_id="web",
+            project_path=str(self.project_path.resolve()),
+        )
+        webui.JOB_REGISTRY.mark_running(job["id"], "running first")
+
+        running_page = self._get(f"/job/{job['id']}")
+        self.assertEqual(running_page.status, 200)
+
+        webui.JOB_REGISTRY.finish_failure(job["id"], "late boom")
+        page = self._get("/project/web")
+
+        self.assertEqual(page.status, 200)
+        self.assertIn("later failure job", page.body)
+        self.assertIn("late boom", page.body)
+        self.assertIn("未查看", page.body)
+
     def test_cancel_running_continue_job_rolls_back_project_files(self) -> None:
         mutated = threading.Event()
         audio_path = self.project_path / "audiobook" / "chapter_0001" / "existing.wav"
