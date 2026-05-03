@@ -86,6 +86,7 @@ from project_manager import (
     normalize_chapter_text,
     normalize_planning_mode,
     record_context_telemetry,
+    regenerate_initial_project,
     rollback_project,
     save_chapter,
     sanitize_chapter_title,
@@ -1138,6 +1139,13 @@ def main() -> None:
     init_parser = subparsers.add_parser("init", help="Initialize a novel project")
     init_parser.add_argument("--config", required=True, help="Path to config.json")
 
+    regenerate_init_parser = subparsers.add_parser(
+        "regenerate-init",
+        help="Regenerate initial project settings using the saved project configuration",
+    )
+    regenerate_init_parser.add_argument("--project", required=True, help="Path to novel_project")
+    regenerate_init_parser.add_argument("--config", help="Optional config.json with runtime credentials")
+
     next_parser = subparsers.add_parser("next", help="Generate the next chapter")
     next_parser.add_argument("--project", required=True, help="Path to novel_project")
     next_parser.add_argument("--config", help="Optional config.json to override saved LLM settings")
@@ -1288,6 +1296,16 @@ def main() -> None:
         log_info("cli: init")
         project_path = init_project(args.config)
         print(f"Project initialized: {project_path}")
+        return
+
+    if args.command == "regenerate-init":
+        log_info("cli: regenerate-init")
+        config = extract_llm_config(args.config) if args.config else load_runtime_config(args.project)
+        config["project_path"] = str(Path(args.project).resolve())
+        result = regenerate_initial_project(args.project, config)
+        print(f"Initial settings regenerated: {result.get('project_path', '')}")
+        print(f"Project ID: {result.get('project_id', '')}")
+        print(f"Snapshot: {result.get('snapshot_path', '')}")
         return
 
     if args.command == "export":

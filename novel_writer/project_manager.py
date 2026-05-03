@@ -2006,6 +2006,172 @@ def init_project(config_path: str, progress_callback=None) -> str:
     return str(project_path)
 
 
+def _clear_directory_contents(path: Path) -> list[str]:
+    removed = []
+    if not path.exists():
+        path.mkdir(parents=True, exist_ok=True)
+        return removed
+    for child in path.iterdir():
+        removed.append(child.name)
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink(missing_ok=True)
+    return removed
+
+
+def _project_has_written_chapters(project_path: Path, project: dict) -> bool:
+    try:
+        chapter_count = int(project.get("chapter_count", 0) or 0)
+    except (TypeError, ValueError):
+        chapter_count = 0
+    if chapter_count > 0:
+        return True
+    chapters_dir = project_path / "chapters"
+    return chapters_dir.exists() and any(chapters_dir.glob("chapter_*.md"))
+
+
+def regenerate_initial_project(project_path: str, config: dict | None = None, progress_callback=None) -> dict:
+    base = Path(project_path).resolve()
+    project_file = base / "project.json"
+    if not project_file.exists():
+        raise FileNotFoundError(f"project.json is missing from project directory: {project_path}")
+    ensure_no_project_audio_lock(base, "regenerate initial settings")
+
+    with acquire_project_write_lock(str(base), owner="regenerate_initial_project", timeout=0):
+        project = load_json(str(project_file))
+        if _project_has_written_chapters(base, project):
+            raise ValueError("Initial settings can only be regenerated before any chapters are written. Roll back to chapter 0 first.")
+
+        project_id = str(project.get("project_id") or base.name).strip() or base.name
+        init_config = dict(project.get("llm_config") or {})
+        init_config.update(config or {})
+        init_config.update(
+            {
+                "project_id": project_id,
+                "project_name": project.get("name", "Novel Project"),
+                "project_description": project.get("description", "Structured-memory novel writing project."),
+                "project_path": str(base),
+                "init_with_llm": True,
+                "story_request": project.get("story_request", ""),
+                "planning_mode": normalize_planning_mode(project.get("planning_mode")),
+            }
+        )
+        if _expert_mode_enabled(init_config):
+            init_config["log_llm_payload"] = True
+
+        log_info(f"regenerate_initial_project: refreshing initial settings for {base}")
+        emit_progress(progress_callback, "regenerate_init_start", "Regenerating initial project settings")
+        _ensure_project_subdirs(base)
+        removed_future = _delete_future_artifacts(str(base), keep_chapter_count=0)
+        removed_progressions = _clear_directory_contents(base / "progression_sessions")
+        (base / "outlines.json").unlink(missing_ok=True)
+
+        emit_progress(progress_callback, "regenerate_init_story", "Generating refreshed initial story data")
+        generated_data, init_meta = _generate_initial_story_data(init_config, progress_callback=progress_callback)
+        story_setup = generated_data.get("story_setup") or {}
+        world = generated_data["world"]
+        characters = generated_data["characters"]
+        plot_state = _normalize_initial_plot_state(generated_data["plot_state"])
+        style = generated_data["style"]
+        author_intent = _build_author_intent_from_project(
+            {
+                "story_request": init_config.get("story_request", ""),
+                "description": init_config.get("project_description", "Structured-memory novel writing project."),
+            },
+            world,
+            style,
+            plot_state,
+        )
+
+        previous_init = project.get("init") if isinstance(project.get("init"), dict) else {}
+        try:
+            regeneration_count = int(previous_init.get("regeneration_count", 0) or 0) + 1
+        except (TypeError, ValueError):
+            regeneration_count = 1
+        init_meta = {
+            **init_meta,
+            "regeneration_count": regeneration_count,
+            "regenerated_at": utc_now(),
+        }
+
+        project_data = {
+            "project_id": project_id,
+            "name": init_config.get("project_name", "Novel Project"),
+            "description": init_config.get("project_description", "Structured-memory novel writing project."),
+            "project_path": str(base),
+            "story_request": init_config.get("story_request", ""),
+            "planning_mode": normalize_planning_mode(init_config.get("planning_mode")),
+            "created_at": project.get("created_at") or utc_now(),
+            "updated_at": utc_now(),
+            "chapter_count": 0,
+            "init": init_meta,
+            "stats": init_meta.get("stats") or _build_project_stats(),
+            "llm_config": _build_persisted_llm_config(init_config),
+        }
+
+        emit_progress(progress_callback, "regenerate_init_files", "Writing refreshed project files")
+        save_json(str(base / "project.json"), project_data)
+        save_json(str(base / STORY_SETUP_FILENAME), story_setup or {"world": world, "characters": characters})
+        save_json(str(base / "world.json"), world)
+        save_json(str(base / "characters.json"), characters)
+        save_json(str(base / "plot_state.json"), plot_state)
+        save_json(str(base / "style.json"), style)
+        save_json(str(base / "author_intent.json"), author_intent)
+        ensure_reader_setup(
+            str(base),
+            {
+                "project": project_data,
+                "world": world,
+                "characters": characters,
+                "plot_state": plot_state,
+                "style": style,
+                "author_intent": author_intent,
+            },
+            overwrite=True,
+        )
+
+        from outline_manager import regenerate_chapter_outline, regenerate_volume_outline
+
+        llm_config = _build_llm_config(init_config)
+        outline_request = str(init_config.get("outline_request", "") or "").strip()
+        planning_mode = normalize_planning_mode(project_data.get("planning_mode"))
+        if planning_mode in {PLANNING_MODE_VOLUME, PLANNING_MODE_CHAPTER}:
+            log_info("regenerate_initial_project: regenerating volume outlines")
+            emit_progress(progress_callback, "regenerate_init_volume_outline", "Regenerating volume outlines")
+            regenerate_volume_outline(
+                str(base),
+                llm_config,
+                user_request=outline_request,
+                progress_callback=progress_callback,
+            )
+        if planning_mode == PLANNING_MODE_CHAPTER:
+            log_info("regenerate_initial_project: regenerating chapter outlines")
+            emit_progress(progress_callback, "regenerate_init_chapter_outline", "Regenerating chapter outlines")
+            regenerate_chapter_outline(
+                str(base),
+                llm_config,
+                volume_number=None,
+                user_request=outline_request,
+                progress_callback=progress_callback,
+            )
+
+        emit_progress(progress_callback, "regenerate_init_snapshot", "Saving refreshed initial snapshot")
+        snapshot_path = create_state_snapshot(str(base), chapter_count=0, note="regenerated initial settings")
+        log_success(f"regenerate_initial_project: refreshed initial settings at {base}")
+        emit_progress(progress_callback, "regenerate_init_done", "Initial settings regenerated")
+        return {
+            "project_path": str(base),
+            "project_id": project_id,
+            "snapshot_path": snapshot_path,
+            "regeneration_count": regeneration_count,
+            "removed": {
+                **removed_future,
+                "progression_sessions": removed_progressions,
+            },
+        }
+
+
 def load_project(project_path: str) -> dict:
     base = Path(project_path)
     outlines_path = base / "outlines.json"

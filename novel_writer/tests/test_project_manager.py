@@ -25,6 +25,7 @@ from project_manager import (
     import_project_archive,
     normalize_chapter_text,
     project_audio_lock_is_active,
+    regenerate_initial_project,
     rollback_project,
     save_chapter,
     save_json,
@@ -752,6 +753,98 @@ class ProjectManagerTests(unittest.TestCase):
         self.assertEqual(data["world"]["setting"], "被异族占领的高级太空站")
         self.assertEqual(data["characters"]["protagonists"][0]["name"], "林宇")
         self.assertEqual(data["story_setup"]["world"]["title"], "星环余烬")
+
+    def test_regenerate_initial_project_refreshes_zero_chapter_project_with_same_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="regen_initial", planning_mode="none")
+            progressions = project_path / "progression_sessions"
+            progressions.mkdir(exist_ok=True)
+            (progressions / "old_session.json").write_text("{}", encoding="utf-8")
+            config = {
+                "model_provider": "ollama",
+                "model": "llama3.2",
+                "model_name": "llama3.2",
+                "api_base": "http://127.0.0.1:11434/v1",
+                "api_key": "secret-key",
+                "temperature": 0.8,
+                "max_tokens": 4000,
+                "timeout": 900,
+                "planning_mode": "none",
+            }
+            setup_payload = {
+                "world": {
+                    "title": "Fresh Seed",
+                    "genre": "survival",
+                    "setting": "new orbital refuge",
+                    "background": ["new opening state"],
+                    "rules": [],
+                },
+                "characters": {
+                    "protagonists": [
+                        {
+                            "name": "Nova",
+                            "role": "lead",
+                            "description": "keeps the refuge alive",
+                            "appearance": "silver jacket",
+                        },
+                    ],
+                    "supporting": [],
+                },
+            }
+            init_payload = {
+                "world": {"genre": "hopeful survival"},
+                "characters": {},
+                "plot_state": {
+                    "main_plot": "rebuild the refuge",
+                    "active_characters": ["Nova"],
+                    "current_location": "new atrium",
+                    "current_time": "first watch",
+                    "next_chapter_goal": "open on the refreshed refuge",
+                },
+                "style": {
+                    "tone": "bright tension",
+                    "pov": "third",
+                    "requirements": ["keep practical stakes"],
+                },
+            }
+
+            with patch(
+                "project_manager.generate_text_with_metadata",
+                side_effect=[
+                    (json.dumps(setup_payload), {"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}),
+                    (json.dumps(init_payload), {"usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28}}),
+                ],
+            ) as mocked_generate:
+                result = regenerate_initial_project(str(project_path), config)
+
+            self.assertEqual(mocked_generate.call_count, 2)
+            self.assertEqual(result["project_id"], "regen_initial")
+            self.assertTrue((project_path / "snapshots" / "chapter_0000" / "snapshot.json").exists())
+            self.assertFalse((progressions / "old_session.json").exists())
+            self.assertFalse((project_path / "outlines.json").exists())
+
+            project = read_json(project_path / "project.json")
+            self.assertEqual(project["project_id"], "regen_initial")
+            self.assertEqual(project["created_at"], "2026-04-20T00:00:00+00:00")
+            self.assertEqual(project["chapter_count"], 0)
+            self.assertEqual(project["init"]["regeneration_count"], 1)
+            self.assertEqual(project["llm_config"]["api_key"], "")
+
+            world = read_json(project_path / "world.json")
+            plot_state = read_json(project_path / "plot_state.json")
+            self.assertEqual(world["title"], "Fresh Seed")
+            self.assertEqual(world["genre"], "hopeful survival")
+            self.assertEqual(plot_state["current_location"], "new atrium")
+            self.assertEqual(plot_state["recent_events"], [])
+            self.assertIn("Fresh Seed", (project_path / READER_SETUP_FILENAME).read_text(encoding="utf-8"))
+
+    def test_regenerate_initial_project_rejects_written_chapters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="regen_blocked", planning_mode="none")
+            save_chapter(str(project_path), "chapter body")
+
+            with self.assertRaisesRegex(ValueError, "before any chapters"):
+                regenerate_initial_project(str(project_path), {"model_provider": "ollama"})
 
     def test_rollback_removes_future_quality_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

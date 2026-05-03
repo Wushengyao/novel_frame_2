@@ -83,6 +83,7 @@ from project_manager import (
     load_project,
     normalize_planning_mode,
     project_audio_lock_is_active,
+    regenerate_initial_project,
     rollback_project,
     sanitize_chapter_title,
 )
@@ -4408,12 +4409,6 @@ def _render_page(
       display: grid;
       gap: 14px;
     }}
-    .job-event-details {{
-      margin-top: 4px;
-      font-size: 13px;
-      color: var(--ink);
-      opacity: 0.78;
-    }}
     .mono {{
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }}
@@ -4589,6 +4584,12 @@ def _render_page(
       gap: 8px;
       color: var(--muted);
       font-size: 14px;
+    }}
+    .job-event-details {{
+      margin-top: 4px;
+      font-size: 13px;
+      color: var(--ink);
+      opacity: 0.78;
     }}
     .mono {{
       font-family: Consolas, "SFMono-Regular", monospace;
@@ -5031,6 +5032,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "continue":
             self._handle_continue_async(parts[1], form)
+            return
+        if len(parts) == 3 and parts[0] == "project" and parts[2] == "regenerate-initial":
+            self._handle_regenerate_initial_async(parts[1], form)
             return
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "progression-options":
             self._handle_progression_options(parts[1], form)
@@ -7152,6 +7156,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         audiobook_busy_attr = " disabled" if audiobook_busy else ""
         illustration_busy_attr = " disabled" if illustration_busy else ""
         destructive_busy_attr = " disabled" if destructive_busy else ""
+        initial_regenerate_busy_attr = " disabled" if (active_jobs or audiobook_busy or illustration_busy) else ""
         busy_notice = (
             '<div class="warning-box">当前项目有后台写作任务正在运行。为避免并发写入冲突，续写、回滚和推进选项表单已暂时禁用。你可以打开上方任务卡片查看实时进度。</div>'
             if project_busy
@@ -7177,6 +7182,24 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             if project_busy
             else f'<a class="ghost-button" href="/project/{escape(project_id)}/export">导出项目包</a>'
         )
+        try:
+            project_chapter_count = int(project.get("chapter_count", 0) or 0)
+        except (TypeError, ValueError):
+            project_chapter_count = 0
+        regenerate_initial_control_html = ""
+        if project_chapter_count == 0 and not chapters:
+            regenerate_initial_control_html = f"""
+            <section class="panel">
+              <h3>初始设定</h3>
+              <p class="muted">如果开篇人物、世界观或大纲不满意，可以用当前创建配置重新生成一次。</p>
+              <form method="post" action="/project/{escape(project_id)}/regenerate-initial" onsubmit="return confirm('将覆盖当前初始设定、读者开卷导语、大纲和开篇推进选项。确定重新生成吗？')">
+                <fieldset{initial_regenerate_busy_attr}>
+                  <div class="warning-box">仅支持尚未写出正文的项目。模型、故事需求、规划模式和质量设置会沿用当前项目保存的配置。</div>
+                  <button class="ghost-button" type="submit">重新生成初始设定</button>
+                </fieldset>
+              </form>
+            </section>
+            """
 
         chapter_links = "".join(
             f"<a href=\"/project/{escape(project_id)}/chapter/{escape(chapter['slug'])}\">{escape(chapter['name'])}</a>"
@@ -7311,6 +7334,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             {busy_notice}
             {audiobook_notice}
             {illustration_notice}
+            {regenerate_initial_control_html}
             <section class="panel">
               <h3>续写</h3>
               <form method="post" action="/project/{escape(project_id)}/continue">
@@ -7569,6 +7593,70 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 "result_label": "打开项目",
                 "project_id": new_project_id,
                 "project_path": project_path,
+            }
+
+        _start_background_job(job["id"], runner, cancel_checkpoint=cancel_checkpoint)
+        self._redirect("/job/" + urllib.parse.quote(job["id"]))
+
+    def _handle_regenerate_initial_async(self, project_id: str, form: dict[str, str]) -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+
+        api_keys = _load_api_keys()
+        cancel_checkpoint = None
+        try:
+            if _project_has_active_job(project_path):
+                raise RuntimeError("当前项目有后台任务正在运行，请稍后再重新生成初始设定。")
+            project = load_json(str(project_path / "project.json"))
+            if int(project.get("chapter_count", 0) or 0) > 0:
+                raise RuntimeError("只能在尚未写出正文时重新生成初始设定。")
+            runtime_config = _build_runtime_config(project_path, {}, api_keys)
+            cancel_checkpoint = ProjectTreeCheckpoint(project_path)
+            job = JOB_REGISTRY.create_job(
+                kind="regenerate_initial",
+                title=f"重新生成初始设定：{_repair_display_text(project.get('name', project_id))}",
+                project_id=project_id,
+                project_path=str(project_path.resolve()),
+                busy_message="当前项目有后台任务正在运行，请稍后再重新生成初始设定。",
+            )
+        except Exception as exc:
+            _discard_checkpoint(cancel_checkpoint)
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote(str(exc))
+            )
+            return
+
+        def runner(progress_callback):
+            result = regenerate_initial_project(
+                str(project_path),
+                runtime_config,
+                progress_callback=progress_callback,
+            )
+            progress_callback({"stage": "regenerate_finalize", "message": "正在整理刷新后的项目状态"})
+            project_path_obj = Path(result.get("project_path") or project_path)
+            project_meta = load_json(str(project_path_obj / "project.json"))
+            refreshed_project_id = project_meta.get("project_id", project_id)
+            auto_job = _enqueue_progression_job(
+                refreshed_project_id,
+                project_path_obj,
+                {**runtime_config, "project_path": str(project_path_obj.resolve())},
+                title=f"生成《{refreshed_project_id}》刷新后的开篇推进选项",
+                auto_generated=True,
+            )
+            message = "初始设定已重新生成。"
+            if auto_job is not None:
+                message += " 下一章推进选项已在后台开始生成。"
+            return {
+                "message": message,
+                "result_url": "/project/" + urllib.parse.quote(refreshed_project_id),
+                "result_label": "打开项目",
+                "project_id": refreshed_project_id,
+                "project_path": str(project_path_obj),
             }
 
         _start_background_job(job["id"], runner, cancel_checkpoint=cancel_checkpoint)

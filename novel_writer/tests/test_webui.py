@@ -1707,6 +1707,65 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(len(auto_jobs), 1)
         self._wait_for_job_status(auto_jobs[0]["id"])
 
+    def test_project_page_offers_initial_regeneration_before_first_chapter(self) -> None:
+        page = self._get("/project/web")
+        self.assertEqual(page.status, 200)
+        self.assertIn("/project/web/regenerate-initial", page.body)
+        self.assertIn("重新生成初始设定", page.body)
+
+        (self.project_path / "chapters" / "chapter_0001.md").write_text("正文\n", encoding="utf-8")
+        project = load_json(str(self.project_path / "project.json"))
+        project["chapter_count"] = 1
+        save_json(str(self.project_path / "project.json"), project)
+
+        page = self._get("/project/web")
+        self.assertEqual(page.status, 200)
+        self.assertNotIn("/project/web/regenerate-initial", page.body)
+
+    def test_regenerate_initial_async_uses_saved_settings_and_starts_progression_job(self) -> None:
+        session_payload = {
+            "session_id": "session_regenerated_bootstrap",
+            "created_at": "2026-04-20T00:00:00+00:00",
+            "project_chapter_count": 0,
+            "target_chapter_number": 1,
+            "planning_mode": "chapter",
+            "source_user_request": "",
+            "runtime_overrides": {},
+            "recommended_option_id": "option_1",
+            "options": [],
+            "status": "pending",
+            "selected_option_id": "",
+            "selection_feedback": "",
+        }
+
+        with patch(
+            "webui.regenerate_initial_project",
+            return_value={
+                "project_path": str(self.project_path),
+                "project_id": "web",
+                "snapshot_path": str(self.project_path / "snapshots" / "chapter_0000"),
+            },
+        ) as mocked_regenerate, patch(
+            "webui.generate_progression_options",
+            return_value=session_payload,
+        ):
+            response = self._post("/project/web/regenerate-initial", "")
+
+        self.assertEqual(response.status, 303)
+        job_id = response.getheader("Location").rsplit("/", 1)[-1]
+        job = self._wait_for_job_status(job_id)
+        self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(mocked_regenerate.call_count, 1)
+        self.assertEqual(mocked_regenerate.call_args.args[0], str(self.project_path))
+        runtime_config = mocked_regenerate.call_args.args[1]
+        self.assertEqual(runtime_config["model_provider"], "ollama")
+        self.assertEqual(runtime_config["planning_mode"], "chapter")
+
+        jobs = webui.JOB_REGISTRY.list_jobs(project_id="web", active_only=False, limit=8)
+        auto_jobs = [item for item in jobs if item.get("kind") == "progression_options_auto"]
+        self.assertEqual(len(auto_jobs), 1)
+        self._wait_for_job_status(auto_jobs[0]["id"])
+
     def test_project_page_keeps_forms_available_during_non_blocking_progression_job(self) -> None:
         job = webui.JOB_REGISTRY.create_job(
             kind="progression_options_auto",
