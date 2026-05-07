@@ -27,7 +27,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import uuid4
 
-from app import run_next_chapter_from_progression, run_next_chapters
+from agent_workflows import (
+    generate_progression_options_agentic,
+    init_project_agentic,
+    regenerate_initial_project_agentic,
+    regenerate_outline_agentic,
+)
+from app import (
+    run_next_chapter_from_progression,
+    run_next_chapter_from_progression_agentic,
+    run_next_chapters,
+    run_next_chapters_agentic,
+)
 from audiobook_manager import (
     GENERATION_MODE_ADVANCED,
     GENERATION_MODE_SIMPLE,
@@ -52,6 +63,7 @@ from external_services import (
     normalize_image_frame_provider,
 )
 from illustration_manager import get_illustration_record, illustrate_chapters, list_illustration_records
+from outline_manager import regenerate_chapter_outline, regenerate_volume_outline
 from polish_manager import POLISH_PRESETS, run_chapter_polish
 from progression_manager import (
     CUSTOM_PROGRESSION_OPTION_ID,
@@ -115,6 +127,12 @@ from runtime_config import (
 )
 from version import APP_NAME, DISPLAY_VERSION, HTTP_SERVER_TOKEN, WEBUI_NAME
 from web_auth import AuthService, LoginAttemptGuard, WebAuthSettings, load_auth_settings
+from workflow_modes import (
+    DEFAULT_WORKFLOW_MODE,
+    WORKFLOW_MODE_AGENTIC,
+    WORKFLOW_MODE_CLASSIC,
+    normalize_workflow_mode,
+)
 
 if not hasattr(os, "getuid"):
     def _windows_getuid() -> int:
@@ -1602,6 +1620,26 @@ def _planning_mode_help(mode: str) -> str:
     return mapping.get(normalize_planning_mode(mode), mapping[DEFAULT_PLANNING_MODE])
 
 
+def _workflow_mode_label(mode: str) -> str:
+    mapping = {
+        WORKFLOW_MODE_CLASSIC: "Classic：现有流程",
+        WORKFLOW_MODE_AGENTIC: "Agentic：Agent+Skill 编排",
+    }
+    return mapping.get(normalize_workflow_mode(mode), mapping[DEFAULT_WORKFLOW_MODE])
+
+
+def _render_workflow_mode_options(selected: str, *, include_project_default: bool = False) -> str:
+    normalized = normalize_workflow_mode(selected)
+    options = []
+    if include_project_default:
+        selected_attr = ' selected' if not selected else ""
+        options.append(f'<option value=""{selected_attr}>沿用项目设置</option>')
+    for value in (WORKFLOW_MODE_CLASSIC, WORKFLOW_MODE_AGENTIC):
+        selected_attr = ' selected' if normalized == value and not include_project_default else ""
+        options.append(f'<option value="{value}"{selected_attr}>{_workflow_mode_label(value)}</option>')
+    return "".join(options)
+
+
 def _render_planning_mode_options(selected: str, *, include_project_default: bool = False) -> str:
     normalized = normalize_planning_mode(selected)
     options = []
@@ -2017,6 +2055,10 @@ def _load_saved_runtime_config(project_path: Path) -> dict:
     return shared_load_runtime_config(str(project_path))
 
 
+def _agentic_enabled(config: dict) -> bool:
+    return normalize_workflow_mode(config.get("workflow_mode")) == WORKFLOW_MODE_AGENTIC
+
+
 def _runtime_overrides_from_form(form: dict[str, str]) -> dict[str, object]:
     log_llm_payload = bool(form.get("log_llm_payload"))
     return sanitize_runtime_overrides(
@@ -2024,6 +2066,7 @@ def _runtime_overrides_from_form(form: dict[str, str]) -> dict[str, object]:
             "provider": form.get("provider"),
             "model_name": _resolve_model_name_from_form(form),
             "planning_mode": form.get("planning_mode"),
+            "workflow_mode": form.get("workflow_mode"),
             "writing_quality_mode": form.get("writing_quality_mode"),
             "review_mode": form.get("review_mode"),
             "max_tokens": form.get("max_tokens"),
@@ -2085,7 +2128,12 @@ def _enqueue_progression_job(
     )
 
     def runner(progress_callback):
-        session = generate_progression_options(
+        progression_func = (
+            generate_progression_options_agentic
+            if _agentic_enabled(runtime_config)
+            else generate_progression_options
+        )
+        session = progression_func(
             str(project_path),
             runtime_config,
             user_request=user_request,
@@ -2251,7 +2299,15 @@ def _render_runtime_override_fields(
           {_render_provider_options()}
         </select>
       </label>
+      <label>Workflow Mode
+        <select name="workflow_mode">
+          {_render_workflow_mode_options("", include_project_default=True)}
+        </select>
+      </label>
+    </div>
+    <div class="two-col">
       {planning_field_html}
+      <div class="muted">Agentic 会记录 AgentRun 和 Skill 调度；Classic 沿用旧流程。</div>
     </div>
     {planning_help_html}
     {quality_fields_html}
@@ -2375,6 +2431,12 @@ def _render_create_project_form() -> str:
           </select>
         </label>
         <div class="muted">{escape(_planning_mode_help(DEFAULT_PLANNING_MODE))}</div>
+        <label>Workflow Mode
+          <select name="workflow_mode">
+            {_render_workflow_mode_options(DEFAULT_WORKFLOW_MODE)}
+          </select>
+        </label>
+        <div class="muted">Classic 使用原有固定流程；Agentic 使用项目内置 Agent+Skill 编排，并记录 Skill 调度。</div>
         <div class="two-col">
           <label>写作质量模式
             <select name="writing_quality_mode">
@@ -2470,6 +2532,7 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_cal
         "init_with_llm": True,
         "story_request": (form.get("story_request") or "").strip(),
         "planning_mode": normalize_planning_mode(form.get("planning_mode")),
+        "workflow_mode": normalize_workflow_mode(form.get("workflow_mode")),
         "writing_quality_mode": normalize_writing_quality_mode(form.get("writing_quality_mode")),
         "review_mode": normalize_review_mode(form.get("review_mode")),
         "model_provider": provider,
@@ -2496,6 +2559,8 @@ def _create_project(form: dict[str, str], api_keys: dict[str, str], progress_cal
         tmp_path = tmp.name
 
     try:
+        if normalize_workflow_mode(config.get("workflow_mode")) == WORKFLOW_MODE_AGENTIC:
+            return init_project_agentic(tmp_path, progress_callback=progress_callback)
         return init_project(tmp_path, progress_callback=progress_callback)
     finally:
         Path(tmp_path).unlink(missing_ok=True)
@@ -5227,6 +5292,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "progression-options":
             self._handle_progression_options(parts[1], form)
             return
+        if len(parts) == 3 and parts[0] == "project" and parts[2] == "outline":
+            self._handle_outline_async(parts[1], form)
+            return
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "continue-guided":
             self._handle_continue_guided_async(parts[1], form)
             return
@@ -6989,7 +7057,12 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             selection_mode = validate_selection_mode(form.get("selection_mode"), allow_manual=False)
             runtime_overrides = _runtime_overrides_from_form(form)
             runtime_config = _build_runtime_config(project_path, runtime_overrides, api_keys)
-            chapter_paths = run_next_chapters(
+            continue_func = (
+                run_next_chapters_agentic
+                if _agentic_enabled(runtime_config)
+                else run_next_chapters
+            )
+            chapter_paths = continue_func(
                 str(project_path),
                 runtime_config,
                 count,
@@ -7420,6 +7493,9 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
         destructive_busy = project_busy or audiobook_busy or illustration_busy
         progression_session = get_latest_active_progression_session(str(project_path))
         project_llm_config = project.get("llm_config") or {}
+        project_workflow_mode = normalize_workflow_mode(
+            project.get("workflow_mode") or project_llm_config.get("workflow_mode")
+        )
         runtime_override_fields_html = _render_runtime_override_fields(
             str(project_llm_config.get("model_provider") or ""),
             str(project_llm_config.get("model_name") or project_llm_config.get("model") or ""),
@@ -7473,6 +7549,11 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
               <form method="post" action="/project/{escape(project_id)}/regenerate-initial" onsubmit="return confirm('将覆盖当前初始设定、读者开卷导语、大纲和开篇推进选项。确定重新生成吗？')">
                 <fieldset{initial_regenerate_busy_attr}>
                   <div class="warning-box">仅支持尚未写出正文的项目。模型、故事需求、规划模式和质量设置会沿用当前项目保存的配置。</div>
+                  <label>Workflow Mode
+                    <select name="workflow_mode">
+                      {_render_workflow_mode_options(project_workflow_mode)}
+                    </select>
+                  </label>
                   <button class="ghost-button" type="submit">重新生成初始设定</button>
                 </fieldset>
               </form>
@@ -7597,6 +7678,7 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 <p><strong>当前时间：</strong>{escape(plot_state.get("current_time", "") or "未知")}</p>
                 {_render_sidebar_usage_stats(project_stats)}
                 <p><strong>Planning:</strong>{escape(_planning_mode_label(planning_mode))}</p>
+                <p><strong>Workflow:</strong>{escape(_workflow_mode_label(project_workflow_mode))}</p>
                 <p><strong>Quality:</strong>{escape(_quality_mode_label(project_llm_config.get("writing_quality_mode", DEFAULT_WRITING_QUALITY_MODE)))}</p>
                 <p><strong>Review:</strong>{escape(_review_mode_label(project_llm_config.get("review_mode", DEFAULT_REVIEW_MODE)))}</p>
                 <p><strong>Quality Model:</strong>{escape(_quality_model_label(project_llm_config))}</p>
@@ -7660,6 +7742,30 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                     回滚会删除目标章节之后的正文、摘要、章节插图和更晚的状态快照。回滚完成后，可以直接继续写，从保留章节的状态往后写新版本。
                   </div>
                   <button class="ghost-button" type="submit">回滚到该章节</button>
+                </fieldset>
+              </form>
+            </section>
+            <section class="panel">
+              <h3>大纲</h3>
+              <form method="post" action="/project/{escape(project_id)}/outline">
+                <fieldset{busy_attr}>
+                  <div class="two-col">
+                    <label>重生成阶段
+                      <select name="stage">
+                        <option value="all" selected>卷纲 + 章纲</option>
+                        <option value="volumes">仅卷纲</option>
+                        <option value="chapters">仅章纲</option>
+                      </select>
+                    </label>
+                    <label>卷号（可选）
+                      <input type="number" name="volume_number" min="1" placeholder="仅章纲时可填">
+                    </label>
+                  </div>
+                  <label>大纲额外要求
+                    <textarea name="user_request" placeholder="例如：增强第二卷资源危机，并减少重复探索桥段。"></textarea>
+                  </label>
+                  {runtime_override_fields_html}
+                  <button class="ghost-button" type="submit">重生成大纲</button>
                 </fieldset>
               </form>
             </section>
@@ -7894,7 +8000,8 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             project = load_json(str(project_path / "project.json"))
             if int(project.get("chapter_count", 0) or 0) > 0:
                 raise RuntimeError("只能在尚未写出正文时重新生成初始设定。")
-            runtime_config = _build_runtime_config(project_path, {}, api_keys)
+            runtime_overrides = _runtime_overrides_from_form(form)
+            runtime_config = _build_runtime_config(project_path, runtime_overrides, api_keys)
             cancel_checkpoint = ProjectTreeCheckpoint(project_path)
             job = JOB_REGISTRY.create_job(
                 kind="regenerate_initial",
@@ -7914,7 +8021,12 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             return
 
         def runner(progress_callback):
-            result = regenerate_initial_project(
+            regenerate_func = (
+                regenerate_initial_project_agentic
+                if _agentic_enabled(runtime_config)
+                else regenerate_initial_project
+            )
+            result = regenerate_func(
                 str(project_path),
                 runtime_config,
                 progress_callback=progress_callback,
@@ -7977,7 +8089,12 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             return
 
         def runner(progress_callback):
-            chapter_paths = run_next_chapters(
+            continue_func = (
+                run_next_chapters_agentic
+                if _agentic_enabled(runtime_config)
+                else run_next_chapters
+            )
+            chapter_paths = continue_func(
                 str(project_path),
                 runtime_config,
                 count,
@@ -8011,6 +8128,84 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
                 )
                 new_count = sum(0 if item.get("reused") else 1 for item in illustration_results)
                 message += f" 插图处理完成，新生成 {new_count} 张。"
+            return {
+                "message": message,
+                "result_url": "/project/" + urllib.parse.quote(project_id),
+                "result_label": "返回项目页",
+                "project_id": project_id,
+                "project_path": str(project_path.resolve()),
+            }
+
+        _start_background_job(job["id"], runner, cancel_checkpoint=cancel_checkpoint)
+        self._redirect("/job/" + urllib.parse.quote(job["id"]))
+
+    def _handle_outline_async(self, project_id: str, form: dict[str, str]) -> None:
+        project_path = _find_project(project_id)
+        if project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "项目不存在")
+            return
+
+        api_keys = _load_api_keys()
+        cancel_checkpoint = None
+        try:
+            stage = (form.get("stage") or "all").strip().lower() or "all"
+            if stage not in {"volumes", "chapters", "all"}:
+                raise RuntimeError("不支持的大纲阶段。")
+            raw_volume = (form.get("volume_number") or "").strip()
+            volume_number = int(raw_volume) if raw_volume else None
+            if volume_number is not None and volume_number < 1:
+                raise RuntimeError("卷号必须是正整数。")
+            runtime_overrides = _runtime_overrides_from_form(form)
+            runtime_config = _build_runtime_config(project_path, runtime_overrides, api_keys)
+            cancel_checkpoint = ProjectTreeCheckpoint(project_path)
+            job = JOB_REGISTRY.create_job(
+                kind="outline",
+                title=f"重生成《{project_id}》大纲",
+                project_id=project_id,
+                project_path=str(project_path.resolve()),
+            )
+        except Exception as exc:
+            _discard_checkpoint(cancel_checkpoint)
+            self._redirect(
+                "/project/"
+                + urllib.parse.quote(project_id)
+                + "?error="
+                + urllib.parse.quote(str(exc))
+            )
+            return
+
+        user_request = (form.get("user_request") or "").strip()
+
+        def runner(progress_callback):
+            if _agentic_enabled(runtime_config):
+                outlines = regenerate_outline_agentic(
+                    str(project_path),
+                    runtime_config,
+                    stage=stage,
+                    volume_number=volume_number,
+                    user_request=user_request,
+                    progress_callback=progress_callback,
+                )
+            else:
+                outlines = {}
+                if stage in {"volumes", "all"}:
+                    outlines = regenerate_volume_outline(
+                        str(project_path),
+                        runtime_config,
+                        user_request=user_request,
+                        progress_callback=progress_callback,
+                    )
+                if stage in {"chapters", "all"}:
+                    outlines = regenerate_chapter_outline(
+                        str(project_path),
+                        runtime_config,
+                        volume_number=volume_number if stage == "chapters" else None,
+                        user_request=user_request,
+                        progress_callback=progress_callback,
+                    )
+            progress_callback({"stage": "outline_finalize", "message": "正在整理大纲结果"})
+            volume_count = len(outlines.get("volumes", [])) if isinstance(outlines, dict) else 0
+            message = f"大纲已重生成，当前包含 {volume_count} 卷。"
             return {
                 "message": message,
                 "result_url": "/project/" + urllib.parse.quote(project_id),
@@ -8119,7 +8314,12 @@ class NovelWriterHandler(BaseHTTPRequestHandler):
             return
 
         def runner(progress_callback):
-            chapter_path = run_next_chapter_from_progression(
+            guided_func = (
+                run_next_chapter_from_progression_agentic
+                if _agentic_enabled(runtime_config)
+                else run_next_chapter_from_progression
+            )
+            chapter_path = guided_func(
                 str(project_path),
                 runtime_config,
                 progression_session=session_id,

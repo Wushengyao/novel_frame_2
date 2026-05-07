@@ -15,6 +15,7 @@ from app import (
     _quality_model_overrides_from_args,
     main,
     run_next_chapter,
+    run_next_chapter_agentic,
     run_next_chapter_from_progression,
     run_next_chapters,
 )
@@ -312,6 +313,42 @@ class GuidedFlowTests(unittest.TestCase):
             self.assertEqual(list((project_path / "craft_briefs").glob("*.json")), [])
             self.assertEqual(list((project_path / "quality_reviews").glob("*.json")), [])
 
+    def test_agentic_next_chapter_writes_run_log_and_expected_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="agentic_next", workflow_mode="agentic")
+            progress_events: list[dict] = []
+
+            with patch(
+                "app.generate_text_with_metadata",
+                return_value=("Agentic 模式正文", {"usage": {}}),
+            ), patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ):
+                chapter_path = run_next_chapter_agentic(
+                    str(project_path),
+                    runtime_config("chapter", workflow_mode="agentic", writing_quality_mode="light"),
+                    progress_callback=progress_events.append,
+                )
+
+            self.assertTrue(Path(chapter_path).exists())
+            self.assertEqual(read_json(project_path / "project.json")["chapter_count"], 1)
+            self.assertTrue((project_path / "snapshots" / "chapter_0001").exists())
+
+            run_files = sorted((project_path / "agent_runs").glob("agent_run_*.json"))
+            self.assertEqual(len(run_files), 1)
+            agent_run = read_json(run_files[0])
+            self.assertEqual(agent_run["status"], "succeeded")
+            skill_ids = [event["skill_id"] for event in agent_run["skill_events"]]
+            self.assertIn("chapter.prepare_context", skill_ids)
+            self.assertIn("chapter.generate_draft", skill_ids)
+            self.assertIn("chapter.save", skill_ids)
+            self.assertIn("state.update_plot_state", skill_ids)
+            self.assertIn("outline.sync_progress", skill_ids)
+            self.assertIn("snapshot.create_post", skill_ids)
+            self.assertIn("agent_skill_start", [event.get("stage") for event in progress_events])
+            self.assertIn("agent_skill_done", [event.get("stage") for event in progress_events])
+
     def test_writer_retries_truncated_response_before_saving(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_path = create_test_project(Path(tmp), project_id="writer_truncated_retry")
@@ -514,6 +551,37 @@ class GuidedFlowTests(unittest.TestCase):
             self.assertFalse(review["passed"])
             self.assertTrue(second_review["passed"])
             self.assertEqual(pre_rewrite.read_text(encoding="utf-8").strip(), "原始正文")
+
+    def test_agentic_quality_rewrite_chain_is_recorded_as_skill_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = create_test_project(Path(tmp), project_id="agentic_quality", workflow_mode="agentic")
+
+            with patch(
+                "quality_manager.generate_text_with_metadata",
+                side_effect=[
+                    (json.dumps(self._craft_brief_payload(), ensure_ascii=False), {"usage": {}}),
+                    (json.dumps(self._review_payload(passed=False, score=4), ensure_ascii=False), {"usage": {}}),
+                    ("Agentic 重写后的正文", {"usage": {}}),
+                    (json.dumps(self._review_payload(passed=True, score=8), ensure_ascii=False), {"usage": {}}),
+                ],
+            ), patch(
+                "app.generate_text_with_metadata",
+                return_value=("Agentic 原始正文", {"usage": {}}),
+            ), patch(
+                "state_updater.generate_text_with_metadata",
+                return_value=(json.dumps(self._summary_payload(), ensure_ascii=False), {"usage": {}}),
+            ):
+                chapter_path = run_next_chapter_agentic(
+                    str(project_path),
+                    runtime_config("chapter", workflow_mode="agentic", writing_quality_mode="high", review_mode="auto"),
+                )
+
+            self.assertEqual(self._chapter_body(chapter_path), "Agentic 重写后的正文")
+            agent_run = read_json(sorted((project_path / "agent_runs").glob("agent_run_*.json"))[0])
+            skill_ids = [event["skill_id"] for event in agent_run["skill_events"]]
+            self.assertEqual(skill_ids.count("quality.review_draft"), 2)
+            self.assertIn("quality.rewrite_draft", skill_ids)
+            self.assertEqual(agent_run["status"], "succeeded")
 
     def test_high_quality_mode_can_rewrite_up_to_five_times(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

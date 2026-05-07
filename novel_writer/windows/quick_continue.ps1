@@ -4,6 +4,7 @@
 	[string]$UserRequest = "",
 	[string]$ProviderOverride = "",
 	[string]$PlanningModeOverride = "",
+	[string]$WorkflowModeOverride = "",
 	[string]$ContinueMode = "",
 	[bool]$AutoIllustrate = $true
 )
@@ -24,6 +25,7 @@ $DefaultTemperatureOverride = ""
 $DefaultMaxTokensOverride = ""
 $DefaultTimeoutOverride = ""
 $DefaultPlanningModeOverride = ""
+$DefaultWorkflowModeOverride = ""
 $DefaultQualityProviderOverride = ""
 $DefaultQualityModelNameOverride = ""
 $DefaultQualityApiBaseOverride = ""
@@ -70,6 +72,12 @@ if (-not $PSBoundParameters.ContainsKey("PlanningModeOverride")) {
 if ($PlanningModeOverride) {
 	$PlanningModeOverride = Normalize-PlanningMode $PlanningModeOverride
 }
+if (-not $PSBoundParameters.ContainsKey("WorkflowModeOverride")) {
+	$WorkflowModeOverride = Prompt-OptionalValue -PromptText "Workflow mode override (optional: classic/agentic)" -DefaultValue $DefaultWorkflowModeOverride
+}
+if ($WorkflowModeOverride) {
+	$WorkflowModeOverride = Normalize-WorkflowMode $WorkflowModeOverride
+}
 if (-not $PSBoundParameters.ContainsKey("ContinueMode")) {
 	$ContinueMode = Prompt-OptionalValue -PromptText "Continue mode (optional: direct/guided)" -DefaultValue $DefaultContinueMode
 }
@@ -97,6 +105,7 @@ $temperatureOverride = if ($env:NOVEL_TEMPERATURE_OVERRIDE) { $env:NOVEL_TEMPERA
 $maxTokensOverride = if ($env:NOVEL_MAX_TOKENS_OVERRIDE) { $env:NOVEL_MAX_TOKENS_OVERRIDE } else { $DefaultMaxTokensOverride }
 $timeoutOverride = if ($env:NOVEL_TIMEOUT_OVERRIDE) { $env:NOVEL_TIMEOUT_OVERRIDE } else { $DefaultTimeoutOverride }
 $planningModeOverride = if ($env:NOVEL_PLANNING_MODE_OVERRIDE) { Normalize-PlanningMode $env:NOVEL_PLANNING_MODE_OVERRIDE } elseif ($PlanningModeOverride) { $PlanningModeOverride } else { $DefaultPlanningModeOverride }
+$workflowModeOverride = if ($env:NOVEL_WORKFLOW_MODE_OVERRIDE) { Normalize-WorkflowMode $env:NOVEL_WORKFLOW_MODE_OVERRIDE } elseif ($WorkflowModeOverride) { $WorkflowModeOverride } else { $DefaultWorkflowModeOverride }
 $qualityProviderOverride = if ($env:NOVEL_QUALITY_PROVIDER) { Normalize-Provider $env:NOVEL_QUALITY_PROVIDER } elseif ($DefaultQualityProviderOverride) { Normalize-Provider $DefaultQualityProviderOverride } else { "" }
 $qualityModelNameOverride = if ($env:NOVEL_QUALITY_MODEL_NAME) { $env:NOVEL_QUALITY_MODEL_NAME } else { $DefaultQualityModelNameOverride }
 $qualityApiBaseOverride = if ($env:NOVEL_QUALITY_API_BASE) { $env:NOVEL_QUALITY_API_BASE } else { $DefaultQualityApiBaseOverride }
@@ -133,6 +142,7 @@ try {
 		-MaxTokensOverride $maxTokensOverride `
 		-TimeoutOverride $timeoutOverride `
 		-PlanningModeOverride $planningModeOverride `
+		-WorkflowModeOverride $workflowModeOverride `
 		-QualityProviderOverride $qualityProviderOverride `
 		-QualityModelNameOverride $qualityModelNameOverride `
 		-QualityApiBaseOverride $qualityApiBaseOverride `

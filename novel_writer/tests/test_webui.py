@@ -1464,6 +1464,15 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         )
         self.assertNotIn("log_llm_payload", overrides)
 
+    def test_runtime_overrides_include_workflow_mode(self) -> None:
+        overrides = webui._runtime_overrides_from_form({"workflow_mode": "agentic"})
+        self.assertEqual(overrides["workflow_mode"], "agentic")
+
+        page = self._get("/projects/new")
+        self.assertEqual(page.status, 200)
+        self.assertIn('name="workflow_mode"', page.body)
+        self.assertIn("Agentic：Agent+Skill 编排", page.body)
+
     def test_continue_async_starts_followup_progression_job(self) -> None:
         session_payload = {
             "session_id": "session_auto",
@@ -1500,6 +1509,42 @@ class WebUiGuidedFlowTests(unittest.TestCase):
         self.assertEqual(len(auto_jobs), 1)
         auto_job = self._wait_for_job_status(auto_jobs[0]["id"])
         self.assertFalse(auto_job.get("blocks_project", True))
+
+    def test_continue_async_agentic_uses_agentic_runner_and_records_skill_events(self) -> None:
+        def fake_run_next_chapters(project_path: str, _config: dict, _count: int, **kwargs) -> list[str]:
+            progress_callback = kwargs.get("progress_callback")
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": "agent_skill_start",
+                        "message": "Skill started: chapter.generate_draft",
+                        "event_details": {"skill_id": "chapter.generate_draft"},
+                    }
+                )
+                progress_callback(
+                    {
+                        "stage": "agent_skill_done",
+                        "message": "Skill completed: chapter.generate_draft",
+                        "event_details": {"skill_id": "chapter.generate_draft"},
+                    }
+                )
+            return [str(Path(project_path) / "chapters" / "chapter_0001.md")]
+
+        with patch("webui.run_next_chapters_agentic", side_effect=fake_run_next_chapters) as mocked_agentic, patch(
+            "webui.run_next_chapters"
+        ) as mocked_classic, patch("webui._enqueue_progression_job", return_value=None):
+            response = self._post(
+                "/project/web/continue",
+                "count=1&selection_mode=recommended&workflow_mode=agentic",
+            )
+
+        self.assertEqual(response.status, 303)
+        job = self._wait_for_job_status(response.getheader("Location").rsplit("/", 1)[-1])
+        mocked_agentic.assert_called_once()
+        mocked_classic.assert_not_called()
+        stages = [event.get("stage") for event in job.get("events", [])]
+        self.assertIn("agent_skill_start", stages)
+        self.assertIn("agent_skill_done", stages)
 
     def test_continue_async_single_passes_single_mode_and_refreshes_one_plan(self) -> None:
         session_payload = {

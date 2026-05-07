@@ -108,6 +108,20 @@ normalize_planning_mode() {
   esac
 }
 
+normalize_workflow_mode() {
+  local mode="${1:-}"
+  case "${mode,,}" in
+    classic|agentic) printf '%s\n' "${mode,,}" ;;
+    "")
+      printf '%s\n' "classic"
+      ;;
+    *)
+      echo "Unsupported workflow mode: $mode (allowed: classic / agentic)" >&2
+      exit 1
+      ;;
+  esac
+}
+
 default_model_for_provider() {
   local provider
   provider="$(normalize_provider "$1")"
@@ -218,6 +232,7 @@ data = {
     "init_with_llm": True,
     "story_request": os.environ["NOVEL_STORY_REQUEST"],
     "planning_mode": os.environ.get("NOVEL_PLANNING_MODE", "chapter").strip() or "chapter",
+    "workflow_mode": os.environ.get("NOVEL_WORKFLOW_MODE", "classic").strip() or "classic",
     "model_provider": provider,
     "model_name": os.environ["NOVEL_MODEL_NAME"],
     "api_base": os.environ["NOVEL_API_BASE"],
@@ -303,6 +318,8 @@ saved_provider = str(saved.get("model_provider", "gemini") or "gemini").strip().
 resolved_provider = os.environ.get("NOVEL_PROVIDER_OVERRIDE", "").strip() or saved_provider
 saved_planning_mode = str(project.get("planning_mode", "chapter") or "chapter").strip().lower() or "chapter"
 resolved_planning_mode = os.environ.get("NOVEL_PLANNING_MODE_OVERRIDE", "").strip() or saved_planning_mode
+saved_workflow_mode = str(project.get("workflow_mode") or saved.get("workflow_mode") or "classic").strip().lower() or "classic"
+resolved_workflow_mode = os.environ.get("NOVEL_WORKFLOW_MODE_OVERRIDE", "").strip() or saved_workflow_mode
 default_models = {
   "gemini": "gemini-3.1-pro-preview",
   "grok": "grok-4.20-beta-latest-reasoning",
@@ -330,6 +347,7 @@ api_base_override = os.environ.get("NOVEL_API_BASE_OVERRIDE", "").strip()
 
 data = {
   "planning_mode": resolved_planning_mode,
+  "workflow_mode": resolved_workflow_mode,
   "model_provider": resolved_provider,
   "model_name": model_name_override
   or (

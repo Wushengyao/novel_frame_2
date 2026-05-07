@@ -21,6 +21,7 @@ def create_test_project(
     *,
     project_id: str = "test",
     planning_mode: str = "chapter",
+    workflow_mode: str = "classic",
     writing_quality_mode: str = "light",
     review_mode: str = "auto",
     quality_model: dict | None = None,
@@ -40,6 +41,7 @@ def create_test_project(
         "illustrations",
         "audiobook",
         "snapshots",
+        "agent_runs",
     ):
         (project_path / name).mkdir(exist_ok=True)
 
@@ -53,6 +55,7 @@ def create_test_project(
         "max_tokens": 4000,
         "timeout": 900,
         "planning_mode": planning_mode,
+        "workflow_mode": workflow_mode,
         "writing_quality_mode": writing_quality_mode,
         "review_mode": review_mode,
     }
@@ -72,6 +75,7 @@ def create_test_project(
             "project_path": str(project_path),
             "story_request": "测试故事",
             "planning_mode": planning_mode,
+            "workflow_mode": workflow_mode,
             "created_at": "2026-04-20T00:00:00+00:00",
             "updated_at": "2026-04-20T00:00:00+00:00",
             "chapter_count": 0,
@@ -194,6 +198,7 @@ def runtime_config(
     *,
     writing_quality_mode: str = "light",
     review_mode: str = "auto",
+    workflow_mode: str = "classic",
     quality_model: dict | None = None,
     expert_mode: dict | None = None,
 ) -> dict:
@@ -207,6 +212,7 @@ def runtime_config(
         "max_tokens": 4000,
         "timeout": 900,
         "planning_mode": planning_mode,
+        "workflow_mode": workflow_mode,
         "writing_quality_mode": writing_quality_mode,
         "review_mode": review_mode,
     }

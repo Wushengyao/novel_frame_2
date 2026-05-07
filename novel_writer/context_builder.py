@@ -803,7 +803,7 @@ def _build_creative_contract_block(author_intent: dict, *, max_chars: int) -> st
         [intent.get("tone_contract", ""), *intent["voice_rules"], *intent["must_not_break"]]
     )
     if any(marker in adult_boundary_source for marker in ("成人", "暧昧", "黄段子", "露骨")):
-        boundary = "成人内容无限制"
+        boundary = "成人暧昧只写成年人之间的张力"
         if not any(_is_duplicateish(boundary, line) for line in lines):
             lines.append(f"边界: {boundary}")
     if intent.get("creativity_guidance"):

@@ -164,6 +164,7 @@ class ProjectManagerTests(unittest.TestCase):
                 "model_provider": "ollama",
                 "model_name": "llama3.2",
                 "api_key": "main-key",
+                "workflow_mode": "agentic",
                 "quality_model": {
                     "model_provider": "gemini",
                     "model_name": "gemini-2.5-pro",
@@ -190,6 +191,7 @@ class ProjectManagerTests(unittest.TestCase):
         )
 
         self.assertEqual(persisted["api_key"], "")
+        self.assertEqual(persisted["workflow_mode"], "agentic")
         self.assertEqual(persisted["quality_model"]["api_key"], "")
         self.assertEqual(persisted["quality_model"]["model_name"], "gemini-2.5-pro")
         self.assertEqual(persisted["quality_model"]["temperature"], 0.4)

@@ -6,6 +6,7 @@ import argparse
 import os
 import subprocess
 import sys
+from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
@@ -30,6 +31,13 @@ from audiobook_manager import (
     GENERATION_MODE_SIMPLE,
     chapter_refs_for_all,
     generate_audiobook_chapters,
+)
+from agent_runtime import SkillResult, WorkflowAgent
+from agent_workflows import (
+    generate_progression_options_agentic,
+    init_project_agentic,
+    regenerate_initial_project_agentic,
+    regenerate_outline_agentic,
 )
 from illustration_manager import illustrate_chapters, illustrate_project_assets
 from llm_client import generate_text_with_metadata, raise_if_llm_response_truncated
@@ -105,6 +113,7 @@ from runtime_config import (
 )
 from state_updater import update_plot_state
 from version import APP_NAME, DISPLAY_VERSION
+from workflow_modes import WORKFLOW_MODE_AGENTIC, normalize_workflow_mode
 
 
 def _add_illustration_arguments(parser: argparse.ArgumentParser) -> None:
@@ -490,6 +499,33 @@ def _emit_quality_review_status(
     )
 
 
+def _agent_skill_result(value=None, *, artifacts: dict[str, str] | None = None, message: str = "") -> SkillResult:
+    return SkillResult.ok(value=value, artifacts=artifacts or {}, message=message)
+
+
+def _agentic_enabled(config: dict) -> bool:
+    return normalize_workflow_mode(config.get("workflow_mode")) == WORKFLOW_MODE_AGENTIC
+
+
+def _agent_run_skill(
+    agent: WorkflowAgent | None,
+    skill_id: str,
+    func,
+    *,
+    inputs: dict[str, object] | None = None,
+    artifacts: dict[str, str] | None = None,
+    message: str = "",
+):
+    if agent is None:
+        return func()
+    result = agent.run_skill(
+        skill_id,
+        lambda: _agent_skill_result(func(), artifacts=artifacts, message=message),
+        inputs=inputs,
+    )
+    return result.value
+
+
 def run_next_chapter(
     project_path: str,
     config: dict,
@@ -500,6 +536,7 @@ def run_next_chapter(
     log_context: dict[str, object] | None = None,
     progress_callback=None,
     lock_project: bool = True,
+    agent: WorkflowAgent | None = None,
 ) -> str:
     if lock_project:
         with acquire_project_write_lock(project_path, owner="run_next_chapter"):
@@ -512,6 +549,7 @@ def run_next_chapter(
                 log_context=log_context,
                 progress_callback=progress_callback,
                 lock_project=False,
+                agent=agent,
             )
 
     config = dict(config)
@@ -521,18 +559,32 @@ def run_next_chapter(
     log_info(f"next_chapter: prepare project={project_path}")
     effective_mode = normalize_planning_mode(planning_mode or config.get("planning_mode"))
     emit_progress(progress_callback, "chapter_prepare", f"Preparing next chapter with planning mode: {effective_mode}")
-    project_data, next_context = get_next_context_for_mode(
-        project_path,
-        config,
-        effective_mode,
-        progress_callback=progress_callback,
+    project_data, next_context = _agent_run_skill(
+        agent,
+        "chapter.prepare_context",
+        lambda: get_next_context_for_mode(
+            project_path,
+            config,
+            effective_mode,
+            progress_callback=progress_callback,
+        ),
+        inputs={"project_path": str(Path(project_path).resolve()), "planning_mode": effective_mode},
+        artifacts={"task_cards": str(Path(project_path) / "task_cards")},
+        message="Next chapter context prepared",
     )
     current_chapter_count = int(project_data["project"].get("chapter_count", 0) or 0)
     emit_progress(progress_callback, "chapter_snapshot_prepare", "Saving pre-write snapshot")
-    ensure_state_snapshot(
-        project_path,
-        chapter_count=current_chapter_count,
-        note="pre-write checkpoint",
+    _agent_run_skill(
+        agent,
+        "chapter.snapshot_pre",
+        lambda: ensure_state_snapshot(
+            project_path,
+            chapter_count=current_chapter_count,
+            note="pre-write checkpoint",
+        ),
+        inputs={"project_path": str(Path(project_path).resolve()), "chapter_count": current_chapter_count},
+        artifacts={"snapshots": str(Path(project_path) / "snapshots")},
+        message="Pre-write snapshot saved",
     )
 
     if effective_mode == PLANNING_MODE_CHAPTER and chapter_outline_override:
@@ -583,12 +635,19 @@ def run_next_chapter(
         and current_chapter_count > 0
         and str((prompt_context.get("task_card") or {}).get("source", "") or "").strip() != "high_auto_plan"
     ):
-        high_plan_payload = generate_high_auto_plan(
-            project_path,
-            prompt_context,
-            config,
-            log_context=log_context_payload,
-            progress_callback=progress_callback,
+        high_plan_payload = _agent_run_skill(
+            agent,
+            "planning.high_auto_plan",
+            lambda: generate_high_auto_plan(
+                project_path,
+                prompt_context,
+                config,
+                log_context=log_context_payload,
+                progress_callback=progress_callback,
+            ),
+            inputs={"project_path": str(Path(project_path).resolve()), "target_chapter_number": target_chapter_number},
+            artifacts={"task_cards": str(Path(project_path) / "task_cards")},
+            message="High-quality automatic plan generated",
         )
         build_high_auto_plan_task_card(
             project_path,
@@ -610,12 +669,19 @@ def run_next_chapter(
             include_continuation_contract=True,
         )
     if quality_mode_uses_craft_brief(writing_quality_mode):
-        craft_brief = generate_craft_brief(
-            project_path,
-            prompt_context,
-            config,
-            log_context=log_context_payload,
-            progress_callback=progress_callback,
+        craft_brief = _agent_run_skill(
+            agent,
+            "quality.generate_craft_brief",
+            lambda: generate_craft_brief(
+                project_path,
+                prompt_context,
+                config,
+                log_context=log_context_payload,
+                progress_callback=progress_callback,
+            ),
+            inputs={"project_path": str(Path(project_path).resolve()), "target_chapter_number": target_chapter_number},
+            artifacts={"craft_briefs": str(Path(project_path) / "craft_briefs")},
+            message="Craft brief generated",
         )
         prompt_context = build_writer_context(
             project_path,
@@ -646,42 +712,56 @@ def run_next_chapter(
     response_text = ""
     metadata = {}
     last_writer_error = None
-    for request_attempt in range(1, 3):
-        writer_log_context = dict(log_context_payload)
-        writer_log_context["writer_request_attempt"] = request_attempt
-        try:
-            log_info(f"next_chapter: requesting model output attempt={request_attempt}")
-            message = "Generating chapter text"
-            if request_attempt > 1:
-                message += " retry"
-            emit_progress(progress_callback, "chapter_write", message)
-            response_text, metadata = generate_text_with_metadata(
-                prompt,
-                config,
-                log_context=writer_log_context,
-                system_prompt=build_system_prompt("writer"),
-            )
-            if not str(response_text or "").strip():
-                raise RuntimeError("writer response is empty")
-            raise_if_llm_response_truncated(metadata, phase="writer")
-            break
-        except Exception as exc:
-            response_text = ""
-            update_project_stats(
-                project_path,
-                phase="writer",
-                success=False,
-                usage=None,
-                chapter_number=int(target_chapter_number),
-            )
-            last_writer_error = exc
-            log_warning(f"next_chapter: writer request failed attempt={request_attempt}, reason={exc}")
+    draft_context = (
+        agent.skill(
+            "chapter.generate_draft",
+            inputs={"target_chapter_number": target_chapter_number, "prompt_chars": len(prompt)},
+        )
+        if agent is not None
+        else nullcontext(None)
+    )
+    with draft_context as draft_trace:
+        for request_attempt in range(1, 3):
+            writer_log_context = dict(log_context_payload)
+            writer_log_context["writer_request_attempt"] = request_attempt
+            try:
+                log_info(f"next_chapter: requesting model output attempt={request_attempt}")
+                message = "Generating chapter text"
+                if request_attempt > 1:
+                    message += " retry"
+                emit_progress(progress_callback, "chapter_write", message)
+                response_text, metadata = generate_text_with_metadata(
+                    prompt,
+                    config,
+                    log_context=writer_log_context,
+                    system_prompt=build_system_prompt("writer"),
+                )
+                if not str(response_text or "").strip():
+                    raise RuntimeError("writer response is empty")
+                raise_if_llm_response_truncated(metadata, phase="writer")
+                break
+            except Exception as exc:
+                response_text = ""
+                update_project_stats(
+                    project_path,
+                    phase="writer",
+                    success=False,
+                    usage=None,
+                    chapter_number=int(target_chapter_number),
+                )
+                last_writer_error = exc
+                log_warning(f"next_chapter: writer request failed attempt={request_attempt}, reason={exc}")
 
-    if not response_text:
-        log_error("next_chapter: writer request failed after retry")
-        if last_writer_error is not None:
-            raise last_writer_error
-        raise RuntimeError("writer request returned empty response")
+        if not response_text:
+            log_error("next_chapter: writer request failed after retry")
+            if last_writer_error is not None:
+                raise last_writer_error
+            raise RuntimeError("writer request returned empty response")
+        if draft_trace is not None:
+            draft_trace.set_result(
+                message="Chapter draft generated",
+                usage_delta=metadata.get("usage") if isinstance(metadata, dict) else {},
+            )
 
     update_project_stats(
         project_path,
@@ -699,15 +779,26 @@ def run_next_chapter(
         rewrite_limit = quality_mode_rewrite_limit(writing_quality_mode) if rewrite_allowed else 0
         review_attempt = 1
         completed_rewrites = 0
-        review = review_chapter_draft(
-            project_path,
-            prompt_context,
-            chapter_text,
-            config,
-            attempt=review_attempt,
-            strict=writing_quality_mode == WRITING_QUALITY_HIGH,
-            log_context=log_context_payload,
-            progress_callback=progress_callback,
+        review = _agent_run_skill(
+            agent,
+            "quality.review_draft",
+            lambda: review_chapter_draft(
+                project_path,
+                prompt_context,
+                chapter_text,
+                config,
+                attempt=review_attempt,
+                strict=writing_quality_mode == WRITING_QUALITY_HIGH,
+                log_context=log_context_payload,
+                progress_callback=progress_callback,
+            ),
+            inputs={
+                "project_path": str(Path(project_path).resolve()),
+                "target_chapter_number": target_chapter_number,
+                "review_attempt": review_attempt,
+            },
+            artifacts={"quality_reviews": str(Path(project_path) / "quality_reviews")},
+            message=f"Quality review {review_attempt} completed",
         )
         while True:
             review_needs_rewrite = (
@@ -776,14 +867,25 @@ def run_next_chapter(
                         "source_review_attempt": review_attempt,
                     },
                 )
-                rewritten_text = rewrite_chapter_draft(
-                    project_path,
-                    prompt_context,
-                    chapter_text,
-                    review,
-                    config,
-                    log_context=log_context_payload,
-                    progress_callback=progress_callback,
+                rewritten_text = _agent_run_skill(
+                    agent,
+                    "quality.rewrite_draft",
+                    lambda: rewrite_chapter_draft(
+                        project_path,
+                        prompt_context,
+                        chapter_text,
+                        review,
+                        config,
+                        log_context=log_context_payload,
+                        progress_callback=progress_callback,
+                    ),
+                    inputs={
+                        "project_path": str(Path(project_path).resolve()),
+                        "target_chapter_number": target_chapter_number,
+                        "rewrite_attempt": rewrite_attempt,
+                    },
+                    artifacts={"quality_drafts": str(Path(project_path) / "quality_drafts")},
+                    message=f"Rewrite {rewrite_attempt} completed",
                 )
             except Exception as exc:
                 if pre_rewrite_path is not None:
@@ -820,15 +922,27 @@ def run_next_chapter(
                 )
                 try:
                     review_attempt += 1
-                    review = review_chapter_draft(
-                        project_path,
-                        prompt_context,
-                        chapter_text,
-                        config,
-                        attempt=review_attempt,
-                        strict=True,
-                        log_context=log_context_payload,
-                        progress_callback=progress_callback,
+                    review = _agent_run_skill(
+                        agent,
+                        "quality.review_draft",
+                        lambda: review_chapter_draft(
+                            project_path,
+                            prompt_context,
+                            chapter_text,
+                            config,
+                            attempt=review_attempt,
+                            strict=True,
+                            log_context=log_context_payload,
+                            progress_callback=progress_callback,
+                        ),
+                        inputs={
+                            "project_path": str(Path(project_path).resolve()),
+                            "target_chapter_number": target_chapter_number,
+                            "review_attempt": review_attempt,
+                            "after_rewrite": True,
+                        },
+                        artifacts={"quality_reviews": str(Path(project_path) / "quality_reviews")},
+                        message=f"Quality review {review_attempt} completed",
                     )
                 except Exception as exc:  # pragma: no cover - keep rewritten draft if post-review persistence fails
                     log_warning(f"post_rewrite_review: failed; keeping rewritten draft. reason={exc}")
@@ -845,27 +959,54 @@ def run_next_chapter(
                     )
                     break
     emit_progress(progress_callback, "chapter_save", "Saving chapter file")
-    chapter_path = save_chapter(
-        project_path,
-        chapter_text,
-        chapter_title=chapter_title,
-        chapter_number=int(target_chapter_number),
+    chapter_path = _agent_run_skill(
+        agent,
+        "chapter.save",
+        lambda: save_chapter(
+            project_path,
+            chapter_text,
+            chapter_title=chapter_title,
+            chapter_number=int(target_chapter_number),
+        ),
+        inputs={"project_path": str(Path(project_path).resolve()), "chapter_number": int(target_chapter_number)},
+        artifacts={"chapters": str(Path(project_path) / "chapters")},
+        message="Chapter saved",
     )
     log_success(f"next_chapter: saved to {chapter_path}")
 
     log_info("next_chapter: updating plot_state")
     emit_progress(progress_callback, "chapter_summary", "Updating plot state")
-    update_plot_state(
-        project_path,
-        chapter_text,
-        config,
-        progress_callback=progress_callback,
-        log_context=log_context_payload,
+    _agent_run_skill(
+        agent,
+        "state.update_plot_state",
+        lambda: update_plot_state(
+            project_path,
+            chapter_text,
+            config,
+            progress_callback=progress_callback,
+            log_context=log_context_payload,
+        ),
+        inputs={"project_path": str(Path(project_path).resolve()), "chapter_number": int(target_chapter_number)},
+        artifacts={
+            "plot_state": str(Path(project_path) / "plot_state.json"),
+            "summaries": str(Path(project_path) / "summaries"),
+        },
+        message="Plot state updated",
     )
     if effective_mode != PLANNING_MODE_NONE:
         log_info("next_chapter: syncing outline progress")
         emit_progress(progress_callback, "chapter_outline_sync", "Syncing outline progress")
-        sync_outline_progress(project_path)
+        _agent_run_skill(
+            agent,
+            "outline.sync_progress",
+            lambda: sync_outline_progress(project_path),
+            inputs={"project_path": str(Path(project_path).resolve())},
+            artifacts={
+                "outlines": str(Path(project_path) / "outlines.json"),
+                "plot_state": str(Path(project_path) / "plot_state.json"),
+            },
+            message="Outline progress synced",
+        )
 
     if expert_mode_enabled(config):
         try:
@@ -873,16 +1014,34 @@ def run_next_chapter(
         except (IndexError, ValueError):
             saved_chapter_number = int(target_chapter_number or current_chapter_count + 1)
         log_info("next_chapter: running expert diagnostic review")
-        run_expert_review_for_chapter(
-            project_path,
-            saved_chapter_number,
-            workflow_id,
-            config,
-            progress_callback=progress_callback,
+        _agent_run_skill(
+            agent,
+            "expert.review",
+            lambda: run_expert_review_for_chapter(
+                project_path,
+                saved_chapter_number,
+                workflow_id,
+                config,
+                progress_callback=progress_callback,
+            ),
+            inputs={
+                "project_path": str(Path(project_path).resolve()),
+                "chapter_number": saved_chapter_number,
+                "workflow_id": workflow_id,
+            },
+            artifacts={"expert_reviews": str(Path(project_path) / "expert_reviews")},
+            message="Expert review completed",
         )
 
     emit_progress(progress_callback, "chapter_snapshot", "Saving post-write snapshot")
-    snapshot_path = create_state_snapshot(project_path, note="post-write checkpoint")
+    snapshot_path = _agent_run_skill(
+        agent,
+        "snapshot.create_post",
+        lambda: create_state_snapshot(project_path, note="post-write checkpoint"),
+        inputs={"project_path": str(Path(project_path).resolve()), "chapter_number": int(target_chapter_number)},
+        artifacts={"snapshots": str(Path(project_path) / "snapshots")},
+        message="Post-write snapshot saved",
+    )
     log_success(f"next_chapter: snapshot saved to {snapshot_path}")
     emit_progress(progress_callback, "chapter_done", f"Chapter completed: {Path(chapter_path).name}")
     return chapter_path
@@ -897,6 +1056,7 @@ def run_next_chapter_from_progression(
     progression_feedback: str = "",
     progress_callback=None,
     lock_project: bool = True,
+    agent: WorkflowAgent | None = None,
 ) -> str:
     if lock_project:
         with acquire_project_write_lock(project_path, owner="run_next_chapter_from_progression"):
@@ -908,13 +1068,28 @@ def run_next_chapter_from_progression(
                 progression_feedback=progression_feedback,
                 progress_callback=progress_callback,
                 lock_project=False,
+                agent=agent,
             )
 
-    selection = resolve_progression_selection(
-        project_path,
-        progression_session,
-        progression_option,
-        selection_feedback=progression_feedback,
+    selection = _agent_run_skill(
+        agent,
+        "progression.select_option",
+        lambda: resolve_progression_selection(
+            project_path,
+            progression_session,
+            progression_option,
+            selection_feedback=progression_feedback,
+        ),
+        inputs={
+            "project_path": str(Path(project_path).resolve()),
+            "session_id": progression_session,
+            "option_id": progression_option,
+        },
+        artifacts={
+            "task_cards": str(Path(project_path) / "task_cards"),
+            "outlines": str(Path(project_path) / "outlines.json"),
+        },
+        message="Progression option selected",
     )
     return run_next_chapter(
         project_path,
@@ -932,6 +1107,7 @@ def run_next_chapter_from_progression(
         },
         progress_callback=progress_callback,
         lock_project=False,
+        agent=agent,
     )
 
 
@@ -945,6 +1121,7 @@ def run_next_chapters(
     runtime_overrides: dict | None = None,
     progress_callback=None,
     lock_project: bool = True,
+    agent: WorkflowAgent | None = None,
 ) -> list[str]:
     if count < 1:
         raise ValueError("count must be at least 1.")
@@ -960,6 +1137,7 @@ def run_next_chapters(
                 runtime_overrides=runtime_overrides,
                 progress_callback=progress_callback,
                 lock_project=False,
+                agent=agent,
             )
 
     chapter_paths = []
@@ -974,29 +1152,62 @@ def run_next_chapters(
         planning_mode = normalize_planning_mode(config.get("planning_mode"))
         objective_override = ""
         if planning_mode == PLANNING_MODE_NONE:
-            objective_override = generate_auto_chapter_objective(
+            objective_override = _agent_run_skill(
+                agent,
+                "progression.generate_options",
+                lambda: generate_auto_chapter_objective(
+                    project_path,
+                    config,
+                    user_request=user_request,
+                    progress_callback=progress_callback,
+                ),
+                inputs={"project_path": str(Path(project_path).resolve()), "mode": "auto_objective"},
+                artifacts={"task_cards": str(Path(project_path) / "task_cards")},
+                message="Automatic chapter objective generated",
+            )
+        session = _agent_run_skill(
+            agent,
+            "progression.generate_options",
+            lambda: generate_progression_options(
                 project_path,
                 config,
                 user_request=user_request,
+                objective_override=objective_override,
+                option_count=1 if normalized_selection_mode == SELECTION_MODE_SINGLE else DEFAULT_OPTION_COUNT,
+                runtime_overrides=runtime_overrides,
                 progress_callback=progress_callback,
-            )
-        session = generate_progression_options(
-            project_path,
-            config,
-            user_request=user_request,
-            objective_override=objective_override,
-            option_count=1 if normalized_selection_mode == SELECTION_MODE_SINGLE else DEFAULT_OPTION_COUNT,
-            runtime_overrides=runtime_overrides,
-            progress_callback=progress_callback,
+            ),
+            inputs={
+                "project_path": str(Path(project_path).resolve()),
+                "selection_mode": normalized_selection_mode,
+                "option_count": 1 if normalized_selection_mode == SELECTION_MODE_SINGLE else DEFAULT_OPTION_COUNT,
+            },
+            artifacts={"progression_sessions": str(Path(project_path) / "progression_sessions")},
+            message="Progression options generated",
         )
         option_ref = auto_select_progression_option(session, normalized_selection_mode)
-        selection = resolve_progression_selection(
-            project_path,
-            str(session.get("session_id", "") or "").strip(),
-            option_ref,
-            selection_mode=normalized_selection_mode,
-            selection_origin="auto",
-            auto_batch_request=user_request,
+        selection = _agent_run_skill(
+            agent,
+            "progression.select_option",
+            lambda: resolve_progression_selection(
+                project_path,
+                str(session.get("session_id", "") or "").strip(),
+                option_ref,
+                selection_mode=normalized_selection_mode,
+                selection_origin="auto",
+                auto_batch_request=user_request,
+            ),
+            inputs={
+                "project_path": str(Path(project_path).resolve()),
+                "session_id": str(session.get("session_id", "") or "").strip(),
+                "option_id": option_ref,
+                "selection_mode": normalized_selection_mode,
+            },
+            artifacts={
+                "task_cards": str(Path(project_path) / "task_cards"),
+                "outlines": str(Path(project_path) / "outlines.json"),
+            },
+            message="Progression option selected",
         )
         chapter_paths.append(
             run_next_chapter(
@@ -1015,6 +1226,7 @@ def run_next_chapters(
                 },
                 progress_callback=progress_callback,
                 lock_project=False,
+                agent=agent,
             )
         )
         emit_progress(
@@ -1025,6 +1237,148 @@ def run_next_chapters(
             total=count,
         )
     return chapter_paths
+
+
+def run_next_chapter_agentic(
+    project_path: str,
+    config: dict,
+    user_request: str = "",
+    *,
+    chapter_outline_override: dict | None = None,
+    planning_mode: str | None = None,
+    log_context: dict[str, object] | None = None,
+    progress_callback=None,
+    lock_project: bool = True,
+) -> str:
+    if lock_project:
+        with acquire_project_write_lock(project_path, owner="run_next_chapter_agentic"):
+            return run_next_chapter_agentic(
+                project_path,
+                config,
+                user_request=user_request,
+                chapter_outline_override=chapter_outline_override,
+                planning_mode=planning_mode,
+                log_context=log_context,
+                progress_callback=progress_callback,
+                lock_project=False,
+            )
+    agent = WorkflowAgent(
+        project_path,
+        "next_chapter",
+        workflow_id=str((log_context or {}).get("workflow_id") or ""),
+        progress_callback=progress_callback,
+    )
+    agent_log_context = dict(log_context or {})
+    agent_log_context["workflow_id"] = agent.workflow_id
+    try:
+        chapter_path = run_next_chapter(
+            project_path,
+            config,
+            user_request=user_request,
+            chapter_outline_override=chapter_outline_override,
+            planning_mode=planning_mode,
+            log_context=agent_log_context,
+            progress_callback=progress_callback,
+            lock_project=False,
+            agent=agent,
+        )
+        agent.finish_success(
+            message="Next chapter completed",
+            artifacts={"chapter": str(chapter_path)},
+        )
+        return chapter_path
+    except Exception as exc:
+        agent.finish_failure(exc)
+        raise
+
+
+def run_next_chapter_from_progression_agentic(
+    project_path: str,
+    config: dict,
+    *,
+    progression_session: str,
+    progression_option: str,
+    progression_feedback: str = "",
+    progress_callback=None,
+    lock_project: bool = True,
+) -> str:
+    if lock_project:
+        with acquire_project_write_lock(project_path, owner="run_next_chapter_from_progression_agentic"):
+            return run_next_chapter_from_progression_agentic(
+                project_path,
+                config,
+                progression_session=progression_session,
+                progression_option=progression_option,
+                progression_feedback=progression_feedback,
+                progress_callback=progress_callback,
+                lock_project=False,
+            )
+    agent = WorkflowAgent(project_path, "guided_next_chapter", progress_callback=progress_callback)
+    try:
+        chapter_path = run_next_chapter_from_progression(
+            project_path,
+            config,
+            progression_session=progression_session,
+            progression_option=progression_option,
+            progression_feedback=progression_feedback,
+            progress_callback=progress_callback,
+            lock_project=False,
+            agent=agent,
+        )
+        agent.finish_success(
+            message="Guided next chapter completed",
+            artifacts={"chapter": str(chapter_path)},
+        )
+        return chapter_path
+    except Exception as exc:
+        agent.finish_failure(exc)
+        raise
+
+
+def run_next_chapters_agentic(
+    project_path: str,
+    config: dict,
+    count: int,
+    user_request: str = "",
+    *,
+    selection_mode: str = SELECTION_MODE_RECOMMENDED,
+    runtime_overrides: dict | None = None,
+    progress_callback=None,
+    lock_project: bool = True,
+) -> list[str]:
+    if lock_project:
+        with acquire_project_write_lock(project_path, owner="run_next_chapters_agentic"):
+            return run_next_chapters_agentic(
+                project_path,
+                config,
+                count,
+                user_request=user_request,
+                selection_mode=selection_mode,
+                runtime_overrides=runtime_overrides,
+                progress_callback=progress_callback,
+                lock_project=False,
+            )
+    agent = WorkflowAgent(project_path, "next_chapters", progress_callback=progress_callback)
+    try:
+        chapter_paths = run_next_chapters(
+            project_path,
+            config,
+            count,
+            user_request=user_request,
+            selection_mode=selection_mode,
+            runtime_overrides=runtime_overrides,
+            progress_callback=progress_callback,
+            lock_project=False,
+            agent=agent,
+        )
+        agent.finish_success(
+            message=f"Generated {len(chapter_paths)} chapter(s)",
+            artifacts={f"chapter_{index}": str(path) for index, path in enumerate(chapter_paths, start=1)},
+        )
+        return chapter_paths
+    except Exception as exc:
+        agent.finish_failure(exc)
+        raise
 
 
 def _print_status(project_path: str) -> None:
@@ -1067,6 +1421,10 @@ def _print_status(project_path: str) -> None:
     print(f"Expert Mode: {'enabled' if expert_mode_enabled(llm_config) else 'disabled'}")
     print(f"Expert Models: {len(expert_models) if expert_models else 'inherit'}")
     print(f"Planning Mode: {normalize_planning_mode(project.get('planning_mode'))}")
+    print(
+        "Workflow Mode: "
+        f"{normalize_workflow_mode(project.get('workflow_mode') or llm_config.get('workflow_mode'))}"
+    )
     print(f"Writing Quality Mode: {llm_config.get('writing_quality_mode', 'balanced')}")
     print(f"Review Mode: {llm_config.get('review_mode', 'auto')}")
     print(
@@ -1148,6 +1506,7 @@ def main() -> None:
     )
     regenerate_init_parser.add_argument("--project", required=True, help="Path to novel_project")
     regenerate_init_parser.add_argument("--config", help="Optional config.json with runtime credentials")
+    regenerate_init_parser.add_argument("--workflow-mode", choices=("classic", "agentic"), help="Override workflow mode for this run")
 
     next_parser = subparsers.add_parser("next", help="Generate the next chapter")
     next_parser.add_argument("--project", required=True, help="Path to novel_project")
@@ -1178,6 +1537,7 @@ def main() -> None:
         choices=tuple(sorted(REVIEW_MODES)),
         help="Override quality review behavior for this run",
     )
+    next_parser.add_argument("--workflow-mode", choices=("classic", "agentic"), help="Override workflow mode for this run")
     next_parser.add_argument("--quality-provider", help="Override provider for craft brief/review/rewrite")
     next_parser.add_argument("--quality-model", help="Override model name for craft brief/review/rewrite")
     next_parser.add_argument("--quality-api-base", help="Override API base for craft brief/review/rewrite")
@@ -1268,6 +1628,7 @@ def main() -> None:
     )
     outline_parser.add_argument("--volume", type=int, help="Optional volume number for chapter outline generation")
     outline_parser.add_argument("--user-request", default="", help="Optional extra plot requirements")
+    outline_parser.add_argument("--workflow-mode", choices=("classic", "agentic"), help="Override workflow mode for this run")
 
     options_parser = subparsers.add_parser("options", help="Generate guided next-chapter progression options")
     options_parser.add_argument("--project", required=True, help="Path to novel_project")
@@ -1280,6 +1641,7 @@ def main() -> None:
         choices=(PLANNING_MODE_NONE, PLANNING_MODE_VOLUME, PLANNING_MODE_CHAPTER),
         help="Override planning mode for this run",
     )
+    options_parser.add_argument("--workflow-mode", choices=("classic", "agentic"), help="Override workflow mode for this run")
 
     export_parser = subparsers.add_parser("export", help="Export a complete novel project ZIP archive")
     export_parser.add_argument("--project", required=True, help="Path to novel_project")
@@ -1297,7 +1659,12 @@ def main() -> None:
 
     if args.command == "init":
         log_info("cli: init")
-        project_path = init_project(args.config)
+        init_config = extract_llm_config(args.config)
+        project_path = (
+            init_project_agentic(args.config)
+            if _agentic_enabled(init_config)
+            else init_project(args.config)
+        )
         print(f"Project initialized: {project_path}")
         return
 
@@ -1305,7 +1672,13 @@ def main() -> None:
         log_info("cli: regenerate-init")
         config = extract_llm_config(args.config) if args.config else load_runtime_config(args.project)
         config["project_path"] = str(Path(args.project).resolve())
-        result = regenerate_initial_project(args.project, config)
+        if args.workflow_mode:
+            config["workflow_mode"] = args.workflow_mode
+        result = (
+            regenerate_initial_project_agentic(args.project, config)
+            if _agentic_enabled(config)
+            else regenerate_initial_project(args.project, config)
+        )
         print(f"Initial settings regenerated: {result.get('project_path', '')}")
         print(f"Project ID: {result.get('project_id', '')}")
         print(f"Snapshot: {result.get('snapshot_path', '')}")
@@ -1350,6 +1723,8 @@ def main() -> None:
         config["project_path"] = str(Path(args.project).resolve())
         if args.planning_mode:
             config["planning_mode"] = args.planning_mode
+        if args.workflow_mode:
+            config["workflow_mode"] = args.workflow_mode
         if args.writing_quality_mode:
             config["writing_quality_mode"] = args.writing_quality_mode
         if args.review_mode:
@@ -1368,6 +1743,7 @@ def main() -> None:
             key: value
             for key, value in {
                 "planning_mode": args.planning_mode,
+                "workflow_mode": args.workflow_mode,
                 "writing_quality_mode": args.writing_quality_mode,
                 "review_mode": args.review_mode,
             }.items()
@@ -1379,7 +1755,11 @@ def main() -> None:
             runtime_overrides["expert_mode"] = expert_overrides["expert_mode"]
         if has_progression:
             chapter_paths = [
-                run_next_chapter_from_progression(
+                (
+                    run_next_chapter_from_progression_agentic
+                    if _agentic_enabled(config)
+                    else run_next_chapter_from_progression
+                )(
                     args.project,
                     config,
                     progression_session=args.progression_session,
@@ -1388,7 +1768,11 @@ def main() -> None:
                 )
             ]
         else:
-            chapter_paths = run_next_chapters(
+            chapter_paths = (
+                run_next_chapters_agentic
+                if _agentic_enabled(config)
+                else run_next_chapters
+            )(
                 args.project,
                 config,
                 args.count,
@@ -1547,22 +1931,40 @@ def main() -> None:
     if args.command == "outline":
         log_info(f"cli: outline stage={args.stage}")
         config = extract_llm_config(args.config) if args.config else load_runtime_config(args.project)
-        if args.stage in {"volumes", "all"}:
-            outlines = regenerate_volume_outline(
+        if args.workflow_mode:
+            config["workflow_mode"] = args.workflow_mode
+        if _agentic_enabled(config):
+            outlines = regenerate_outline_agentic(
                 args.project,
                 config,
+                stage=args.stage,
+                volume_number=args.volume,
                 user_request=args.user_request,
             )
-            print(f"Volume outlines generated: {len(outlines.get('volumes', []))}")
+            if args.stage in {"volumes", "all"}:
+                print(f"Volume outlines generated: {len(outlines.get('volumes', []))}")
+            if args.stage in {"chapters", "all"}:
+                target = f"volume {args.volume}" if args.volume else "all volumes"
+                print(f"Chapter outlines generated for {target}")
+        else:
+            if args.stage in {"volumes", "all"}:
+                outlines = regenerate_volume_outline(
+                    args.project,
+                    config,
+                    user_request=args.user_request,
+                )
+                print(f"Volume outlines generated: {len(outlines.get('volumes', []))}")
+            if args.stage in {"chapters", "all"}:
+                outlines = regenerate_chapter_outline(
+                    args.project,
+                    config,
+                    volume_number=args.volume if args.stage == "chapters" else None,
+                    user_request=args.user_request,
+                )
+                target = f"volume {args.volume}" if args.volume else "all volumes"
+                print(f"Chapter outlines generated for {target}")
         if args.stage in {"chapters", "all"}:
-            outlines = regenerate_chapter_outline(
-                args.project,
-                config,
-                volume_number=args.volume if args.stage == "chapters" else None,
-                user_request=args.user_request,
-            )
             target = f"volume {args.volume}" if args.volume else "all volumes"
-            print(f"Chapter outlines generated for {target}")
             next_context = find_next_chapter_context(
                 outlines,
                 int(load_project(args.project)["project"].get("chapter_count", 0) or 0),
@@ -1582,13 +1984,24 @@ def main() -> None:
         config = extract_llm_config(args.config) if args.config else load_runtime_config(args.project)
         if args.planning_mode:
             config["planning_mode"] = args.planning_mode
-        session = generate_progression_options(
+        if args.workflow_mode:
+            config["workflow_mode"] = args.workflow_mode
+        options_runtime_overrides = {}
+        if args.planning_mode:
+            options_runtime_overrides["planning_mode"] = args.planning_mode
+        if config.get("workflow_mode"):
+            options_runtime_overrides["workflow_mode"] = normalize_workflow_mode(config.get("workflow_mode"))
+        session = (
+            generate_progression_options_agentic
+            if _agentic_enabled(config)
+            else generate_progression_options
+        )(
             args.project,
             config,
             objective_override=args.objective,
             user_request=args.user_request,
             option_count=args.option_count,
-            runtime_overrides={"planning_mode": args.planning_mode} if args.planning_mode else None,
+            runtime_overrides=options_runtime_overrides or None,
         )
         print(f"Session ID: {session.get('session_id', '')}")
         print(f"Target Chapter: {session.get('target_chapter_number', '')}")

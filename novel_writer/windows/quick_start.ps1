@@ -4,6 +4,7 @@
 	[string]$ProjectName = "",
 	[string]$ProjectDescription = "",
 	[string]$PlanningMode = "chapter",
+	[string]$WorkflowMode = "classic",
 	[bool]$AutoCreateCoverAndPortraits = $true
 )
 
@@ -28,6 +29,7 @@ $DefaultTemperature = "1.0"
 $DefaultMaxTokens = "10240"
 $DefaultTimeout = ""
 $DefaultPlanningMode = "chapter"
+$DefaultWorkflowMode = "classic"
 $DefaultQualityProvider = ""
 $DefaultQualityModelName = ""
 $DefaultQualityApiBase = ""
@@ -66,8 +68,13 @@ if (-not $PSBoundParameters.ContainsKey("PlanningMode")) {
 }
 $PlanningMode = Normalize-PlanningMode $PlanningMode
 
+if (-not $PSBoundParameters.ContainsKey("WorkflowMode")) {
+	$WorkflowMode = Prompt-OptionalValue -PromptText "Workflow mode (classic/agentic)" -DefaultValue $DefaultWorkflowMode
+}
+$WorkflowMode = Normalize-WorkflowMode $WorkflowMode
+
 if ([string]::IsNullOrWhiteSpace($StoryRequest)) {
-	throw "Usage: .\windows\quick_start.ps1 <provider> <story request> [project name] [project description]"
+	throw "Usage: .\windows\quick_start.ps1 <provider> <story request> [project name] [project description] [planning mode] [workflow mode]"
 }
 
 $pythonExe = Resolve-PythonExe
@@ -112,6 +119,7 @@ try {
 		-MaxTokens $maxTokens `
 		-Timeout $timeout `
 		-PlanningMode $PlanningMode `
+		-WorkflowMode $WorkflowMode `
 		-QualityProvider $qualityProvider `
 		-QualityModelName $qualityModelName `
 		-QualityApiBase $qualityApiBase `

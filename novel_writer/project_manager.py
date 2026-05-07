@@ -18,6 +18,7 @@ from console_logger import log_error, log_info, log_success, log_warning
 from llm_client import generate_text_with_metadata
 from pricing import estimate_llm_cost
 from prompt_builder import build_init_prompt, build_story_setup_prompt, build_system_prompt
+from workflow_modes import DEFAULT_WORKFLOW_MODE, normalize_workflow_mode
 
 
 EMPTY_WORLD = {
@@ -173,6 +174,7 @@ PROJECT_STANDARD_DIRS = (
     "illustrations",
     "audiobook",
     "snapshots",
+    "agent_runs",
     "progression_sessions",
     "polish_backups",
     "llm_logs",
@@ -948,6 +950,7 @@ def _build_llm_config(config: dict) -> dict:
         "max_tokens": config.get("max_tokens", 4000),
         "timeout": config.get("timeout", 120),
         "planning_mode": normalize_planning_mode(config.get("planning_mode")),
+        "workflow_mode": normalize_workflow_mode(config.get("workflow_mode")),
         "writing_quality_mode": config.get("writing_quality_mode", "balanced"),
         "review_mode": config.get("review_mode", "auto"),
         "log_llm_payload": _coerce_config_bool(config.get("log_llm_payload")) or expert_enabled,
@@ -1946,6 +1949,7 @@ def init_project(config_path: str, progress_callback=None) -> str:
         "project_path": str(project_path),
         "story_request": config.get("story_request", ""),
         "planning_mode": normalize_planning_mode(config.get("planning_mode")),
+        "workflow_mode": normalize_workflow_mode(config.get("workflow_mode")),
         "created_at": utc_now(),
         "updated_at": utc_now(),
         "chapter_count": 0,
@@ -2059,6 +2063,11 @@ def regenerate_initial_project(project_path: str, config: dict | None = None, pr
                 "init_with_llm": True,
                 "story_request": project.get("story_request", ""),
                 "planning_mode": normalize_planning_mode(project.get("planning_mode")),
+                "workflow_mode": normalize_workflow_mode(
+                    init_config.get("workflow_mode")
+                    or project.get("workflow_mode")
+                    or DEFAULT_WORKFLOW_MODE
+                ),
             }
         )
         if _expert_mode_enabled(init_config):
@@ -2106,6 +2115,7 @@ def regenerate_initial_project(project_path: str, config: dict | None = None, pr
             "project_path": str(base),
             "story_request": init_config.get("story_request", ""),
             "planning_mode": normalize_planning_mode(init_config.get("planning_mode")),
+            "workflow_mode": normalize_workflow_mode(init_config.get("workflow_mode")),
             "created_at": project.get("created_at") or utc_now(),
             "updated_at": utc_now(),
             "chapter_count": 0,

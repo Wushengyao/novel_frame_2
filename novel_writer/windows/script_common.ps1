@@ -214,6 +214,18 @@ function Normalize-PlanningMode {
 	}
 }
 
+function Normalize-WorkflowMode {
+	param([string]$Mode)
+
+	$normalizedMode = if ($null -eq $Mode) { "" } else { $Mode }
+	switch ($normalizedMode.Trim().ToLowerInvariant()) {
+		"classic" { return "classic" }
+		"agentic" { return "agentic" }
+		"" { return "classic" }
+		default { throw "Unsupported workflow mode: $Mode (allowed: classic / agentic)" }
+	}
+}
+
 function Get-ApiKeyForProvider {
 	param(
 		[string]$Provider,
@@ -372,6 +384,7 @@ function Write-InitConfig {
 		[int]$MaxTokens,
 		[int]$Timeout,
 		[string]$PlanningMode = "chapter",
+		[string]$WorkflowMode = "classic",
 		[string]$QualityProvider = "",
 		[string]$QualityModelName = "",
 		[string]$QualityApiBase = "",
@@ -393,6 +406,7 @@ function Write-InitConfig {
 		init_with_llm = $true
 		story_request = $StoryRequest
 		planning_mode = (Normalize-PlanningMode $PlanningMode)
+		workflow_mode = (Normalize-WorkflowMode $WorkflowMode)
 		model_provider = $Provider
 		model_name = $ModelName
 		api_base = $ApiBase
@@ -429,6 +443,7 @@ function Write-ContinueConfig {
 		[string]$MaxTokensOverride = "",
 		[string]$TimeoutOverride = "",
 		[string]$PlanningModeOverride = "",
+		[string]$WorkflowModeOverride = "",
 		[string]$QualityProviderOverride = "",
 		[string]$QualityModelNameOverride = "",
 		[string]$QualityApiBaseOverride = "",
@@ -497,6 +512,18 @@ function Write-ContinueConfig {
 	else {
 		"chapter"
 	}
+	$workflowMode = if ($WorkflowModeOverride) {
+		Normalize-WorkflowMode $WorkflowModeOverride
+	}
+	elseif ($project.workflow_mode) {
+		Normalize-WorkflowMode "$($project.workflow_mode)"
+	}
+	elseif ($saved.workflow_mode) {
+		Normalize-WorkflowMode "$($saved.workflow_mode)"
+	}
+	else {
+		"classic"
+	}
 
 	$config = [ordered]@{
 		model_provider = $resolvedProvider
@@ -507,6 +534,7 @@ function Write-ContinueConfig {
 		max_tokens = $maxTokens
 		timeout = $timeout
 		planning_mode = $planningMode
+		workflow_mode = $workflowMode
 	}
 	$qualityModel = [ordered]@{}
 	if ($saved.quality_model) {

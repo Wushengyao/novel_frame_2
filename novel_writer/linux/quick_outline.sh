@@ -15,6 +15,7 @@ DEFAULT_STAGE="all"
 DEFAULT_USER_REQUEST=""
 DEFAULT_VOLUME_NUMBER=""
 DEFAULT_PROVIDER_OVERRIDE=""
+DEFAULT_WORKFLOW_MODE_OVERRIDE=""
 
 # Optional runtime overrides
 DEFAULT_MODEL_NAME_OVERRIDE=""
@@ -59,8 +60,17 @@ else
   PROVIDER_OVERRIDE="${5:-$DEFAULT_PROVIDER_OVERRIDE}"
 fi
 
+if [[ $# -lt 6 ]]; then
+  WORKFLOW_MODE_OVERRIDE="$(prompt_optional_value "Workflow mode override (optional: classic/agentic)" "$DEFAULT_WORKFLOW_MODE_OVERRIDE")"
+else
+  WORKFLOW_MODE_OVERRIDE="${6:-$DEFAULT_WORKFLOW_MODE_OVERRIDE}"
+fi
+if [[ -n "$WORKFLOW_MODE_OVERRIDE" ]]; then
+  WORKFLOW_MODE_OVERRIDE="$(normalize_workflow_mode "$WORKFLOW_MODE_OVERRIDE")"
+fi
+
 if [[ -z "$PROJECT_PATH" ]]; then
-  echo "用法: ./linux/quick_outline.sh <项目目录> [volumes|chapters|all] [大纲额外要求] [卷号] [provider覆盖]" >&2
+  echo "用法: ./linux/quick_outline.sh <项目目录> [volumes|chapters|all] [大纲额外要求] [卷号] [provider覆盖] [workflow mode override]" >&2
   exit 1
 fi
 
@@ -105,6 +115,11 @@ NOVEL_API_BASE_OVERRIDE="${NOVEL_API_BASE_OVERRIDE:-$DEFAULT_API_BASE_OVERRIDE}"
 NOVEL_TEMPERATURE_OVERRIDE="${NOVEL_TEMPERATURE_OVERRIDE:-$DEFAULT_TEMPERATURE_OVERRIDE}"
 NOVEL_MAX_TOKENS_OVERRIDE="${NOVEL_MAX_TOKENS_OVERRIDE:-$DEFAULT_MAX_TOKENS_OVERRIDE}"
 NOVEL_TIMEOUT_OVERRIDE="${NOVEL_TIMEOUT_OVERRIDE:-$DEFAULT_TIMEOUT_OVERRIDE}"
+if [[ -n "${NOVEL_WORKFLOW_MODE_OVERRIDE:-}" ]]; then
+  NOVEL_WORKFLOW_MODE_OVERRIDE="$(normalize_workflow_mode "$NOVEL_WORKFLOW_MODE_OVERRIDE")"
+else
+  NOVEL_WORKFLOW_MODE_OVERRIDE="$WORKFLOW_MODE_OVERRIDE"
+fi
 NOVEL_API_KEY="${NOVEL_API_KEY:-$(api_key_for_provider "$RESOLVED_PROVIDER")}"
 
 ensure_api_key_present "$RESOLVED_PROVIDER" "$NOVEL_API_KEY"
@@ -116,6 +131,7 @@ export NOVEL_API_BASE_OVERRIDE
 export NOVEL_TEMPERATURE_OVERRIDE
 export NOVEL_MAX_TOKENS_OVERRIDE
 export NOVEL_TIMEOUT_OVERRIDE
+export NOVEL_WORKFLOW_MODE_OVERRIDE
 export NOVEL_API_KEY
 
 TEMP_CONFIG="$(make_temp_config_path)"

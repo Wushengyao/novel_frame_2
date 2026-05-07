@@ -18,6 +18,7 @@ DEFAULT_PLANNING_MODE_OVERRIDE=""
 DEFAULT_CONTINUE_MODE="direct"
 DEFAULT_GUIDED_OPTION_COUNT="4"
 DEFAULT_GUIDED_FEEDBACK=""
+DEFAULT_WORKFLOW_MODE_OVERRIDE=""
 
 # Optional runtime overrides
 DEFAULT_MODEL_NAME_OVERRIDE=""
@@ -83,8 +84,17 @@ if [[ "$CONTINUE_MODE" != "direct" && "$CONTINUE_MODE" != "guided" ]]; then
   exit 1
 fi
 
+if [[ $# -lt 7 ]]; then
+  WORKFLOW_MODE_OVERRIDE="$(prompt_optional_value "Workflow mode override (optional: classic/agentic)" "$DEFAULT_WORKFLOW_MODE_OVERRIDE")"
+else
+  WORKFLOW_MODE_OVERRIDE="${7:-$DEFAULT_WORKFLOW_MODE_OVERRIDE}"
+fi
+if [[ -n "$WORKFLOW_MODE_OVERRIDE" ]]; then
+  WORKFLOW_MODE_OVERRIDE="$(normalize_workflow_mode "$WORKFLOW_MODE_OVERRIDE")"
+fi
+
 if [[ -z "$PROJECT_PATH" ]]; then
-  echo "用法: ./linux/quick_continue.sh <项目目录> [续写章节数] [用户额外要求] [provider覆盖] [planning mode override]" >&2
+  echo "用法: ./linux/quick_continue.sh <项目目录> [续写章节数] [用户额外要求] [provider覆盖] [planning mode override] [direct|guided] [workflow mode override]" >&2
   echo "也可以直接编辑脚本顶部的 Editable Parameters 区域，然后直接运行 ./linux/quick_continue.sh" >&2
   echo "示例: ./linux/quick_continue.sh ./novel_project_xxx 3 \"想先解决水源问题\"" >&2
   exit 1
@@ -137,6 +147,11 @@ if [[ -n "${NOVEL_PLANNING_MODE_OVERRIDE:-}" ]]; then
 else
   NOVEL_PLANNING_MODE_OVERRIDE="$PLANNING_MODE_OVERRIDE"
 fi
+if [[ -n "${NOVEL_WORKFLOW_MODE_OVERRIDE:-}" ]]; then
+  NOVEL_WORKFLOW_MODE_OVERRIDE="$(normalize_workflow_mode "$NOVEL_WORKFLOW_MODE_OVERRIDE")"
+else
+  NOVEL_WORKFLOW_MODE_OVERRIDE="$WORKFLOW_MODE_OVERRIDE"
+fi
 NOVEL_API_KEY="${NOVEL_API_KEY:-$(api_key_for_provider "$RESOLVED_PROVIDER")}"
 SAVED_QUALITY_PROVIDER="$("$PYTHON_EXE" - "$PROJECT_PATH" <<'PY'
 import json
@@ -171,6 +186,7 @@ export NOVEL_TEMPERATURE_OVERRIDE
 export NOVEL_MAX_TOKENS_OVERRIDE
 export NOVEL_TIMEOUT_OVERRIDE
 export NOVEL_PLANNING_MODE_OVERRIDE
+export NOVEL_WORKFLOW_MODE_OVERRIDE
 export NOVEL_API_KEY
 export NOVEL_QUALITY_PROVIDER
 export NOVEL_QUALITY_MODEL_NAME

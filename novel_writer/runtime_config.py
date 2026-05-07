@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from project_manager import DEFAULT_PLANNING_MODE, load_json, normalize_planning_mode
+from workflow_modes import DEFAULT_WORKFLOW_MODE, normalize_workflow_mode
 
 
 SUPPORTED_PROVIDERS = {
@@ -101,6 +102,7 @@ RUNTIME_OVERRIDE_KEYS = (
     "max_tokens",
     "timeout",
     "planning_mode",
+    "workflow_mode",
     "writing_quality_mode",
     "review_mode",
     "log_llm_payload",
@@ -492,6 +494,9 @@ def sanitize_runtime_overrides(overrides: dict | None) -> dict[str, object]:
         if key == "planning_mode":
             sanitized[key] = normalize_planning_mode(value, default=DEFAULT_PLANNING_MODE)
             continue
+        if key == "workflow_mode":
+            sanitized[key] = normalize_workflow_mode(value)
+            continue
         if key == "writing_quality_mode":
             sanitized[key] = normalize_writing_quality_mode(value)
             continue
@@ -576,6 +581,7 @@ def _normalized_llm_config(raw: dict) -> dict:
         "max_tokens": raw.get("max_tokens", 4000),
         "timeout": resolve_timeout_for_provider(provider, raw.get("timeout", default_timeout_for_provider(provider))),
         "planning_mode": normalize_planning_mode(raw.get("planning_mode"), default=DEFAULT_PLANNING_MODE),
+        "workflow_mode": normalize_workflow_mode(raw.get("workflow_mode")),
         "writing_quality_mode": normalize_writing_quality_mode(raw.get("writing_quality_mode")),
         "review_mode": normalize_review_mode(raw.get("review_mode")),
         "log_llm_payload": _coerce_bool(raw.get("log_llm_payload")),
@@ -604,6 +610,11 @@ def load_runtime_config(project_path: str) -> dict:
         **_normalized_llm_config(project.get("llm_config") or {}),
         "project_path": str(Path(project_path).resolve()),
         "planning_mode": normalize_planning_mode(project.get("planning_mode"), default=DEFAULT_PLANNING_MODE),
+        "workflow_mode": normalize_workflow_mode(
+            project.get("workflow_mode")
+            or (project.get("llm_config") or {}).get("workflow_mode")
+            or DEFAULT_WORKFLOW_MODE
+        ),
     }
 
 
@@ -647,6 +658,12 @@ def build_runtime_config(project_path: str | Path, overrides: dict[str, object],
         "planning_mode": normalize_planning_mode(
             runtime_overrides.get("planning_mode") or project.get("planning_mode"),
             default=DEFAULT_PLANNING_MODE,
+        ),
+        "workflow_mode": normalize_workflow_mode(
+            runtime_overrides.get("workflow_mode")
+            or project.get("workflow_mode")
+            or saved.get("workflow_mode")
+            or DEFAULT_WORKFLOW_MODE
         ),
         "writing_quality_mode": normalize_writing_quality_mode(
             runtime_overrides.get("writing_quality_mode") or saved.get("writing_quality_mode")
